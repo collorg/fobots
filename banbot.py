@@ -42,11 +42,17 @@ from functools import lru_cache
 log = logging.getLogger("banbot")
 
 LINE_RE = re.compile(r'^(\S+) \S+ \S+ \[([^\]]+)\]')
+# Fin d'une ligne « combined » : "METHODE /chemin PROTO" statut taille "referer" "user-agent"
+REQ_RE = re.compile(r'"[A-Z]+ (\S+)[^"]*" \d+ \S+ "[^"]*" "([^"]*)"\s*$')
 RDAP_URL = "https://rdap.org/ip/{}"  # redirige vers le RIR compétent
 SETS = {4: "banned4", 6: "banned6"}
 # Une réponse RDAP plus large que ça est rejetée (garde-fou contre 0.0.0.0/0).
 MIN_PREFIX = {4: 8, 6: 16}
 RECENT_BAN_SECS = 60  # pas de nouvelle tentative pour une plage juste bannie
+MAX_WATCHED = 5000    # IP « surveillées » gardées en mémoire (opt-in --watch-*)
+WATCH_RETENTION = 3600  # secondes (temps du log) pendant lesquelles on s'en souvient
+WATCH_FILE_KEEP = 30 * 86400  # le fichier des constats est élagué au-delà (au démarrage)
+WATCH_EVENT_IPS = 200         # IP enregistrées au plus par ban
 
 NFT_SETUP = """\
 add table inet banbot
@@ -409,6 +415,49 @@ def whitelist_add(nft, net, ban_seconds):
     return deletes, adds
 
 
+# --- constats « surveillés » (fichier JSON lignes) ---------------------------
+
+def append_event(path, event):
+    try:
+        with open(path, "a") as f:
+            f.write(json.dumps(event, ensure_ascii=False) + "\n")
+    except OSError as e:
+        log.warning("écriture de %s impossible : %s", path, e)
+
+
+def read_events(path, since):
+    """Constats plus récents que `since` (epoch) ; les lignes illisibles sont ignorées."""
+    out = []
+    try:
+        f = open(path)
+    except OSError:
+        return out
+    with f:
+        for line in f:
+            try:
+                ev = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(ev, dict) and ev.get("t", 0) >= since:
+                out.append(ev)
+    return out
+
+
+def trim_events(path, keep=WATCH_FILE_KEEP):
+    """Retire les constats trop anciens (écriture atomique)."""
+    if not os.path.exists(path):
+        return
+    events = read_events(path, time.time() - keep)
+    tmp = path + ".tmp"
+    try:
+        with open(tmp, "w") as f:
+            for ev in events:
+                f.write(json.dumps(ev, ensure_ascii=False) + "\n")
+        os.replace(tmp, path)
+    except OSError as e:
+        log.warning("élagage de %s impossible : %s", path, e)
+
+
 # --- charge du serveur --------------------------------------------------------
 
 LOAD_DEFAULTS = {"psi": (20.0, 50.0), "loadavg": (1.0, 2.0)}  # (tendu, critique)
@@ -495,7 +544,8 @@ class NoLoad:
 
 class Detector:
     def __init__(self, threshold, prefix_threshold, sustain, window, store, banner, rdap,
-                 load=None, min_threshold=1.0, min_ban_seconds=60):
+                 load=None, min_threshold=1.0, min_ban_seconds=60, watch=None,
+                 watch_file=None):
         self.base_threshold, self.base_prefix_threshold = threshold, prefix_threshold
         self.load, self.min_threshold, self.min_ban = load or NoLoad(), min_threshold, min_ban_seconds
         self.sustain, self.window = sustain, window
@@ -507,6 +557,53 @@ class Detector:
         self.memo, self.memo_version = {}, store.version
         self.latest = self.last_purge = 0
         self.skipped = 0
+        self.watch = watch  # (regex agent ou None, regex chemin ou None) ; None = désactivé
+        self.watched = {}   # ip -> [requêtes, dernière seconde vue, chemin exemple]
+        self.watch_file = watch_file  # constats écrits ici (relus par `banbot.py watched`)
+
+    def watch_match(self, line):
+        """Chemin de la requête si la ligne correspond aux motifs surveillés, sinon None.
+        Tous les motifs fournis doivent correspondre. Les lignes sont comptées comme les
+        autres : on ne fait que garder une trace."""
+        m = REQ_RE.search(line)
+        if not m:
+            return None
+        agent_re, path_re = self.watch
+        if (agent_re is None or agent_re.search(m.group(2))) and \
+                (path_re is None or path_re.search(m.group(1))):
+            return m.group(1)
+        return None
+
+    def record_watched(self, ip, sec, path):
+        e = self.watched.get(ip)
+        if e:
+            e[0] += 1
+            e[1] = sec
+        elif len(self.watched) < MAX_WATCHED:
+            self.watched[ip] = [1, sec, path[:80]]
+
+    def report_watched(self, key, seconds):
+        """Journalise les IP surveillées contenues dans la plage qui vient d'être bannie."""
+        ver, start, end = key
+        hit = []
+        for ip, (n, _, path) in self.watched.items():
+            a = ipaddress.ip_address(ip)
+            if a.version == ver and start <= int(a) <= end:
+                hit.append((n, ip, path))
+        if not hit:
+            return
+        hit.sort(reverse=True)
+        if self.watch_file:
+            append_event(self.watch_file, {
+                "t": int(time.time()), "range": fmt_range(key), "seconds": seconds,
+                "ips": [[ip, n, path] for n, ip, path in hit[:WATCH_EVENT_IPS]]})
+        top = hit[:10]
+        log.warning("WATCH %s banni : %d IP surveillée(s), %d requête(s) : %s%s ; "
+                    "pour les protéger : banbot.py whitelist add %s",
+                    fmt_range(key), len(hit), sum(n for n, _, _ in hit),
+                    ", ".join(f"{ip} ({n} req, {path})" for n, ip, path in top),
+                    f" (+{len(hit) - len(top)} autres)" if len(hit) > len(top) else "",
+                    " ".join(str(ipaddress.ip_network(ip)) for _, ip, _ in top))
 
     @property
     def threshold(self):
@@ -529,14 +626,15 @@ class Detector:
         if not m:
             self.skipped += 1
             return
+        tag = self.watch_match(line) if self.watch else None
         try:
             sec = parse_ts(m.group(2))
         except ValueError:
             self.skipped += 1
             return
-        self.feed(m.group(1), sec)
+        self.feed(m.group(1), sec, tag)
 
-    def feed(self, ip, sec):
+    def feed(self, ip, sec, tag=None):
         key = self.memo.get(ip)
         if self.memo_version != self.store.version or len(self.memo) > 200_000:
             self.memo.clear()
@@ -556,6 +654,8 @@ class Detector:
             self.latest = sec
             if sec - self.last_purge >= 10:
                 self.purge()
+        if tag:
+            self.record_watched(ip, sec, tag)
         c = self.counts[key]
         n = c[sec] = c.get(sec, 0) + 1
         self.hits[key] += 1
@@ -578,7 +678,9 @@ class Detector:
         if self.load.level:
             reason += f", niveau de charge {LEVELS[self.load.level]}"
         try:
-            self.banner.ban(key, reason, self.ban_seconds())
+            seconds = self.ban_seconds()
+            if self.banner.ban(key, reason, seconds) and self.watched:
+                self.report_watched(key, seconds)
         except NftError as e:
             log.error("ban de %s impossible : %s", fmt_range(key), e)
 
@@ -596,10 +698,13 @@ class Detector:
             if not self.over[key]:
                 del self.over[key]
         self.recent_ban = {k: s for k, s in self.recent_ban.items() if s >= cutoff}
+        old = self.latest - WATCH_RETENTION
+        for ip in [ip for ip, e in self.watched.items() if e[1] < old]:
+            del self.watched[ip]
 
     def dump(self, top=30):
-        log.info("--- %d plages suivies, %d lignes ignorées, %s ---",
-                 len(self.hits), self.skipped, self.load.describe())
+        log.info("--- %d plages suivies, %d lignes illisibles, %d IP surveillées, %s ---",
+                 len(self.hits), self.skipped, len(self.watched), self.load.describe())
         for key, n in self.hits.most_common(top):
             label = fmt_range(key) if isinstance(key, tuple) else f"(non résolu) {key}"
             log.info("%10d  %s", n, label)
@@ -674,6 +779,10 @@ def paths(args):
             args.whitelist or os.path.join(base, "whitelist.txt"))
 
 
+def watch_file_path(args):
+    return args.watch_file or os.path.join(args.dir, "watched.jsonl")
+
+
 def cmd_run(args):
     cache, wl_path = paths(args)
     store, wl = RangeStore(cache), Whitelist(wl_path)
@@ -708,9 +817,22 @@ def cmd_run(args):
         load.start()
         log.info("surveillance de la charge : %s, paliers %s, retour après %d s",
                  signal_name, load.thresholds, args.load_recover)
+    watch = None
+    if args.watch_agent or args.watch_path:
+        try:
+            watch = (re.compile(args.watch_agent) if args.watch_agent else None,
+                     re.compile(args.watch_path) if args.watch_path else None)
+        except re.error as e:
+            log.error("expression régulière invalide : %s", e)
+            return 1
+        log.info("surveillance des requêtes : agent=%r chemin=%r (comptées normalement, "
+                 "journalisées si leur plage est bannie)", args.watch_agent, args.watch_path)
+    watch_file = watch_file_path(args) if watch else None
+    if watch_file:
+        trim_events(watch_file)
     det = Detector(args.threshold, args.prefix_threshold or args.threshold, args.sustain,
                    args.window, store, Banner(nft, wl, args.ban_seconds), rdap,
-                   load, args.min_threshold, args.min_ban_seconds)
+                   load, args.min_threshold, args.min_ban_seconds, watch, watch_file)
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     signal.signal(signal.SIGUSR1, lambda *_: det.dump())
     if args.config:
@@ -743,6 +865,60 @@ def cmd_bans(args):
     for ver in (4, 6):
         for n, exp in sorted(nft.elements(ver), key=lambda e: e[0].network_address):
             print(f"{str(n):<24} {'' if exp is None else f'{exp} s restantes'}")
+    return 0
+
+
+def cmd_watched(args):
+    """IP surveillées prises dans un ban (historique + état actuel), pour repérer les faux positifs."""
+    path = watch_file_path(args)
+    events = read_events(path, time.time() - args.since)
+    if not events:
+        print(f"aucun constat dans {path} sur cette période (watch_agent / watch_path "
+              "activés dans la conf du démon ?)")
+        return 0
+    active, known = [], False
+    if not args.dry_run:
+        try:
+            nft = Nft(args.nft_bin)
+            active = [(n, e) for ver in (4, 6) for n, e in nft.elements(ver)]
+            known = True
+        except NftError as e:
+            print(f"état des bans indisponible ({e}) : colonne ÉTAT inconnue", file=sys.stderr)
+    agg = {}
+    for ev in events:
+        for ip, n, rpath in ev["ips"]:
+            a = agg.setdefault(ip, {"bans": 0, "req": 0, "t": 0, "range": "", "path": ""})
+            a["bans"] += 1
+            a["req"] += n
+            if ev["t"] >= a["t"]:
+                a.update(t=ev["t"], range=ev["range"], path=rpath)
+    rows = []
+    for ip, a in agg.items():
+        state = "?"
+        if known:
+            addr = ipaddress.ip_address(ip)
+            left = [e for n, e in active if n.version == addr.version and addr in n]
+            state = f"actif ({max(e or 0 for e in left)} s)" if left else "expiré"
+        a["state"] = state
+        rows.append((ip, a))
+    if args.active:
+        rows = [r for r in rows if r[1]["state"].startswith("actif")]
+    rows.sort(key=lambda r: (not r[1]["state"].startswith("actif"), -r[1]["bans"], -r[1]["req"]))
+    if not rows:
+        print("aucune IP surveillée dans un ban actif")
+        return 0
+    cmd = "banbot.py whitelist add " + " ".join(str(ipaddress.ip_network(ip)) for ip, _ in rows)
+    if args.config:
+        cmd += f" -f {args.config}"
+    if args.cmd:
+        print(cmd)
+        return 0
+    print(f"{'IP':<40} {'BANS':>4} {'REQ':>6}  {'DERNIER BAN':<16} {'PLAGE':<20} {'ÉTAT':<14} ROUTE")
+    for ip, a in rows:
+        when = datetime.fromtimestamp(a["t"]).strftime("%Y-%m-%d %H:%M")
+        print(f"{ip:<40} {a['bans']:>4} {a['req']:>6}  {when:<16} {a['range']:<20} "
+              f"{a['state']:<14} {a['path']}")
+    print(f"\n{len(rows)} IP sur {args.since / 86400:g} j. Pour toutes les protéger :\n  {cmd}")
     return 0
 
 
@@ -783,9 +959,11 @@ CONF_KEYS = {  # clé du fichier -> (destination argparse, conversion)
     "load_critical": ("load_critical", float), "load_recover": ("load_recover", parse_duration),
     "tense_factor": ("tense_factor", float), "critical_factor": ("critical_factor", float),
     "min_threshold": ("min_threshold", float), "min_ban_time": ("min_ban_seconds", parse_duration),
+    "watch_agent": ("watch_agent", str), "watch_path": ("watch_path", str),
+    "watch_file": ("watch_file", str),
     "from_start": ("from_start", lambda v: v.lower() in ("1", "true", "yes", "oui", "on")),
 }
-PATH_KEYS = {"dir", "cache", "whitelist", "log"}
+PATH_KEYS = {"dir", "cache", "whitelist", "log", "watch_file"}
 CONF_SEARCH = ("banbot.conf", "/etc/banbot/banbot.conf")
 
 
@@ -834,6 +1012,8 @@ def main(argv=None):
                         help="dossier de ip_ranges.json et whitelist.txt (défaut: .)")
     common.add_argument("-c", "--cache", help="fichier des plages RDAP (défaut: DIR/ip_ranges.json)")
     common.add_argument("-w", "--whitelist", help="liste blanche (défaut: DIR/whitelist.txt)")
+    common.add_argument("--watch-file",
+                        help="fichier des constats surveillés (défaut: DIR/watched.jsonl)")
     common.add_argument("--ban-time", dest="ban_seconds", type=parse_duration, default=3600,
                         help="durée d'un ban : 30m, 1h, 1d… (défaut: 1h)")
     common.add_argument("--nft-bin", default="nft", help="binaire nft (défaut: nft)")
@@ -877,6 +1057,12 @@ def main(argv=None):
                    help="plancher du seuil effectif en req/s (défaut: 1)")
     r.add_argument("--min-ban-time", dest="min_ban_seconds", type=parse_duration, default=60,
                    help="plancher de la durée de ban effective (défaut: 1m)")
+    r.add_argument("--watch-agent", metavar="REGEX",
+                   help="opt-in : journalise (WATCH) les IP dont l'user-agent correspond quand "
+                        "leur plage est bannie (ex. ^gitlab-runner) ; ne change pas le comptage")
+    r.add_argument("--watch-path", metavar="REGEX",
+                   help="restreint --watch-agent aux chemins correspondants (ex. ^/api/v4/) ; "
+                        "si les deux sont donnés, les deux doivent correspondre")
     r.add_argument("--rdap-per-hour", type=int, default=100,
                    help="budget de requêtes RDAP par heure (défaut: 100)")
     r.add_argument("--delay", type=float, default=2.0,
@@ -886,6 +1072,15 @@ def main(argv=None):
     sub.add_parser("setup", parents=[common],
                    help="crée la table nft si absente").set_defaults(fn=cmd_setup)
     sub.add_parser("bans", parents=[common], help="liste les bans actifs").set_defaults(fn=cmd_bans)
+
+    wd = sub.add_parser("watched", parents=[common],
+                        help="IP surveillées (watch_*) prises dans un ban : faux positifs possibles")
+    wd.add_argument("--since", type=parse_duration, default=7 * 86400,
+                    help="période à considérer : 12h, 3d… (défaut: 7d)")
+    wd.add_argument("--active", action="store_true", help="seulement celles dont le ban est actif")
+    wd.add_argument("--cmd", action="store_true",
+                    help="n'affiche que la commande `whitelist add` correspondante")
+    wd.set_defaults(fn=cmd_watched)
 
     w = sub.add_parser("whitelist", parents=[common], help="gère la liste blanche")
     w.add_argument("action", choices=["add", "list"])

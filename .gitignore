@@ -23,3 +23,5 @@ banbot.conf
 ip_ranges.json
 ip_ranges.json.tmp
 whitelist.txt
+watched.jsonl
+watched.jsonl.tmp

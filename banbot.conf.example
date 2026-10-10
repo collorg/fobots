@@ -26,6 +26,15 @@ ban_time = 1h        # durée d'un ban : 30m, 1h, 1d…
 # min_threshold = 1    # plancher du seuil effectif (req/s)
 # min_ban_time = 1m    # plancher de la durée de ban effective
 
+# Surveillance opt-in : ces requêtes sont comptées comme les autres (aucune exemption), mais
+# quand leur plage est bannie, le journal indique (WATCH) quelles IP correspondaient et la
+# commande `whitelist add` pour les protéger. Expressions régulières ; si les deux sont
+# données, les deux doivent correspondre.
+# watch_agent = ^gitlab-runner
+# watch_path = ^/api/v4/
+# watch_file = watched.jsonl   # constats enregistrés (défaut: <dir>/watched.jsonl), relus par
+#                              `banbot.py watched` ; élagués au-delà de 30 jours au démarrage
+
 rdap_per_hour = 100  # budget de requêtes RDAP
 delay = 2            # secondes minimum entre deux requêtes RDAP
 # nft_bin = nft

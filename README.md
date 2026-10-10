@@ -67,6 +67,46 @@ avec `--dry-run -v` et regarde les lignes `charge : psi=…` (toutes les 5 minut
 à chaque changement de niveau) pour choisir `load_tense` / `load_critical`.
 Les faux positifs se corrigent avec `whitelist add`.
 
+## Repérer des IP légitimes prises dans un ban (gitlab-runner…)
+
+Opt-in : `watch_agent` (regex sur l'user-agent) et `watch_path` (regex sur la route) ;
+si les deux sont donnés, les deux doivent correspondre. Exemple pour les runners :
+
+```
+watch_agent = ^gitlab-runner
+watch_path  = ^/api/v4/
+```
+Ces requêtes sont **comptées comme les autres** : aucune exemption, donc rien à
+usurper. Quand une plage est bannie, le démon note les IP qui correspondaient, dans
+le journal (ligne `WATCH`) **et** dans `<dir>/watched.jsonl` (un constat par ban,
+élagué au-delà de 30 jours au démarrage). La commande relit ce fichier, sans
+journalctl, et l'associe à l'état actuel des bans dans nft :
+
+```
+banbot.py watched                 # 7 derniers jours (--since 12h, 3d…)
+banbot.py watched --active        # seulement celles dont le ban est actif
+banbot.py watched --cmd           # n'affiche que la commande whitelist add
+```
+```
+IP          BANS  REQ  DERNIER BAN       PLAGE        ÉTAT           ROUTE
+40.2.2.2       1    2  2026-10-10 13:40  40.0.0.0/12  actif (1234 s) /api/v4/jobs/7/artifacts
+20.1.1.1       2    6  2026-10-10 13:40  20.0.0.0/12  expiré         /api/v4/jobs/request
+
+Pour toutes les protéger :
+  banbot.py whitelist add 40.2.2.2/32 20.1.1.1/32
+```
+Les IP sont agrégées sur la période : *BANS* = nombre de bans où elles ont été prises
+(une IP prise plusieurs fois est un suspect sérieux). Les bans expirant vite, c'est
+l'historique du fichier qui permet de les voir au retour d'une absence. L'état
+« actif/expiré » demande l'accès à nft (sinon `?`). Rien n'est ajouté automatiquement
+à la liste blanche.
+
+Limites : seules les requêtes vues dans l'heure avant le ban sont notées (5 000 IP
+gardées au plus, 200 par constat) ; les IP privées ne sont jamais comptées ; les lignes
+dont l'agent ne se lit pas (autre format de log) ne sont pas surveillées. Les
+`git clone` des jobs portent en général l'agent `git/…` : pour les voir,
+`watch_agent = ^(gitlab-runner|git/)`.
+
 ## Configuration
 
 `banbot.conf` (section `[banbot]`), cherché dans le dossier courant puis dans
@@ -102,6 +142,7 @@ banbot.py setup                      crée la table, les sets et les règles nft
 banbot.py bans                       bans actifs et temps restant
 banbot.py whitelist add CIDR…        liste blanche + retrait des bans concernés
 banbot.py whitelist list
+banbot.py watched [--active] [--cmd]  IP surveillées (watch_*) prises dans un ban
 ```
 Options communes : `-f CONF`, `--dir`, `-c`, `-w`, `--ban-time`, `--nft-bin`,
 `--dry-run`, `-v`. `--dry-run` n'appelle pas nft : il affiche les commandes et
@@ -173,3 +214,4 @@ les plages les plus actives depuis le démarrage ; `SIGTERM`/`SIGINT` arrêtent.
 | `banbot.service.example` | unité systemd d'exemple |
 | `ip_ranges.json` | cache des plages RDAP (créé dans `dir`) |
 | `whitelist.txt` | plages à ne jamais bannir, un CIDR par ligne (créé dans `dir`) |
+| `watched.jsonl` | constats « IP surveillée prise dans un ban » (créé dans `dir` si `watch_*`) |
