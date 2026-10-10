@@ -1,0 +1,32 @@
+# banbot.conf : cherché dans le dossier courant puis dans /etc/banbot/ (ou -f FICHIER).
+# Les chemins relatifs sont relatifs à ce fichier. La ligne de commande l'emporte.
+[banbot]
+# Log à suivre en continu (rotation gérée). Sans cette option : stdin.
+log = /var/log/gitlab/nginx/gitlab_access.log
+# Dossier de travail, et fichiers qui en dépendent par défaut.
+dir = /var/lib/banbot
+# cache = ip_ranges.json        # plages RDAP trouvées (défaut: <dir>/ip_ranges.json)
+# whitelist = whitelist.txt     # plages à ne jamais bannir (défaut: <dir>/whitelist.txt)
+
+threshold = 5        # req/s d'une plage au-delà desquelles on bannit
+# prefix_threshold = 5 # req/s d'un /16 non résolu qui déclenchent une requête RDAP
+sustain = 1          # secondes au-dessus du seuil exigées
+window = 60          # fenêtre (s) pour sustain
+ban_time = 1h        # durée d'un ban : 30m, 1h, 1d…
+
+# Durcissement selon la charge du serveur (désactivé par défaut).
+# Au niveau « tendu » / « critique », le seuil ET la durée de ban sont multipliés par
+# le facteur : on bannit plus sévèrement mais plus brièvement, et on rejuge plus vite.
+# load_signal = none   # none | psi (réactif, /proc/pressure) | loadavg (charge / cœurs)
+# load_tense = 20      # valeur du signal pour le niveau tendu (psi : % ; loadavg : par cœur)
+# load_critical = 50   # idem pour critique (défauts loadavg : 1.0 et 2.0)
+# load_recover = 5m    # durée sous le palier avant de redescendre d'un niveau
+# tense_factor = 0.5
+# critical_factor = 0.25
+# min_threshold = 1    # plancher du seuil effectif (req/s)
+# min_ban_time = 1m    # plancher de la durée de ban effective
+
+rdap_per_hour = 100  # budget de requêtes RDAP
+delay = 2            # secondes minimum entre deux requêtes RDAP
+# nft_bin = nft
+# from_start = no      # lire d'abord le contenu existant du log
