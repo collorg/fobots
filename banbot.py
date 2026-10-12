@@ -48,6 +48,8 @@ RDAP_URL = "https://rdap.org/ip/{}"  # redirige vers le RIR compétent
 SETS = {4: "banned4", 6: "banned6"}
 # Une réponse RDAP plus large que ça est rejetée (garde-fou contre 0.0.0.0/0).
 MIN_PREFIX = {4: 8, 6: 16}
+CONF_DIR = "/etc/banbot"      # configuration et liste blanche (décidées par l'administrateur)
+STATE_DIR = "/var/lib/banbot"  # cache RDAP et constats (écrits par le démon)
 RECENT_BAN_SECS = 60  # pas de nouvelle tentative pour une plage juste bannie
 MAX_WATCHED = 5000    # IP « surveillées » gardées en mémoire (opt-in --watch-*)
 WATCH_RETENTION = 3600  # secondes (temps du log) pendant lesquelles on s'en souvient
@@ -281,6 +283,9 @@ class Nft:
         try:
             return subprocess.run([self.binary, *args], input=stdin, capture_output=True,
                                   text=True, timeout=15)
+        except FileNotFoundError:
+            raise NftError(f"commande {self.binary!r} introuvable : installer nftables "
+                           "(ex. apt install nftables) ou donner --nft-bin")
         except (OSError, subprocess.TimeoutExpired) as e:
             raise NftError(f"{self.binary} : {e}")
 
@@ -349,7 +354,8 @@ class Whitelist:
                     except ValueError:
                         log.warning("liste blanche : ligne ignorée %r", line)
         self.nets = nets
-        log.info("liste blanche : %d plage(s)", len(nets))
+        log.info("liste blanche : %d plage(s) dans %s%s", len(nets), os.path.abspath(self.path),
+                 "" if mtime is not None else " (fichier absent)")
 
     @staticmethod
     def append(path, nets):
@@ -774,9 +780,20 @@ def log_lines(args):
 # --- commandes ---------------------------------------------------------------
 
 def paths(args):
-    base = args.dir
-    return (args.cache or os.path.join(base, "ip_ranges.json"),
-            args.whitelist or os.path.join(base, "whitelist.txt"))
+    """(cache RDAP, liste blanche). La liste blanche se trouve à côté de la conf utilisée,
+    sinon dans CONF_DIR : jamais relative au dossier courant."""
+    wl_base = os.path.dirname(os.path.abspath(args.config)) if args.config else CONF_DIR
+    return (args.cache or os.path.join(args.dir, "ip_ranges.json"),
+            args.whitelist or os.path.join(wl_base, "whitelist.txt"))
+
+
+def ensure_dir(path):
+    """Crée le dossier (0750) s'il manque ; arrêt avec un message clair sinon."""
+    try:
+        os.makedirs(path, mode=0o750, exist_ok=True)
+    except OSError as e:
+        sys.exit(f"impossible de créer {path} : {e} (créer le dossier avec les bons droits, "
+                 "ou donner --dir)")
 
 
 def watch_file_path(args):
@@ -785,6 +802,8 @@ def watch_file_path(args):
 
 def cmd_run(args):
     cache, wl_path = paths(args)
+    ensure_dir(os.path.dirname(os.path.abspath(cache)))
+    ensure_dir(os.path.dirname(os.path.abspath(watch_file_path(args))))
     store, wl = RangeStore(cache), Whitelist(wl_path)
     nft = Nft(args.nft_bin, args.dry_run)
     try:
@@ -837,8 +856,8 @@ def cmd_run(args):
     signal.signal(signal.SIGUSR1, lambda *_: det.dump())
     if args.config:
         log.info("configuration : %s", args.config)
-    log.info("démon prêt : seuil %s req/s, ban %d s, %d plage(s) en cache",
-             args.threshold, args.ban_seconds, len(store.ranges))
+    log.info("démon prêt : seuil %s req/s, ban %d s, %d plage(s) en cache dans %s",
+             args.threshold, args.ban_seconds, len(store.ranges), os.path.abspath(cache))
     try:
         for line in log_lines(args):
             det.feed_line(line)
@@ -935,7 +954,13 @@ def cmd_whitelist(args):
         except ValueError:
             print(f"plage invalide : {x}", file=sys.stderr)
             return 2
-    Whitelist.append(wl_path, nets)  # d'abord : le démon cesse de bannir
+    try:
+        os.makedirs(os.path.dirname(os.path.abspath(wl_path)), exist_ok=True)
+        Whitelist.append(wl_path, nets)  # d'abord : le démon cesse de bannir
+    except OSError as e:
+        print(f"écriture de {wl_path} impossible : {e} (droits ? lancer avec sudo)",
+              file=sys.stderr)
+        return 1
     nft = Nft(args.nft_bin, args.dry_run)
     for net in nets:
         try:
@@ -964,7 +989,8 @@ CONF_KEYS = {  # clé du fichier -> (destination argparse, conversion)
     "from_start": ("from_start", lambda v: v.lower() in ("1", "true", "yes", "oui", "on")),
 }
 PATH_KEYS = {"dir", "cache", "whitelist", "log", "watch_file"}
-CONF_SEARCH = ("banbot.conf", "/etc/banbot/banbot.conf")
+# /etc d'abord : le résultat ne dépend pas du dossier courant (./banbot.conf sert au développement)
+CONF_SEARCH = (os.path.join(CONF_DIR, "banbot.conf"), "banbot.conf")
 
 
 def load_config(path):
@@ -1007,11 +1033,12 @@ def main(argv=None):
 
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("-f", "--config", help="fichier de configuration "
-                        "(défaut: ./banbot.conf puis /etc/banbot/banbot.conf)")
-    common.add_argument("--dir", default=".",
-                        help="dossier de ip_ranges.json et whitelist.txt (défaut: .)")
+                        "(défaut: /etc/banbot/banbot.conf, puis ./banbot.conf)")
+    common.add_argument("--dir", default=STATE_DIR,
+                        help=f"dossier d'état : ip_ranges.json, watched.jsonl (défaut: {STATE_DIR})")
     common.add_argument("-c", "--cache", help="fichier des plages RDAP (défaut: DIR/ip_ranges.json)")
-    common.add_argument("-w", "--whitelist", help="liste blanche (défaut: DIR/whitelist.txt)")
+    common.add_argument("-w", "--whitelist", help="liste blanche (défaut: whitelist.txt à côté de la conf, "
+                        f"sinon {CONF_DIR}/whitelist.txt)")
     common.add_argument("--watch-file",
                         help="fichier des constats surveillés (défaut: DIR/watched.jsonl)")
     common.add_argument("--ban-time", dest="ban_seconds", type=parse_duration, default=3600,
@@ -1098,7 +1125,11 @@ def main(argv=None):
         ap.error("whitelist add : indiquer au moins une plage")
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="%(asctime)s %(levelname)s %(message)s", stream=sys.stderr)
-    return args.fn(args)
+    try:
+        return args.fn(args)
+    except NftError as e:  # nft absent, refus du noyau, droits insuffisants…
+        log.error("nft : %s", e)
+        return 1
 
 
 if __name__ == "__main__":

@@ -5,11 +5,16 @@ scrapers trop agressifs. Il suit l'access log, repère les **plages d'IP** dont 
 débit dépasse un seuil, et les ajoute à un set **nftables** avec expiration : le
 trafic est rejeté par le pare-feu avant d'atteindre nginx et GitLab.
 
-Python 3 standard (aucune dépendance), nftables, Linux.
+Python 3.7+ standard (aucune dépendance), nftables, Linux. Sur Ubuntu 20.04 (Python 3.8,
+noyau 5.4) : `apt install nftables` (version 0.9.3).
 
-> État : testé avec un faux `nft` (commandes, conflits, liste blanche, suivi du
-> log, rotation) mais **pas encore sur un vrai nftables, ni sous systemd, ni sur
-> du trafic réel**. Commencer par `--dry-run`.
+> État : le bannissement a été validé en production sur Ubuntu 20.04 (Python 3.8, noyau
+> 5.4, nftables 0.9.3) : charge de plus de 35 ramenée à 0,2. Les autres fonctions
+> (unité systemd d'exemple, durcissement selon la charge, IPv6, surveillance
+> `watch_*`) n'ont été testées qu'avec un faux `nft`. Observé avec nftables 0.9.3 :
+> `bans` n'affiche pas le temps restant (la sortie JSON de nft ne semble pas le fournir ;
+> à confirmer avec `nft list set inet banbot banned4`).
+> Commencer par `--dry-run`.
 
 ## Fonctionnement
 
@@ -107,18 +112,36 @@ dont l'agent ne se lit pas (autre format de log) ne sont pas surveillées. Les
 `git clone` des jobs portent en général l'agent `git/…` : pour les voir,
 `watch_agent = ^(gitlab-runner|git/)`.
 
+## Emplacements des fichiers
+
+Les chemins par défaut sont absolus : le résultat ne dépend jamais du dossier d'où l'on
+lance une commande, et le démon, `whitelist`, `bans` et `watched` voient les mêmes fichiers.
+
+| Quoi | Où | Pourquoi |
+|---|---|---|
+| Configuration, liste blanche | `/etc/banbot/` | décidées par l'administrateur ; le démon ne fait que les lire |
+| Cache RDAP, constats surveillés | `/var/lib/banbot/` | état écrit par le démon (créé s'il manque, mode 0750) |
+| Journaux | journald (`journalctl -u banbot`) | aucun fichier |
+| Programme | `/opt/banbot/` ou `/usr/local/sbin/` | installation locale |
+
+**Droits :** le démon peut tourner sous un utilisateur dédié avec la seule capacité
+`CAP_NET_ADMIN` (voir `banbot.service.example`). Les commandes d'administration
+(`setup`, `bans`, `watched`, `whitelist add`) doivent s'exécuter **en root (`sudo`)** :
+elles lisent ou modifient nft, et `whitelist add` écrit dans `/etc/banbot/`.
+
 ## Configuration
 
-`banbot.conf` (section `[banbot]`), cherché dans le dossier courant puis dans
-`/etc/banbot/`, ou donné par `-f`. Les chemins relatifs sont relatifs au fichier
-de conf. **La ligne de commande l'emporte sur la conf.** Voir
-`banbot.conf.example` pour toutes les clés :
+`banbot.conf` (section `[banbot]`), cherché d'abord dans `/etc/banbot/`, puis dans le
+dossier courant (pratique pour le développement), ou donné par `-f`. Les chemins
+relatifs y sont relatifs au fichier de conf. **La ligne de commande l'emporte sur la
+conf.** Voir `banbot.conf.example` pour toutes les clés :
 
 | Clé | Défaut | Rôle |
 |---|---|---|
 | `log` | stdin | log suivi en continu (rotation gérée) |
-| `dir` | `.` | dossier de `ip_ranges.json` et `whitelist.txt` |
-| `cache`, `whitelist` | dans `dir` | chemins explicites |
+| `dir` | `/var/lib/banbot` | dossier d'état : `ip_ranges.json`, `watched.jsonl` (créé s'il manque) |
+| `cache` | `<dir>/ip_ranges.json` | cache des plages RDAP |
+| `whitelist` | `whitelist.txt` à côté de la conf utilisée, sinon `/etc/banbot/` | plages à ne jamais bannir |
 | `threshold` | 5 | req/s d'une plage au-delà desquelles on bannit |
 | `prefix_threshold` | = `threshold` | req/s d'un `/16` non résolu qui autorisent RDAP |
 | `sustain`, `window` | 1, 60 | secondes au-dessus du seuil exigées, dans la fenêtre |
@@ -212,6 +235,7 @@ les plages les plus actives depuis le démarrage ; `SIGTERM`/`SIGINT` arrêtent.
 | `banbot.py` | le démon et ses commandes |
 | `banbot.conf.example` | configuration d'exemple |
 | `banbot.service.example` | unité systemd d'exemple |
-| `ip_ranges.json` | cache des plages RDAP (créé dans `dir`) |
-| `whitelist.txt` | plages à ne jamais bannir, un CIDR par ligne (créé dans `dir`) |
-| `watched.jsonl` | constats « IP surveillée prise dans un ban » (créé dans `dir` si `watch_*`) |
+| `/etc/banbot/banbot.conf` | configuration |
+| `/etc/banbot/whitelist.txt` | plages à ne jamais bannir, un CIDR par ligne (créé par `whitelist add`) |
+| `/var/lib/banbot/ip_ranges.json` | cache des plages RDAP |
+| `/var/lib/banbot/watched.jsonl` | constats « IP surveillée prise dans un ban » (si `watch_*`) |
