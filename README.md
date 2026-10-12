@@ -11,9 +11,10 @@ noyau 5.4) : `apt install nftables` (version 0.9.3).
 > État : le bannissement a été validé en production sur Ubuntu 20.04 (Python 3.8, noyau
 > 5.4, nftables 0.9.3) : charge de plus de 35 ramenée à 0,2. Les autres fonctions
 > (unité systemd d'exemple, durcissement selon la charge, IPv6, surveillance
-> `watch_*`) n'ont été testées qu'avec un faux `nft`. Observé avec nftables 0.9.3 :
-> `bans` n'affiche pas le temps restant (la sortie JSON de nft ne semble pas le fournir ;
-> à confirmer avec `nft list set inet banbot banned4`).
+> `watch_*`) n'ont été testées qu'avec un faux `nft`. Avec nftables 0.9.3
+> (Ubuntu 20.04), `nft list set` n'affiche que `timeout 1h` et jamais `expires` : `bans` et
+> `watched` n'indiquent donc pas le temps restant. Sur des versions plus récentes (Ubuntu 24.04,
+> d'après un retour d'usage), `expires` est affiché et repris par ces commandes.
 > Commencer par `--dry-run`.
 
 ## Fonctionnement
@@ -35,11 +36,40 @@ noyau 5.4) : `apt install nftables` (version 0.9.3).
 5. L'état des bans est **dans nft** (lu au démarrage) : le démon peut être
    relancé sans perte, et chaque ban expire seul.
 
-## Installation rapide
+## Installation
+
+Sur Debian/Ubuntu, depuis un clone du dépôt :
+
+```
+sudo ./banbot.py install --dry-run            # le plan, sans rien modifier
+sudo ./banbot.py install --log /var/log/gitlab/nginx/gitlab_access.log
+```
+La commande est **idempotente** (on peut la relancer pour mettre à jour le programme et
+l'unité) et ne touche jamais une conf ou une liste blanche existantes. Elle :
+
+1. vérifie Python (3.7+) et installe `nftables` avec apt-get si `nft` manque (demande
+   confirmation, ou `--yes`) ;
+2. **teste nft** sur une table jetable : sets d'intervalles avec expiration, sortie JSON
+   lisible (s'arrête avec un message sinon) ; signale si cette version n'indique pas le
+   temps restant des bans ;
+3. crée l'utilisateur système `banbot` s'il manque ;
+4. installe le programme dans `/opt/banbot/`, la conf dans `/etc/banbot/banbot.conf` (avec
+   `--log` s'il est donné), une liste blanche vide `/etc/banbot/whitelist.txt`, le dossier
+   d'état `/var/lib/banbot` (0750, propriété de `banbot`) ;
+5. installe l'unité systemd, avec le groupe qui donne accès au log (détecté, sinon `adm` ;
+   `--log-group` pour l'imposer), puis `systemctl daemon-reload` ;
+6. vérifie que l'utilisateur `banbot` peut lire le log, et dit quoi faire sinon.
+
+Le service n'est **ni activé ni démarré** par défaut : adapter la conf, remplir la liste
+blanche, essayer `/opt/banbot/banbot.py run --dry-run`, puis `systemctl enable --now banbot`
+(ou relancer `install` avec `--enable` / `--start`). `--destdir DIR` écrit les fichiers sous
+un préfixe sans toucher au système (tests, empaquetage).
+
+À la main, sans `install` :
 
 ```
 ./banbot.py setup                          # crée la table nft (idempotent)
-cp banbot.conf.example banbot.conf         # puis adapter log, dir, seuils
+cp banbot.conf.example banbot.conf         # puis adapter log, seuils
 ./banbot.py run --dry-run -v               # affiche les bans sans toucher à nft
 ./banbot.py run                            # le vrai démon
 ```
@@ -161,6 +191,7 @@ passés en argument sont lus une fois (`-` = stdin), ce qui sert à rejouer un l
 
 ```
 banbot.py run [-t SEUIL] [-p SEUIL_PREFIXE] [--log FICHIER] [fichiers…]
+banbot.py install [--dry-run] [--log F] installe nftables, l'utilisateur, la conf, l'unité systemd
 banbot.py setup                      crée la table, les sets et les règles nft
 banbot.py bans                       bans actifs et temps restant
 banbot.py whitelist add CIDR…        liste blanche + retrait des bans concernés

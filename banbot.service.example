@@ -1,6 +1,7 @@
 # /etc/systemd/system/banbot.service
 #
-# Installation (à adapter) :
+# Installation : sudo ./banbot.py install   (crée l'utilisateur, les dossiers, la conf et cette unité,
+# avec le groupe d'accès au log). Manuellement :
 #   useradd --system --no-create-home --shell /usr/sbin/nologin banbot
 #   install -m 0755 banbot.py /opt/banbot/banbot.py
 #   install -D -m 0644 banbot.conf.example /etc/banbot/banbot.conf   # puis l'éditer

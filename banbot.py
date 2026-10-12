@@ -28,6 +28,7 @@ import logging
 import os
 import queue
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -50,6 +51,10 @@ SETS = {4: "banned4", 6: "banned6"}
 MIN_PREFIX = {4: 8, 6: 16}
 CONF_DIR = "/etc/banbot"      # configuration et liste blanche (décidées par l'administrateur)
 STATE_DIR = "/var/lib/banbot"  # cache RDAP et constats (écrits par le démon)
+INSTALL_DIR = "/opt/banbot"
+UNIT_PATH = "/etc/systemd/system/banbot.service"
+SERVICE_USER = "banbot"
+SRC_DIR = os.path.dirname(os.path.abspath(__file__))
 RECENT_BAN_SECS = 60  # pas de nouvelle tentative pour une plage juste bannie
 MAX_WATCHED = 5000    # IP « surveillées » gardées en mémoire (opt-in --watch-*)
 WATCH_RETENTION = 3600  # secondes (temps du log) pendant lesquelles on s'en souvient
@@ -296,6 +301,30 @@ class Nft:
         r = self._run(["-f", "-"], NFT_SETUP)
         if r.returncode:
             raise NftError(r.stderr.strip())
+
+    def selftest(self):
+        """Vérifie sur une table jetable que nft gère les sets d'intervalles avec expiration
+        et que `nft -j` se lit comme le démon l'attend. -> (ok, expires_visible, message)."""
+        t, net = "banbot_selftest", ipaddress.ip_network("10.99.0.0/16")
+        self._run(["delete", "table", "inet", t])  # reste d'un essai précédent
+        try:
+            r = self._run(["-f", "-"], f"add table inet {t}\n"
+                          f"add set inet {t} s {{ type ipv4_addr; flags interval,timeout; }}\n"
+                          f"add element inet {t} s {{ {net} timeout 30s }}\n")
+            if r.returncode:
+                return False, False, r.stderr.strip() or "création de la table d'essai refusée"
+            r = self._run(["-j", "list", "set", "inet", t, "s"])
+            if r.returncode:
+                return False, False, "nft -j non disponible : " + (r.stderr.strip() or "échec")
+            try:
+                found = [(n, e) for n, e in parse_elems(json.loads(r.stdout))]
+            except ValueError:
+                return False, False, "sortie de nft -j illisible"
+            if not any(n == net for n, _ in found):
+                return False, False, "élément ajouté mais absent de la sortie JSON de nft"
+            return True, any(e is not None for _, e in found), ""
+        finally:
+            self._run(["delete", "table", "inet", t])
 
     def elements(self, ver):
         if self.dry_run:
@@ -941,6 +970,242 @@ def cmd_watched(args):
     return 0
 
 
+class Installer:
+    """Installation sur Debian/Ubuntu : nftables, utilisateur, dossiers, programme, conf, unité."""
+
+    def __init__(self, args):
+        self.args = args
+        self.dry = args.dry_run
+        self.dest = args.destdir  # préfixe de test : écrit les fichiers sans toucher au système
+        self.system = not self.dest and not self.dry
+
+    def path(self, p):
+        return os.path.join(self.dest, p.lstrip("/")) if self.dest else p
+
+    def say(self, status, msg):
+        if self.dry and status == "ok":  # rien n'est fait : ne pas affirmer le contraire
+            status, msg = "..", f"(simulé) {msg}"
+        print(f"[{status}] {msg}")
+
+    def said_done(self, msg):
+        """Action système (apt, useradd…) : « ok » seulement si elle a vraiment eu lieu."""
+        self.say("ok" if self.system or self.dry else "..",
+                 msg if self.system or self.dry else f"{msg} (non fait : --destdir)")
+
+    def confirm(self, question):
+        if self.args.yes or self.dry:
+            return True
+        if sys.stdin.isatty():
+            return input(f"{question} [o/N] ").strip().lower() in ("o", "oui", "y", "yes")
+        sys.exit(f"{question} : réponse impossible hors terminal, relancer avec --yes")
+
+    def run(self, cmd, check=True):
+        """Commande système ; avec --dry-run ou --destdir, elle est seulement affichée."""
+        if not self.system:
+            note = "" if self.dry else "   (ignoré : --destdir)"
+            print(f"  $ {' '.join(cmd)}{note}")
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if check and r.returncode:
+            sys.exit(f"échec de {' '.join(cmd)} :\n{r.stderr.strip()}")
+        return r
+
+    def ensure_dir(self, path, mode, owner=None):
+        if self.dry:
+            print(f"  créer {path} (mode {mode:o})")
+            return
+        real = self.path(path)
+        os.makedirs(real, exist_ok=True)
+        os.chmod(real, mode)
+        if owner and self.system:
+            shutil.chown(real, *owner)
+
+    def write(self, path, content, mode):
+        if self.dry:
+            print(f"  écrire {path} (mode {mode:o})")
+            return
+        real = self.path(path)
+        os.makedirs(os.path.dirname(real), exist_ok=True)
+        tmp = real + ".tmp"
+        with open(tmp, "w") as f:
+            f.write(content)
+        os.chmod(tmp, mode)
+        os.replace(tmp, real)
+
+    @staticmethod
+    def template(name):
+        p = os.path.join(SRC_DIR, name)
+        if not os.path.exists(p):
+            sys.exit(f"{name} introuvable à côté de {os.path.abspath(__file__)} : "
+                     "lancer l'installation depuis un clone du dépôt")
+        with open(p) as f:
+            return f.read()
+
+    def read(self, path):
+        try:
+            with open(self.path(path)) as f:
+                return f.read()
+        except OSError:
+            return None
+
+    def check_python(self):
+        v = sys.version_info
+        if v < (3, 7):
+            sys.exit(f"Python 3.7 ou plus requis (trouvé {v.major}.{v.minor})")
+        self.say("ok", f"Python {v.major}.{v.minor}.{v.micro}")
+
+    def ensure_nft(self):
+        binary = self.args.nft_bin
+        found = shutil.which(binary)
+        if found:
+            self.say("ok", f"nft : {found}")
+            return
+        if not shutil.which("apt-get"):
+            self.say("!!", "nft introuvable et apt-get absent : installer le paquet nftables à la main")
+            if self.system:
+                sys.exit(1)
+            return
+        if not self.confirm("nft est absent. Installer le paquet nftables avec apt-get ?"):
+            sys.exit("nftables est indispensable")
+        self.run(["apt-get", "install", "-y", "nftables"])
+        self.said_done("nftables installé")
+
+    def selftest(self):
+        if not self.system:
+            self.say("..", "test de nft (sets d'intervalles avec expiration) : fait à l'installation réelle")
+            return
+        ok, expires, msg = Nft(self.args.nft_bin).selftest()
+        if not ok:
+            sys.exit(f"[!!] nft ne convient pas : {msg}\n"
+                     "     (noyau sans nf_tables, paquet nftables trop ancien, ou droits ?)")
+        self.say("ok", "nft : sets d'intervalles avec expiration, sortie JSON lisible")
+        if not expires:
+            self.say("..", "cette version de nft n'indique pas le temps restant des bans "
+                     "(`bans` et `watched` ne l'affichent donc pas)")
+
+    def ensure_user(self):
+        import pwd
+        try:
+            pwd.getpwnam(SERVICE_USER)
+            self.say("ok", f"utilisateur {SERVICE_USER} existe")
+        except KeyError:
+            self.run(["useradd", "--system", "--user-group", "--no-create-home",
+                      "--shell", "/usr/sbin/nologin", SERVICE_USER])
+            self.said_done(f"utilisateur {SERVICE_USER} créé")
+
+    def log_path(self):
+        if self.args.log:
+            return self.args.log
+        text = self.read(os.path.join(CONF_DIR, "banbot.conf")) or self.template("banbot.conf.example")
+        m = re.search(r"(?m)^\s*log\s*=\s*(\S+)", text)
+        return m.group(1) if m else None
+
+    def log_group(self):
+        """Groupe donnant accès au log : --log-group, sinon celui du fichier s'il n'est pas public."""
+        if self.args.log_group:
+            return self.args.log_group
+        import grp
+        log_file = self.log_path()
+        try:
+            st = os.stat(log_file)
+            name = grp.getgrgid(st.st_gid).gr_name
+            if not st.st_mode & 0o004 and name != "root":
+                return name
+        except (OSError, KeyError, TypeError):
+            pass
+        return "adm"
+
+    def install_files(self):
+        self.ensure_dir(INSTALL_DIR, 0o755)
+        dst = os.path.join(INSTALL_DIR, "banbot.py")
+        src = os.path.abspath(__file__)
+        if os.path.abspath(self.path(dst)) == src:
+            self.say("ok", f"programme déjà en place : {dst}")
+        else:
+            with open(src) as f:
+                self.write(dst, f.read(), 0o755)
+            self.say("ok", f"programme : {dst}")
+
+        self.ensure_dir(CONF_DIR, 0o755)
+        conf = os.path.join(CONF_DIR, "banbot.conf")
+        if self.read(conf) is not None:
+            self.say("ok", f"{conf} existe : conservé tel quel")
+            if self.args.log:
+                self.say("!!", f"--log ignoré : modifier la ligne `log =` de {conf} à la main")
+        else:
+            text = self.template("banbot.conf.example")
+            if self.args.log:
+                text = re.sub(r"(?m)^log\s*=.*$", lambda m: f"log = {self.args.log}", text)
+            self.write(conf, text, 0o644)
+            self.say("ok", f"configuration : {conf}")
+        wl = os.path.join(CONF_DIR, "whitelist.txt")
+        if self.read(wl) is None:
+            self.write(wl, "# Plages à ne jamais bannir, un CIDR par ligne.\n"
+                       "# Ajouter avec : banbot.py whitelist add CIDR (retire aussi les bans concernés)\n", 0o644)
+            self.say("ok", f"liste blanche : {wl}")
+
+        self.ensure_dir(STATE_DIR, 0o750, (SERVICE_USER, SERVICE_USER))
+        self.say("ok", f"dossier d'état : {STATE_DIR}")
+
+        unit = re.sub(r"(?m)^SupplementaryGroups=.*$", f"SupplementaryGroups={self.log_group()}",
+                      self.template("banbot.service.example"))
+        if self.read(UNIT_PATH) == unit:
+            self.say("ok", f"unité systemd à jour : {UNIT_PATH}")
+        else:
+            self.write(UNIT_PATH, unit, 0o644)
+            self.say("ok", f"unité systemd : {UNIT_PATH} (groupe d'accès au log : {self.log_group()})")
+            self.run(["systemctl", "daemon-reload"])
+
+    def check_log_access(self):
+        log_file = self.log_path()
+        if not log_file:
+            self.say("..", "aucun log configuré : le démon lira stdin")
+            return
+        if not self.system:
+            self.say("..", f"accès de {SERVICE_USER} à {log_file} : vérifié à l'installation réelle")
+            return
+        if not os.path.exists(log_file):
+            self.say("!!", f"{log_file} n'existe pas encore (le démon l'attendra) : vérifier le chemin")
+            return
+        r = self.run(["runuser", "-u", SERVICE_USER, "-g", self.log_group(), "--",
+                      "test", "-r", log_file], check=False)
+        if r.returncode == 0:
+            self.say("ok", f"{SERVICE_USER} peut lire {log_file}")
+        else:
+            self.say("!!", f"{SERVICE_USER} ne peut pas lire {log_file} : donner l'accès, par ex. "
+                     f"`setfacl -m u:{SERVICE_USER}:r {log_file}` (et x sur les dossiers parents), "
+                     "ou --log-group")
+
+    def run_all(self):
+        if self.system and os.geteuid() != 0:
+            sys.exit("l'installation demande les droits root : sudo ./banbot.py install")
+        if self.dry:
+            print("--dry-run : rien n'est modifié, voici ce qui serait fait\n")
+        self.check_python()
+        self.ensure_nft()
+        self.selftest()
+        self.ensure_user()
+        self.install_files()
+        self.check_log_access()
+        if self.args.start:
+            self.run(["systemctl", "enable", "--now", "banbot"])
+            self.said_done("service activé et démarré")
+        elif self.args.enable:
+            self.run(["systemctl", "enable", "banbot"])
+            self.said_done("service activé au démarrage (non démarré)")
+        print(f"""
+Étapes suivantes :
+  1. vérifier / adapter {CONF_DIR}/banbot.conf (log, seuils)
+  2. ajouter vos réseaux à {CONF_DIR}/whitelist.txt (administrateurs, CI, supervision)
+  3. essai sans rien bannir : {INSTALL_DIR}/banbot.py run --dry-run
+  4. démarrer : systemctl enable --now banbot      suivre : journalctl -u banbot -f""")
+
+
+def cmd_install(args):
+    Installer(args).run_all()
+    return 0
+
+
 def cmd_whitelist(args):
     _, wl_path = paths(args)
     if args.action == "list":
@@ -1099,6 +1364,16 @@ def main(argv=None):
     sub.add_parser("setup", parents=[common],
                    help="crée la table nft si absente").set_defaults(fn=cmd_setup)
     sub.add_parser("bans", parents=[common], help="liste les bans actifs").set_defaults(fn=cmd_bans)
+
+    ins = sub.add_parser("install", parents=[common],
+                         help="installe banbot (nftables, utilisateur, dossiers, conf, unité systemd)")
+    ins.add_argument("--log", help="log à suivre, écrit dans la conf créée (défaut: celui de l'exemple)")
+    ins.add_argument("--log-group", help="groupe donnant accès au log (défaut: détecté, sinon adm)")
+    ins.add_argument("--yes", action="store_true", help="répond oui aux questions (installation d'apt)")
+    ins.add_argument("--enable", action="store_true", help="active le service au démarrage")
+    ins.add_argument("--start", action="store_true", help="active ET démarre le service")
+    ins.add_argument("--destdir", help="écrit les fichiers sous ce préfixe sans toucher au système (test)")
+    ins.set_defaults(fn=cmd_install)
 
     wd = sub.add_parser("watched", parents=[common],
                         help="IP surveillées (watch_*) prises dans un ban : faux positifs possibles")
