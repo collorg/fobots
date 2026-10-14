@@ -33,6 +33,7 @@ mkdir -p "$BUILD/DEBIAN" "$OUT"
 install -D -m 0755 fobots.py          "$BUILD/opt/fobots/fobots.py"
 install -D -m 0644 fobots.conf.example "$BUILD/etc/fobots/fobots.conf"
 install -D -m 0644 README.md          "$BUILD/usr/share/doc/$PKG/README.md"
+install -D -m 0644 README.fr.md       "$BUILD/usr/share/doc/$PKG/README.fr.md"
 {
     echo "# Plages à ne jamais bannir, un CIDR par ligne."
     echo "# Ajouter avec : /opt/fobots/fobots.py welcome add CIDR (retire aussi les bans concernés)"

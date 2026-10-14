@@ -1,67 +1,66 @@
-# fobots.conf : cherché dans /etc/fobots/ puis dans le dossier courant (ou -f FICHIER).
-# Les chemins relatifs sont relatifs à ce fichier. La ligne de commande l'emporte.
+# fobots.conf: looked up in /etc/fobots/ then in the current directory (or -f FILE).
+# Relative paths are relative to this file. The command line overrides it.
 [fobots]
-# Log à suivre en continu (rotation gérée). Sans cette option : stdin.
+# Log to follow continuously (rotation handled). Without this option: stdin.
 log = /var/log/gitlab/nginx/gitlab_access.log
-# Dossier d'état (créé s'il manque) : cache RDAP et constats surveillés.
+# State directory (created if missing): RDAP cache and monitoring findings.
 # dir = /var/lib/fobots
-# cache = ip_ranges.json        # plages RDAP trouvées (défaut: <dir>/ip_ranges.json)
-# La liste welcome est welcome.txt à côté de ce fichier (donc /etc/fobots/welcome.txt) ;
-# pour la changer :
+# cache = ip_ranges.json        # RDAP ranges found (default: <dir>/ip_ranges.json)
+# The welcome list is welcome.txt next to this file (so /etc/fobots/welcome.txt);
+# to change it:
 # welcome = /etc/fobots/welcome.txt
 
-threshold = 5        # req/s d'une plage au-delà desquelles on bannit
-# prefix_threshold = 5 # req/s d'un /16 non résolu qui déclenchent une requête RDAP
-sustain = 1          # secondes au-dessus du seuil exigées
-window = 60          # fenêtre (s) pour sustain
-ban_time = 1h        # durée d'un ban : 30m, 1h, 1d…
+threshold = 5        # req/s of a range above which it is banned
+# prefix_threshold = 5 # req/s of an unresolved /16 that trigger an RDAP request
+sustain = 1          # seconds above the threshold required
+window = 60          # window (s) for sustain
+ban_time = 1h        # duration of a ban: 30m, 1h, 1d…
 
-# Durcissement selon la charge du serveur (désactivé par défaut).
-# Au niveau « tendu » / « critique », le seuil ET la durée de ban sont multipliés par
-# le facteur : on bannit plus sévèrement mais plus brièvement, et on rejuge plus vite.
-# load_signal = none   # none | psi (réactif, /proc/pressure) | loadavg (charge / cœurs)
-# load_tense = 20      # valeur du signal pour le niveau tendu (psi : % ; loadavg : par cœur)
-# load_critical = 50   # idem pour critique (défauts loadavg : 1.0 et 2.0)
-# load_recover = 5m    # durée sous le palier avant de redescendre d'un niveau
+# Load-based hardening (disabled by default).
+# At the "tense" / "critical" level, the threshold AND the ban duration are multiplied by
+# the factor: bans are stricter but shorter, and ranges are re-judged sooner.
+# load_signal = none   # none | psi (reactive, /proc/pressure) | loadavg (load / cores)
+# load_tense = 20      # signal value for the tense level (psi: %; loadavg: per core)
+# load_critical = 50   # same for critical (loadavg defaults: 1.0 and 2.0)
+# load_recover = 5m    # time below the level before going down one level
 # tense_factor = 0.5
 # critical_factor = 0.25
-# min_threshold = 1    # plancher du seuil effectif (req/s)
-# min_ban_time = 1m    # plancher de la durée de ban effective
+# min_threshold = 1    # floor of the effective threshold (req/s)
+# min_ban_time = 1m    # floor of the effective ban duration
 
-# Un log par hôte virtuel : une section [site:NOM] par cible, avec ses propres règles
-# d'exclusion (en plus de ignore_path ci-dessous). Un hôte à plusieurs noms (CNAME) n'a
-# qu'une section : son log est unique. Le log de [fobots] et ceux des sites doivent différer ;
-# pour n'utiliser que des sections, supprimer la ligne `log =` de [fobots].
+# One log per virtual host: one [site:NAME] section per target, with its own exclusion
+# rules (in addition to ignore_path below). A host with several names (CNAME) has a single
+# section: its log is unique. The log of [fobots] and those of the sites must differ;
+# to use sections only, remove the `log =` line of [fobots].
 # [site:gitlab]
 # log = /var/log/gitlab/nginx/gitlab_access.log
 # ignore_prefix = /assets/, /favicon.ico, /robots.txt
-# [site:vitrine]
-# log = /var/log/nginx/vitrine.access.log
+# [site:showcase]
+# log = /var/log/nginx/showcase.access.log
 # ignore_all = yes
 
-# Pages statiques peu coûteuses à ne pas compter (regex sur le chemin de la requête). Ancrer sur
-# des préfixes de répertoires statiques, PAS sur des extensions (\.js, \.css exempteraient aussi
-# les fichiers du dépôt servis par GitLab, dynamiques et coûteux). N'est pas une autorisation :
-# une plage bannie est rejetée par le pare-feu avant nginx, pages statiques comprises.
+# Cheap static pages not to count (regex on the request path). Anchor on prefixes of static
+# directories, NOT on extensions (\.js, \.css would also exempt the repository files served by
+# GitLab, which are dynamic and expensive). This is not an authorisation: a banned range is
+# dropped by the firewall before nginx, static pages included.
 # ignore_path = ^/(assets/|favicon|robots\.txt)
 
-# Surveillance opt-in : ces requêtes sont comptées comme les autres (aucune exemption), mais
-# quand leur plage est bannie, le journal indique (WATCH) quelles IP correspondaient et la
-# commande `welcome add` pour les protéger. Expressions régulières ; si les deux sont
-# données, les deux doivent correspondre.
+# Opt-in monitoring: these requests are counted like the others (no exemption), but when their
+# range is banned, the journal says (WATCH) which IPs matched and gives the `welcome add`
+# command to protect them. Regular expressions; if both are given, both must match.
 # watch_agent = ^gitlab-runner
 # watch_path = ^/api/v4/
-# watch_file = watched.jsonl   # constats enregistrés (défaut: <dir>/watched.jsonl), relus par
-#                              `fobots.py watched` ; élagués au-delà de 30 jours au démarrage
+# watch_file = watched.jsonl   # findings recorded (default: <dir>/watched.jsonl), reread by
+#                              `fobots.py watched`; pruned beyond 30 days at startup
 
-# Ban resserré : au lieu de bannir toute l'allocation RDAP, on bannit les groupes d'IP vues
-# dedans ; repli sur l'allocation si le trafic est dispersé ou après plusieurs bans partiels.
-# ban_scope = allocation   # allocation | observed (à essayer d'abord avec --dry-run)
-# observed_prefix = 20     # étendue maximale d'un groupe (préfixe IPv4 ; IPv6 : /48)
-# observed_escalate = 4    # bans partiels d'une allocation avant le repli en blocs larges
-# observed_max_prefix = 16 # repli (trafic dispersé) : blocs /16 au lieu de l'allocation ; 0 = allocation entière
+# Tight bans: instead of banning the whole RDAP allocation, ban the groups of IPs seen inside
+# it; fall back to wide blocks if the traffic is scattered or after several partial bans.
+# ban_scope = allocation   # allocation | observed (try it with --dry-run first)
+# observed_prefix = 20     # maximum extent of a group (IPv4 prefix; IPv6: /48)
+# observed_escalate = 4    # partial bans of an allocation before falling back to wide blocks
+# observed_max_prefix = 16 # fallback (scattered traffic): /16 blocks instead of the allocation; 0 = whole allocation
 
-rdap_per_hour = 100  # budget de requêtes RDAP
-delay = 2            # secondes minimum entre deux requêtes RDAP
+rdap_per_hour = 100  # budget of RDAP requests
+delay = 2            # minimum seconds between two RDAP requests
 # nft_bin = nft
-# from_start = no      # lire d'abord le contenu existant du log
+# from_start = no      # first read the existing content of the log

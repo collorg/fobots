@@ -9,7 +9,7 @@
 COUNT   := $(shell git rev-list --count HEAD 2>/dev/null || echo 0)
 VERSION ?= 0.$(COUNT)
 DEB     := dist/fobots_$(VERSION)_all.deb
-SOURCES := fobots.py fobots.conf.example fobots.service.example README.md build-deb.sh
+SOURCES := fobots.py fobots.conf.example fobots.service.example README.md README.fr.md build-deb.sh
 
 .PHONY: deb check lint clean help
 .DEFAULT_GOAL := deb
