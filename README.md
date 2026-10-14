@@ -2,6 +2,8 @@
 
 *[Version française](README.fr.md)*
 
+> *'fo' stands for filter out! What were you thinking?*
+
 A daemon that protects a web server (designed for GitLab behind nginx) from overly
 aggressive scrapers. It follows the access log, spots the **IP ranges** whose request rate
 exceeds a threshold, and adds them to an **nftables** set with a timeout: the traffic is
@@ -17,8 +19,6 @@ kernel 5.4): `apt install nftables` (version 0.9.3).
 > `timeout 1h` and never `expires`: `bans` and `watched` therefore do not show the remaining
 > time. On more recent versions (Ubuntu 24.04, from a user report), `expires` is shown and
 > used by these commands. Start with `--dry-run`.
-
-The program's own messages, logs and `--help` are in French.
 
 ## How it works
 
@@ -114,7 +114,7 @@ re-judged sooner. `prefix_threshold` follows the same factor. Example (base 10 r
 tense = 5 req/s for 30 min, critical = 2.5 req/s for 15 min.
 
 The default levels are **not calibrated** for your server: first run with `--dry-run -v` and
-look at the `charge : psi=…` lines (every 5 minutes and at each level change) to choose
+look at the `load: psi=…` lines (every 5 minutes and at each level change) to choose
 `load_tense` / `load_critical`. False positives are fixed with `welcome add`.
 
 ## One log per host: rules per target
@@ -204,8 +204,6 @@ IP          BANS  REQ  LAST BAN          RANGE        STATE          ROUTE
 To protect them all:
   fobots.py welcome add 40.2.2.2/32 20.1.1.1/32
 ```
-(The actual column headers and messages are printed in French.)
-
 IPs are aggregated over the period: *BANS* = number of bans they were caught in (an IP caught
 several times is a serious suspect). Since bans expire quickly, it is the file's history that
 lets you see them after an absence. The "active/expired" state needs access to nft

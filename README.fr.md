@@ -2,6 +2,10 @@
 
 *[English version](README.md)*
 
+> *« fo » signifie « filter out » ! À quoi pensiez-vous ?* (« *'fo' stands for filter out! What were you thinking?* »)
+
+Les messages, le journal et l'aide en ligne du programme sont en anglais.
+
 Démon qui protège un serveur web (pensé pour un GitLab derrière nginx) des
 scrapers trop agressifs. Il suit l'access log, repère les **plages d'IP** dont le
 débit dépasse un seuil, et les ajoute à un set **nftables** avec expiration : le
@@ -116,7 +120,7 @@ vite. `prefix_threshold` suit le même facteur. Exemple (base 10 req/s, 1 h) :
 tendu = 5 req/s pendant 30 min, critique = 2,5 req/s pendant 15 min.
 
 Les paliers par défaut ne sont **pas calibrés** sur ton serveur : lance d'abord
-avec `--dry-run -v` et regarde les lignes `charge : psi=…` (toutes les 5 minutes et
+avec `--dry-run -v` et regarde les lignes `load: psi=…` (toutes les 5 minutes et
 à chaque changement de niveau) pour choisir `load_tense` / `load_critical`.
 Les faux positifs se corrigent avec `welcome add`.
 
@@ -146,7 +150,7 @@ log = /var/log/nginx/api.access.log
   s'additionnent, puisque le pare-feu bannit une plage pour tous les hôtes (ports 80/443).
 - Un thread suit chaque log (rotation gérée) ; les formats peuvent différer d'un log à
   l'autre (il faut l'IP, l'horodatage et la ligne de requête).
-- Le `log` unique de `[fobots]` fonctionne toujours (cible « défaut » sans règle propre),
+- Le `log` unique de `[fobots]` fonctionne toujours (cible « default » sans règle propre),
   mais ne peut pas désigner le même fichier qu'une section `[site:…]`.
 - Des fichiers donnés en argument (`run fichier.log`) sont lus une fois, sans suivre les
   cibles ; seule la règle globale s'applique.
@@ -201,17 +205,17 @@ fobots.py watched --active        # seulement celles dont le ban est actif
 fobots.py watched --cmd           # n'affiche que la commande welcome add
 ```
 ```
-IP          BANS  REQ  DERNIER BAN       PLAGE        ÉTAT           ROUTE
-40.2.2.2       1    2  2026-10-10 13:40  40.0.0.0/12  actif (1234 s) /api/v4/jobs/7/artifacts
-20.1.1.1       2    6  2026-10-10 13:40  20.0.0.0/12  expiré         /api/v4/jobs/request
+IP          BANS  REQ  LAST BAN          RANGE        STATE          ROUTE
+40.2.2.2       1    2  2026-10-10 13:40  40.0.0.0/12  active (1234 s) /api/v4/jobs/7/artifacts
+20.1.1.1       2    6  2026-10-10 13:40  20.0.0.0/12  expired        /api/v4/jobs/request
 
-Pour toutes les protéger :
+To protect them all:
   fobots.py welcome add 40.2.2.2/32 20.1.1.1/32
 ```
 Les IP sont agrégées sur la période : *BANS* = nombre de bans où elles ont été prises
 (une IP prise plusieurs fois est un suspect sérieux). Les bans expirant vite, c'est
 l'historique du fichier qui permet de les voir au retour d'une absence. L'état
-« actif/expiré » demande l'accès à nft (sinon `?`). Rien n'est ajouté automatiquement
+« active/expired » (colonne STATE) demande l'accès à nft (sinon `?`). Rien n'est ajouté automatiquement
 à la liste welcome.
 
 Limites : seules les requêtes vues dans l'heure avant le ban sont notées (5 000 IP
@@ -272,7 +276,7 @@ explicitement. Des fichiers passés en argument sont lus une fois (`-` = stdin),
 à rejouer un log.
 
 Si le démon ne suit rien alors que la conf semble correcte, vérifier qu'il lit bien
-la conf attendue (la ligne `configuration : …` au démarrage) et que le script installé
+la conf attendue (la ligne `configuration: …` au démarrage) et que le script installé
 est à jour : une ancienne copie ignore les sections `[site:…]` sans le dire. `SIGUSR1`
 indique aussi le nombre de lignes illisibles (format de log inattendu, par ex. le préfixe
 `hôte:port` du format Apache `vhost_combined`, non géré).

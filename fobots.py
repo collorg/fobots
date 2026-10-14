@@ -6,26 +6,26 @@
 # the GNU General Public License as published by the Free Software Foundation, either
 # version 3 of the License, or (at your option) any later version. It is distributed WITHOUT
 # ANY WARRANTY; see the file LICENSE or <https://www.gnu.org/licenses/>.
-"""fobots : démon qui bannit (nftables) les plages d'IP trop agressives.
+"""fobots: daemon that bans (nftables) overly aggressive IP ranges.
 
-Lit en continu un access log au format « combined » (nginx / Apache / GitLab),
-compte les requêtes par plage d'IP et par seconde, et ajoute la plage fautive au
-set nftables dès que le seuil est dépassé. Les bans expirent seuls (timeout nft).
+Continuously reads an access log in "combined" format (nginx / Apache / GitLab),
+counts requests per IP range and per second, and adds the offending range to the
+nftables set as soon as the threshold is exceeded. Bans expire by themselves (nft timeout).
 
-  fobots.py run                      # suit le log indiqué dans fobots.conf
+  fobots.py run                      # follows the log given in fobots.conf
   tail -F /var/log/gitlab/nginx/gitlab_access.log | fobots.py run -t 5 -
-  fobots.py setup                    # crée table, sets et règles nft (idempotent)
-  fobots.py bans                     # bans actifs avec temps restant
-  fobots.py welcome add 17.0.0.0/8 # liste welcome + retrait des bans concernés
+  fobots.py setup                    # creates nft table, sets and rules (idempotent)
+  fobots.py bans                     # active bans with remaining time
+  fobots.py welcome add 17.0.0.0/8   # welcome list + removal of the bans concerned
   fobots.py welcome list
 
-Les plages viennent de RDAP (successeur de whois), interrogé en tâche de fond
-seulement pour un préfixe /16 (IPv6 : /32) qui dépasse déjà --prefix-threshold,
-avec un budget horaire. Les plages trouvées sont conservées sur disque.
-L'état des bans est lu dans nft : on peut relancer le démon sans rien perdre.
-Configuration : fobots.conf (voir fobots.conf.example), cherché dans le dossier
-courant puis dans /etc/fobots/, ou donné par -f. La ligne de commande l'emporte.
-Signaux : SIGUSR1 affiche les plages les plus actives, SIGTERM/SIGINT arrêtent.
+Ranges come from RDAP (the successor of whois), queried in the background only for a
+/16 prefix (IPv6: /32) that already exceeds --prefix-threshold, with an hourly budget.
+The ranges found are kept on disk. The ban state is read from nft: the daemon can be
+restarted without losing anything.
+Configuration: fobots.conf (see fobots.conf.example), looked up in the current directory
+then in /etc/fobots/, or given with -f. The command line overrides it.
+Signals: SIGUSR1 prints the most active ranges, SIGTERM/SIGINT stop the daemon.
 """
 import argparse
 import configparser
@@ -51,32 +51,32 @@ from functools import lru_cache
 log = logging.getLogger("fobots")
 
 LINE_RE = re.compile(r'^(\S+) \S+ \S+ \[([^\]]+)\]')
-# Fin d'une ligne « combined » : "METHODE /chemin PROTO" statut taille "referer" "user-agent"
+# End of a "combined" line: "METHOD /path PROTO" status size "referer" "user-agent"
 REQ_RE = re.compile(r'"[A-Z]+ (\S+)[^"]*" \d+ \S+ "[^"]*" "([^"]*)"\s*$')
-# Première chaîne entre guillemets : la ligne de requête (format common ou combined)
+# First quoted string: the request line (common or combined format)
 PATH_RE = re.compile(r'"[A-Z]+ (\S+)')
-RDAP_URL = "https://rdap.org/ip/{}"  # redirige vers le RIR compétent
+RDAP_URL = "https://rdap.org/ip/{}"  # redirects to the competent RIR
 SETS = {4: "banned4", 6: "banned6"}
-# Une réponse RDAP plus large que ça est rejetée (garde-fou contre 0.0.0.0/0).
+# An RDAP answer wider than this is rejected (safeguard against 0.0.0.0/0).
 MIN_PREFIX = {4: 8, 6: 16}
-CONF_DIR = "/etc/fobots"      # configuration et liste welcome (décidées par l'administrateur)
-STATE_DIR = "/var/lib/fobots"  # cache RDAP et constats (écrits par le démon)
+CONF_DIR = "/etc/fobots"      # configuration and welcome list (decided by the administrator)
+STATE_DIR = "/var/lib/fobots"  # RDAP cache and findings (written by the daemon)
 INSTALL_DIR = "/opt/fobots"
 UNIT_PATH = "/etc/systemd/system/fobots.service"
 SERVICE_USER = "fobots"
 SRC_DIR = os.path.dirname(os.path.abspath(__file__))
-RECENT_BAN_SECS = 60  # pas de nouvelle tentative pour une plage juste bannie
-MAX_WATCHED = 5000    # IP « surveillées » gardées en mémoire (opt-in --watch-*)
-WATCH_RETENTION = 3600  # secondes (temps du log) pendant lesquelles on s'en souvient
-WATCH_FILE_KEEP = 30 * 86400  # le fichier des constats est élagué au-delà (au démarrage)
-WATCH_EVENT_IPS = 200         # IP enregistrées au plus par ban
-# ban_scope = observed : les IP vues (fenêtre `window`) sont regroupées en groupes d'étendue
-# bornée ; on bannit les plus actifs, jusqu'à couvrir cette part des requêtes de l'allocation.
+RECENT_BAN_SECS = 60  # no new attempt for a range just banned
+MAX_WATCHED = 5000    # "monitored" IPs kept in memory (opt-in --watch-*)
+WATCH_RETENTION = 3600  # seconds (log time) during which they are remembered
+WATCH_FILE_KEEP = 30 * 86400  # the findings file is pruned beyond this (at startup)
+WATCH_EVENT_IPS = 200         # IPs recorded at most per ban
+# ban_scope = observed: the IPs seen (`window`) are grouped into groups of bounded extent;
+# the most active are banned, until they cover this share of the allocation's requests.
 OBSERVED_COVERAGE = 0.8
-OBSERVED_MAX_GROUPS = 4       # au-delà : trop dispersé, on bannit l'allocation entière
-OBSERVED_MAX_IPS = 200_000    # IP suivies au plus (mémoire)
-OBSERVED_PREFIX6 = 48         # largeur maximale d'un groupe en IPv6 (réglable en IPv4)
-OBSERVED_WIDE6 = 32           # largeur maximale d'un ban de repli en IPv6 (réglable en IPv4)
+OBSERVED_MAX_GROUPS = 4       # beyond: too scattered, fall back to wide blocks
+OBSERVED_MAX_IPS = 200_000    # IPs tracked at most (memory)
+OBSERVED_PREFIX6 = 48         # maximum width of a group in IPv6 (adjustable in IPv4)
+OBSERVED_WIDE6 = 32           # maximum width of a fallback ban in IPv6 (adjustable in IPv4)
 SCOPES = ("allocation", "observed")
 
 NFT_SETUP = """\
@@ -89,7 +89,7 @@ add rule inet fobots input tcp dport { 80, 443 } ip6 saddr @banned6 drop
 """
 
 
-# --- utilitaires -------------------------------------------------------------
+# --- utilities ---------------------------------------------------------------
 
 @lru_cache(maxsize=4096)
 def parse_ts(s):
@@ -99,7 +99,7 @@ def parse_ts(s):
 def parse_duration(s):
     m = re.fullmatch(r"(\d+)([smhd])", s)
     if not m:
-        raise argparse.ArgumentTypeError(f"durée invalide : {s!r} (ex. 30m, 1h, 1d)")
+        raise argparse.ArgumentTypeError(f"invalid duration: {s!r} (e.g. 30m, 1h, 1d)")
     return int(m.group(1)) * {"s": 1, "m": 60, "h": 3600, "d": 86400}[m.group(2)]
 
 
@@ -124,10 +124,10 @@ def prefix_of(addr):
 
 
 def cluster_ips(ips, span):
-    """Groupes d'IP : [(adresse entière, requêtes)] -> [[début, fin, requêtes, nb d'IP]].
-    Balayage glouton : un groupe s'étend tant que son étendue reste sous `span` adresses ;
-    il est borné par ses IP extrêmes (intervalle observé), pas par un préfixe CIDR, donc
-    deux IP voisines de part et d'autre d'une frontière de bloc restent ensemble."""
+    """Groups of IPs: [(integer address, requests)] -> [[start, end, requests, number of IPs]].
+    Greedy sweep: a group grows as long as its extent stays under `span` addresses;
+    it is bounded by its extreme IPs (observed interval), not by a CIDR prefix, so
+    two neighbouring IPs on either side of a block boundary stay together."""
     out = []
     for a, n in sorted(ips):
         if out and a - out[-1][0] < span:
@@ -139,8 +139,8 @@ def cluster_ips(ips, span):
 
 
 def pick_groups(groups, coverage, max_groups):
-    """Les groupes les plus actifs qui couvrent `coverage` des requêtes, ou None si il en
-    faudrait plus de `max_groups`."""
+    """The most active groups that cover `coverage` of the requests, or None if more than
+    `max_groups` would be needed."""
     total = sum(g[2] for g in groups)
     picked, got = [], 0
     for g in sorted(groups, key=lambda g: -g[2]):
@@ -152,8 +152,8 @@ def pick_groups(groups, coverage, max_groups):
 
 
 def wide_blocks(ips, lo, hi, shift, coverage):
-    """Repli quand le trafic est dispersé : les blocs alignés de 2**shift adresses (découpés aux
-    bornes [lo, hi] de l'allocation) qui portent `coverage` des requêtes -> [(début, fin)]."""
+    """Fallback when the traffic is scattered: the aligned blocks of 2**shift addresses (cut at
+    the bounds [lo, hi] of the allocation) that carry `coverage` of the requests -> [(start, end)]."""
     per = Counter()
     for a, n in ips:
         per[a >> shift] += n
@@ -167,7 +167,7 @@ def wide_blocks(ips, lo, hi, shift, coverage):
 
 
 def subtract(net, welcome):
-    """Morceaux de `net` qui ne touchent pas la liste welcome (CIDR : inclus ou disjoint)."""
+    """Pieces of `net` that do not touch the welcome list (CIDR: included or disjoint)."""
     for w in welcome:
         if w.version == net.version and net.overlaps(w):
             if net.subnet_of(w):
@@ -179,26 +179,26 @@ def subtract(net, welcome):
     return [net]
 
 
-# --- plages RDAP -------------------------------------------------------------
+# --- RDAP ranges -------------------------------------------------------------
 
 class RangeStore:
-    """Plages (version, début, fin) connues, persistées en JSON (écriture atomique)."""
+    """Known ranges (version, start, end), persisted as JSON (atomic write)."""
 
     def __init__(self, path):
         self.path = path
-        self.version = 0  # incrémenté à chaque ajout (invalide les mémos)
+        self.version = 0  # incremented on each addition (invalidates the memos)
         self._lock = threading.Lock()
         self.ranges = ()
         if path and os.path.exists(path):
             try:
                 with open(path) as f:
-                    # tolère l'ancien format (version, début, fin, nom)
+                    # tolerates the old format (version, start, end, name)
                     self.ranges = tuple({tuple(r[:3]) for r in json.load(f)})
             except (OSError, ValueError) as e:
-                log.warning("cache %s illisible (%s), on repart de zéro", path, e)
+                log.warning("cache %s unreadable (%s), starting from scratch", path, e)
 
     def find(self, addr):
-        """Plage la plus précise contenant addr, ou None."""
+        """Most specific range containing addr, or None."""
         a, best = int(addr), None
         for r in self.ranges:
             if r[0] == addr.version and r[1] <= a <= r[2]:
@@ -222,8 +222,8 @@ class RangeStore:
 class RdapError(Exception):
     def __init__(self, msg, retry=1800, pause=0):
         super().__init__(msg)
-        self.retry = retry  # secondes avant de retenter ce préfixe
-        self.pause = pause  # secondes de pause globale (429)
+        self.retry = retry  # seconds before retrying this prefix
+        self.pause = pause  # seconds of global pause (429)
 
 
 def fetch_rdap(ip):
@@ -246,16 +246,16 @@ def fetch_rdap(ip):
 
 
 class Rdap(threading.Thread):
-    """Interroge RDAP en tâche de fond, avec délai, budget horaire et pause sur 429."""
+    """Queries RDAP in the background, with delay, hourly budget and pause on 429."""
 
     def __init__(self, store, delay, per_hour, fetch=None):
         super().__init__(daemon=True, name="rdap")
         self.store, self.delay, self.per_hour = store, delay, per_hour
         self.fetch = fetch or fetch_rdap
         self.q = queue.Queue()
-        self.pending = set()  # préfixes en attente (un seul à la fois)
-        self.retry = {}       # préfixe -> instant (monotonic) avant nouvelle tentative
-        self.times = deque()  # instants des dernières requêtes
+        self.pending = set()  # prefixes waiting (one at a time)
+        self.retry = {}       # prefix -> instant (monotonic) before a new attempt
+        self.times = deque()  # instants of the last requests
         self.paused_until = 0.0
 
     def request(self, addr, prefix):
@@ -289,20 +289,20 @@ class Rdap(threading.Thread):
                 start, end = self.fetch(str(addr))
                 ver = addr.version
                 if not int(start) <= int(addr) <= int(end):
-                    raise RdapError("la plage ne contient pas l'IP", retry=3600)
+                    raise RdapError("the range does not contain the IP", retry=3600)
                 if int(end) - int(start) + 1 > 2 ** (addr.max_prefixlen - MIN_PREFIX[ver]):
-                    raise RdapError(f"plage trop large ({start}-{end})", retry=3600)
+                    raise RdapError(f"range too wide ({start}-{end})", retry=3600)
                 r = (ver, int(start), int(end))
                 self.store.add(r)
                 log.info("RDAP %s -> %s", addr, fmt_range(r))
             except RdapError as e:
-                log.warning("RDAP %s : %s", addr, e)
+                log.warning("RDAP %s: %s", addr, e)
                 self.retry[prefix] = time.monotonic() + e.retry
                 if e.pause:
                     self.paused_until = time.monotonic() + e.pause
-                    log.warning("RDAP en pause %d s", e.pause)
+                    log.warning("RDAP paused for %d s", e.pause)
             except Exception:
-                log.exception("RDAP %s : erreur inattendue", addr)
+                log.exception("RDAP %s: unexpected error", addr)
                 self.retry[prefix] = time.monotonic() + 300
             finally:
                 self.pending.discard(prefix)
@@ -327,7 +327,7 @@ def val_nets(val):
 
 
 def parse_elems(data):
-    """[(réseau, secondes restantes ou None)] depuis la sortie de `nft -j list set`."""
+    """[(network, remaining seconds or None)] from the output of `nft -j list set`."""
     out = []
     for item in data.get("nftables", []):
         for e in (item.get("set") or {}).get("elem", []):
@@ -339,7 +339,7 @@ def parse_elems(data):
 
 
 class Nft:
-    """Appels à nft ; en dry-run, affiche les scripts et simule les sets en mémoire."""
+    """Calls to nft; in dry-run mode, prints the scripts and simulates the sets in memory."""
 
     def __init__(self, binary="nft", dry_run=False):
         self.binary, self.dry_run = binary, dry_run
@@ -350,10 +350,10 @@ class Nft:
             return subprocess.run([self.binary, *args], input=stdin, capture_output=True,
                                   text=True, timeout=15)
         except FileNotFoundError:
-            raise NftError(f"commande {self.binary!r} introuvable : installer nftables "
-                           "(ex. apt install nftables) ou donner --nft-bin")
+            raise NftError(f"command {self.binary!r} not found: install nftables "
+                           "(e.g. apt install nftables) or give --nft-bin")
         except (OSError, subprocess.TimeoutExpired) as e:
-            raise NftError(f"{self.binary} : {e}")
+            raise NftError(f"{self.binary}: {e}")
 
     def table_exists(self):
         return self._run(["list", "table", "inet", "fobots"]).returncode == 0
@@ -364,25 +364,25 @@ class Nft:
             raise NftError(r.stderr.strip())
 
     def selftest(self):
-        """Vérifie sur une table jetable que nft gère les sets d'intervalles avec expiration
-        et que `nft -j` se lit comme le démon l'attend. -> (ok, expires_visible, message)."""
+        """Checks on a throwaway table that nft handles interval sets with timeouts
+        and that `nft -j` reads as the daemon expects. -> (ok, expires_visible, message)."""
         t, net = "fobots_selftest", ipaddress.ip_network("10.99.0.0/16")
-        self._run(["delete", "table", "inet", t])  # reste d'un essai précédent
+        self._run(["delete", "table", "inet", t])  # left over from a previous attempt
         try:
             r = self._run(["-f", "-"], f"add table inet {t}\n"
                           f"add set inet {t} s {{ type ipv4_addr; flags interval,timeout; }}\n"
                           f"add element inet {t} s {{ {net} timeout 30s }}\n")
             if r.returncode:
-                return False, False, r.stderr.strip() or "création de la table d'essai refusée"
+                return False, False, r.stderr.strip() or "creation of the test table refused"
             r = self._run(["-j", "list", "set", "inet", t, "s"])
             if r.returncode:
-                return False, False, "nft -j non disponible : " + (r.stderr.strip() or "échec")
+                return False, False, "nft -j not available: " + (r.stderr.strip() or "failure")
             try:
                 found = [(n, e) for n, e in parse_elems(json.loads(r.stdout))]
             except ValueError:
-                return False, False, "sortie de nft -j illisible"
+                return False, False, "output of nft -j unreadable"
             if not any(n == net for n, _ in found):
-                return False, False, "élément ajouté mais absent de la sortie JSON de nft"
+                return False, False, "element added but absent from the JSON output of nft"
             return True, any(e is not None for _, e in found), ""
         finally:
             self._run(["delete", "table", "inet", t])
@@ -392,7 +392,7 @@ class Nft:
             return list(self.sim[ver])
         r = self._run(["-j", "list", "set", "inet", "fobots", SETS[ver]])
         if r.returncode:
-            raise NftError(r.stderr.strip() or "set introuvable (lancer `setup` ?)")
+            raise NftError(r.stderr.strip() or "set not found (run `setup`?)")
         return parse_elems(json.loads(r.stdout))
 
     def _script(self, script):
@@ -404,10 +404,10 @@ class Nft:
             raise NftError(r.stderr.strip())
 
     def apply(self, ver, deletes, adds, restore=()):
-        """Retraits puis ajouts [(réseau, timeout en s)], en deux transactions : nft 0.9.x refuse
-        qu'une même transaction retire des éléments puis en ajoute un qui les recouvre
-        (« interval overlaps with an existing one »). Si l'ajout échoue, `restore`
-        [(réseau, timeout)] remet les éléments retirés."""
+        """Removals then additions [(network, timeout in s)], in two transactions: nft 0.9.x
+        refuses a single transaction that removes elements then adds one that overlaps them
+        ("interval overlaps with an existing one"). If the addition fails, `restore`
+        [(network, timeout)] puts the removed elements back."""
         name = SETS[ver]
         if deletes:
             self._script(f"delete element inet fobots {name} "
@@ -423,7 +423,7 @@ class Nft:
                     try:
                         self._add(ver, restore)
                     except NftError as e:
-                        log.error("bans retirés non rétablis : %s", e)
+                        log.error("removed bans not restored: %s", e)
                 raise
 
     def _add(self, ver, adds):
@@ -433,10 +433,10 @@ class Nft:
             self.sim[ver] += [(n, t) for n, t in adds]
 
 
-# --- liste welcome et bans ---------------------------------------------------
+# --- welcome list and bans ---------------------------------------------------
 
 class Welcome:
-    """Liste de CIDR relue automatiquement quand le fichier change."""
+    """List of CIDRs, reread automatically when the file changes."""
 
     def __init__(self, path):
         self.path, self.nets, self.mtime = path, [], "unset"
@@ -459,16 +459,16 @@ class Welcome:
                     try:
                         nets.append(ipaddress.ip_network(line, strict=False))
                     except ValueError:
-                        log.warning("liste welcome : ligne ignorée %r", line)
+                        log.warning("welcome list: line ignored %r", line)
         self.nets = nets
-        log.info("liste welcome : %d plage(s) dans %s%s", len(nets), os.path.abspath(self.path),
-                 "" if mtime is not None else " (fichier absent)")
+        log.info("welcome list: %d range(s) in %s%s", len(nets), os.path.abspath(self.path),
+                 "" if mtime is not None else " (file missing)")
 
     @staticmethod
     def append(path, nets):
         with open(path, "a") as f:
             for n in nets:
-                f.write(f"{n}  # ajouté le {datetime.now():%Y-%m-%d %H:%M}\n")
+                f.write(f"{n}  # added on {datetime.now():%Y-%m-%d %H:%M}\n")
 
 
 class Banner:
@@ -476,7 +476,7 @@ class Banner:
         self.nft, self.welcome, self.ban_seconds = nft, welcome, ban_seconds
 
     def ban(self, rng, reason, seconds=None):
-        """Bannit la plage (hors liste welcome, sans doublon ni conflit nft)."""
+        """Bans the range (outside the welcome list, without duplicates or nft conflicts)."""
         seconds = seconds or self.ban_seconds
         self.welcome.reload()
         ver = rng[0]
@@ -485,7 +485,7 @@ class Banner:
             pieces += subtract(n, self.welcome.nets)
         pieces = list(ipaddress.collapse_addresses(pieces))
         if not pieces:
-            log.info("%s : entièrement dans la liste welcome, pas de ban", fmt_range(rng))
+            log.info("%s: entirely in the welcome list, no ban", fmt_range(rng))
             return False
         for attempt in (1, 2):
             elems = self.nft.elements(ver)
@@ -493,29 +493,29 @@ class Banner:
             adds, deletes = [], set()
             for p in pieces:
                 if any(p.subnet_of(e) for e in existing):
-                    continue  # déjà couvert
+                    continue  # already covered
                 adds.append((p, seconds))
                 deletes.update(e for e in existing if e.subnet_of(p))
             if not adds:
-                log.debug("%s : déjà banni", fmt_range(rng))
+                log.debug("%s: already banned", fmt_range(rng))
                 return False
             try:
                 restore = [(n, e or seconds) for n, e in elems if n in deletes]
                 self.nft.apply(ver, sorted(deletes, key=lambda n: n.network_address), adds, restore)
                 break
             except NftError as e:
-                # souvent un élément expiré entre la lecture et le retrait : on relit
-                log.warning("nft a refusé (tentative %d) : %s", attempt, e)
+                # often an element expired between the read and the removal: read again
+                log.warning("nft refused (attempt %d): %s", attempt, e)
                 if attempt == 2:
                     raise
-        log.info("BAN %s pour %d s (%s)%s", ", ".join(str(a) for a, _ in adds),
+        log.info("BAN %s for %d s (%s)%s", ", ".join(str(a) for a, _ in adds),
                  seconds, reason,
-                 f", {len(deletes)} ban(s) inclus remplacé(s)" if deletes else "")
+                 f", {len(deletes)} included ban(s) replaced" if deletes else "")
         return True
 
 
 def welcome_add(nft, net, ban_seconds):
-    """Retire des sets les bans qui touchent `net` ; garde le reste des plus larges."""
+    """Removes from the sets the bans that touch `net`; keeps the rest of the wider ones."""
     ver = net.version
     existing = nft.elements(ver)
     deletes, adds, restore = [], [], []
@@ -524,25 +524,25 @@ def welcome_add(nft, net, ban_seconds):
             continue
         deletes.append(e)
         restore.append((e, exp or ban_seconds))
-        if not e.subnet_of(net):  # `net` est strictement dans e : on regarde le reste
+        if not e.subnet_of(net):  # `net` is strictly inside e: look at the rest
             adds += [(p, exp or ban_seconds) for p in e.address_exclude(net)]
     if deletes:
         nft.apply(ver, deletes, adds, restore)
     return deletes, adds
 
 
-# --- constats « surveillés » (fichier JSON lignes) ---------------------------
+# --- "monitored" findings (JSON lines file) -----------------------------------
 
 def append_event(path, event):
     try:
         with open(path, "a") as f:
             f.write(json.dumps(event, ensure_ascii=False) + "\n")
     except OSError as e:
-        log.warning("écriture de %s impossible : %s", path, e)
+        log.warning("cannot write %s: %s", path, e)
 
 
 def read_events(path, since):
-    """Constats plus récents que `since` (epoch) ; les lignes illisibles sont ignorées."""
+    """Findings more recent than `since` (epoch); unreadable lines are ignored."""
     out = []
     try:
         f = open(path)
@@ -560,7 +560,7 @@ def read_events(path, since):
 
 
 def trim_events(path, keep=WATCH_FILE_KEEP):
-    """Retire les constats trop anciens (écriture atomique)."""
+    """Removes findings that are too old (atomic write)."""
     if not os.path.exists(path):
         return
     events = read_events(path, time.time() - keep)
@@ -571,23 +571,23 @@ def trim_events(path, keep=WATCH_FILE_KEEP):
                 f.write(json.dumps(ev, ensure_ascii=False) + "\n")
         os.replace(tmp, path)
     except OSError as e:
-        log.warning("élagage de %s impossible : %s", path, e)
+        log.warning("cannot prune %s: %s", path, e)
 
 
-# --- charge du serveur --------------------------------------------------------
+# --- server load --------------------------------------------------------------
 
-LOAD_DEFAULTS = {"psi": (20.0, 50.0), "loadavg": (1.0, 2.0)}  # (tendu, critique)
-LEVELS = ("normal", "tendu", "critique")
+LOAD_DEFAULTS = {"psi": (20.0, 50.0), "loadavg": (1.0, 2.0)}  # (tense, critical)
+LEVELS = ("normal", "tense", "critical")
 
 
 def read_psi(resource):
-    """Pression `some avg10` (en %) : part des 10 dernières secondes passée à attendre."""
+    """Pressure `some avg10` (in %): share of the last 10 seconds spent waiting."""
     with open(f"/proc/pressure/{resource}") as f:
         for line in f:
             kind, *fields = line.split()
             if kind == "some":
                 return float(dict(x.split("=") for x in fields)["avg10"])
-    raise OSError(f"/proc/pressure/{resource} : ligne 'some' absente")
+    raise OSError(f"/proc/pressure/{resource}: 'some' line missing")
 
 
 def read_load(signal):
@@ -597,10 +597,10 @@ def read_load(signal):
 
 
 class LoadMonitor(threading.Thread):
-    """Mesure la charge toutes les `interval` s et en déduit un niveau (0, 1, 2).
+    """Measures the load every `interval` s and derives a level (0, 1, 2).
 
-    On monte tout de suite, on redescend d'un niveau seulement après `recover`
-    secondes continues sous le palier (hystérésis), pour éviter les oscillations."""
+    It goes up immediately, and goes down one level only after `recover` continuous
+    seconds below the level (hysteresis), to avoid oscillations."""
 
     def __init__(self, signal, tense, critical, recover, factors, sampler=None,
                  interval=5.0, report=300.0):
@@ -616,26 +616,26 @@ class LoadMonitor(threading.Thread):
         return self.factors[self.level]
 
     def describe(self):
-        return f"{self.signal}={self.value:.2f}, niveau {LEVELS[self.level]} (x{self.factor:g})"
+        return f"{self.signal}={self.value:.2f}, level {LEVELS[self.level]} (x{self.factor:g})"
 
     def step(self, now):
         try:
             self.value = v = self.sampler()
         except (OSError, ValueError) as e:
-            log.warning("mesure de charge impossible : %s", e)
+            log.warning("cannot measure the load: %s", e)
             return
         target = sum(v >= t for t in self.thresholds)
         if target >= self.level:
             self.below_since = None
             if target > self.level:
                 self.level = target
-                log.warning("charge : %s", self.describe())
+                log.warning("load: %s", self.describe())
         elif self.below_since is None:
             self.below_since = now
         elif now - self.below_since >= self.recover:
             self.level -= 1
             self.below_since = None
-            log.info("charge : %s", self.describe())
+            log.info("load: %s", self.describe())
 
     def run(self):
         last_report = 0.0
@@ -644,29 +644,29 @@ class LoadMonitor(threading.Thread):
             self.step(now)
             if now - last_report >= self.report:
                 last_report = now
-                log.info("charge : %s", self.describe())
+                log.info("load: %s", self.describe())
             time.sleep(self.interval)
 
 
 class NoLoad:
-    """Charge ignorée : seuils et durées de ban inchangés."""
+    """Load ignored: thresholds and ban durations unchanged."""
     level, factor = 0, 1.0
 
     def describe(self):
-        return "charge non surveillée"
+        return "load not monitored"
 
 
-# --- cibles (un log par hôte) -------------------------------------------------
+# --- targets (one log per host) -----------------------------------------------
 
 class Site:
-    """Une cible : un log (un par hôte virtuel) et ses règles d'exclusion du comptage.
-    Un hôte joignable sous plusieurs noms (CNAME) n'a qu'un log, donc qu'une cible."""
+    """A target: a log (one per virtual host) and its rules excluding requests from the count.
+    A host reachable under several names (CNAME) has a single log, hence a single target."""
 
     def __init__(self, name, log_path, prefixes=(), regex=None, all=False):
         self.name, self.log, self.all = name, log_path, all
         self.prefixes = tuple(prefixes)
         self.regex = re.compile(regex) if regex else None
-        self.lines = self.ignored = 0  # statistiques (SIGUSR1)
+        self.lines = self.ignored = 0  # statistics (SIGUSR1)
 
     @property
     def has_path_rules(self):
@@ -679,19 +679,19 @@ class Site:
 
     def describe(self):
         if self.all:
-            return "tout est exclu"
+            return "everything is excluded"
         parts = []
         if self.prefixes:
-            parts.append("préfixes " + ", ".join(self.prefixes))
+            parts.append("prefixes " + ", ".join(self.prefixes))
         if self.regex:
             parts.append(f"regex {self.regex.pattern!r}")
-        return "; ".join(parts) or "aucune exclusion propre"
+        return "; ".join(parts) or "no exclusion of its own"
 
 
 def run_sites(det, sites, from_start, queue_size=200_000):
-    """Suit tous les logs (un thread par log) ; un seul fil traite les lignes, donc le
-    comptage par plage reste global et sans verrou. La file bornée limite la mémoire :
-    si le traitement prend du retard, les lecteurs attendent (rien n'est perdu)."""
+    """Follows all the logs (one thread per log); a single thread processes the lines, so
+    the count per range stays global and lock-free. The bounded queue limits memory:
+    if processing falls behind, the readers wait (nothing is lost)."""
     q = queue.Queue(maxsize=queue_size)
 
     def reader(site):
@@ -702,13 +702,13 @@ def run_sites(det, sites, from_start, queue_size=200_000):
         threading.Thread(target=reader, args=(site,), daemon=True, name=f"log-{site.name}").start()
     while True:
         try:
-            site, line = q.get(timeout=1)  # timeout : laisse passer les signaux
+            site, line = q.get(timeout=1)  # timeout: lets signals through
         except queue.Empty:
             continue
         det.feed_line(line, site)
 
 
-# --- détection ---------------------------------------------------------------
+# --- detection ---------------------------------------------------------------
 
 class Detector:
     def __init__(self, threshold, prefix_threshold, sustain, window, store, banner, rdap,
@@ -719,31 +719,31 @@ class Detector:
         self.load, self.min_threshold, self.min_ban = load or NoLoad(), min_threshold, min_ban_seconds
         self.sustain, self.window = sustain, window
         self.store, self.banner, self.rdap = store, banner, rdap
-        self.counts = defaultdict(dict)  # clé -> {seconde: n}
-        self.over = defaultdict(set)     # plage -> secondes au-dessus du seuil
+        self.counts = defaultdict(dict)  # key -> {second: n}
+        self.over = defaultdict(set)     # range -> seconds above the threshold
         self.hits = Counter()
         self.recent_ban = {}
         self.memo, self.memo_version = {}, store.version
         self.latest = self.last_purge = 0
         self.skipped = self.ignored = 0
-        self.ignore_path = ignore_path  # regex globale : requêtes non comptées (pages statiques)
-        self.sites = tuple(sites)       # cibles (statistiques de SIGUSR1)
+        self.ignore_path = ignore_path  # global regex: requests not counted (static pages)
+        self.sites = tuple(sites)       # targets (SIGUSR1 statistics)
         self.observed = scope == "observed"
         self.span4 = 2 ** (32 - observed_prefix)
         self.span6 = 2 ** (128 - OBSERVED_PREFIX6)
-        self.wide_shift4 = 32 - wide_prefix if wide_prefix else None  # None : allocation entière
+        self.wide_shift4 = 32 - wide_prefix if wide_prefix else None  # None: whole allocation
         self.wide_shift6 = 128 - OBSERVED_WIDE6 if wide_prefix else None
-        self.escalate = escalate        # bans partiels récents d'une allocation avant de la bannir
-        self.ips = {}      # ip -> [requêtes, début, dernière seconde, plage] (mode observed)
-        self.partial = {}  # plage -> secondes des bans partiels
-        self.watch = watch  # (regex agent ou None, regex chemin ou None) ; None = désactivé
-        self.watched = {}   # ip -> [requêtes, dernière seconde vue, chemin exemple]
-        self.watch_file = watch_file  # constats écrits ici (relus par `fobots.py watched`)
+        self.escalate = escalate        # recent partial bans of an allocation before banning it
+        self.ips = {}      # ip -> [requests, start, last second, range] (observed mode)
+        self.partial = {}  # range -> seconds of the partial bans
+        self.watch = watch  # (agent regex or None, path regex or None); None = disabled
+        self.watched = {}   # ip -> [requests, last second seen, example path]
+        self.watch_file = watch_file  # findings written here (reread by `fobots.py watched`)
 
     def watch_match(self, m):
-        """Chemin de la requête (m : REQ_RE) si elle correspond aux motifs surveillés, sinon None.
-        Tous les motifs fournis doivent correspondre. Les lignes sont comptées comme les
-        autres : on ne fait que garder une trace."""
+        """Path of the request (m: REQ_RE) if it matches the monitored patterns, else None.
+        All the patterns given must match. The lines are counted like the others:
+        we only keep a trace."""
         agent_re, path_re = self.watch
         if (agent_re is None or agent_re.search(m.group(2))) and \
                 (path_re is None or path_re.search(m.group(1))):
@@ -759,7 +759,7 @@ class Detector:
             self.watched[ip] = [1, sec, path[:80]]
 
     def report_watched(self, key, seconds):
-        """Journalise les IP surveillées contenues dans la plage qui vient d'être bannie."""
+        """Logs the monitored IPs contained in the range that has just been banned."""
         ver, start, end = key
         hit = []
         for ip, (n, _, path) in self.watched.items():
@@ -774,16 +774,16 @@ class Detector:
                 "t": int(time.time()), "range": fmt_range(key), "seconds": seconds,
                 "ips": [[ip, n, path] for n, ip, path in hit[:WATCH_EVENT_IPS]]})
         top = hit[:10]
-        log.warning("WATCH %s banni : %d IP surveillée(s), %d requête(s) : %s%s ; "
-                    "pour les protéger : fobots.py welcome add %s",
+        log.warning("WATCH %s banned: %d monitored IP(s), %d request(s): %s%s; "
+                    "to protect them: fobots.py welcome add %s",
                     fmt_range(key), len(hit), sum(n for n, _, _ in hit),
                     ", ".join(f"{ip} ({n} req, {path})" for n, ip, path in top),
-                    f" (+{len(hit) - len(top)} autres)" if len(hit) > len(top) else "",
+                    f" (+{len(hit) - len(top)} others)" if len(hit) > len(top) else "",
                     " ".join(str(ipaddress.ip_network(ip)) for _, ip, _ in top))
 
     @property
     def threshold(self):
-        """Seuil effectif : abaissé quand la charge monte, sans passer sous le plancher."""
+        """Effective threshold: lowered when the load rises, without going below the floor."""
         return self._scaled(self.base_threshold, self.min_threshold)
 
     @property
@@ -794,7 +794,7 @@ class Detector:
         return min(value, max(floor, value * self.load.factor))
 
     def ban_seconds(self):
-        """Durée effective : raccourcie quand la charge monte (on re-juge plus vite)."""
+        """Effective duration: shortened when the load rises (ranges are re-judged sooner)."""
         return int(self._scaled(self.banner.ban_seconds, self.min_ban))
 
     def feed_line(self, line, site=None):
@@ -804,12 +804,12 @@ class Detector:
             return
         if site is not None:
             site.lines += 1
-            if site.all:  # cible entièrement exclue du comptage
+            if site.all:  # target entirely excluded from the count
                 site.ignored += 1
                 self.ignored += 1
                 return
         if self.ignore_path is not None or (site is not None and site.has_path_rules):
-            pm = PATH_RE.search(line)  # illisible : la ligne est comptée normalement
+            pm = PATH_RE.search(line)  # unreadable: the line is counted normally
             if pm:
                 path = pm.group(1)
                 if (self.ignore_path is not None and self.ignore_path.search(path)) or \
@@ -820,7 +820,7 @@ class Detector:
                     return
         tag = None
         if self.watch:
-            rm = REQ_RE.search(line)  # demande aussi l'agent (format combined)
+            rm = REQ_RE.search(line)  # also needs the agent (combined format)
             if rm:
                 tag = self.watch_match(rm)
         try:
@@ -844,7 +844,7 @@ class Detector:
                 return
             if not addr.is_global:
                 return
-            key = self.store.find(addr) or prefix_of(addr)  # plage connue, sinon préfixe
+            key = self.store.find(addr) or prefix_of(addr)  # known range, otherwise prefix
             self.memo[ip] = key
         if sec > self.latest:
             self.latest = sec
@@ -872,14 +872,14 @@ class Detector:
         if e is None:
             if len(self.ips) < OBSERVED_MAX_IPS:
                 self.ips[ip] = [1, sec, sec, key]
-        elif sec - e[1] > self.window:  # fenêtre glissante grossière : on repart de zéro
+        elif sec - e[1] > self.window:  # coarse sliding window: start again from zero
             e[:] = [1, sec, sec, key]
         else:
             e[0] += 1
             e[2], e[3] = sec, key
 
     def targets(self, key, sec):
-        """(plages à bannir, précision pour le journal) pour une allocation qui a déclenché."""
+        """(ranges to ban, detail for the journal) for an allocation that has triggered."""
         if not self.observed:
             return [key], ""
         ver = key[0]
@@ -888,33 +888,33 @@ class Detector:
         recent = [t for t in self.partial.get(key, ()) if sec - t < self.banner.ban_seconds]
         groups = cluster_ips(ips, self.span4 if ver == 4 else self.span6)
         picked = None
-        why = f"escalade : {len(recent)} bans partiels récents"
+        why = f"escalation: {len(recent)} recent partial bans"
         if len(recent) < self.escalate and groups:
             picked = pick_groups(groups, OBSERVED_COVERAGE, OBSERVED_MAX_GROUPS)
-            why = f"{len(groups)} groupe(s) d'IP, trop dispersé"
-        if picked is None:  # repli : blocs larges (ou l'allocation entière), jamais plus étroit
+            why = f"{len(groups)} group(s) of IPs, too scattered"
+        if picked is None:  # fallback: wide blocks (or the whole allocation), never narrower
             self.partial.pop(key, None)
             shift = self.wide_shift4 if ver == 4 else self.wide_shift6
             if shift is None or not ips or (key[2] - key[1] + 1) <= (1 << shift):
-                return [key], f", {why} : allocation entière"
+                return [key], f", {why}: whole allocation"
             blocks = wide_blocks(ips, key[1], key[2], shift, OBSERVED_COVERAGE)
             return ([(ver, a, b) for a, b in blocks],
-                    f", {why} : {len(blocks)} bloc(s) de /{(32 if ver == 4 else 128) - shift} "
-                    f"au lieu de l'allocation")
+                    f", {why}: {len(blocks)} block(s) of /{(32 if ver == 4 else 128) - shift} "
+                    f"instead of the allocation")
         self.partial[key] = recent + [sec]
         covered = sum(g[2] for g in picked) / sum(g[2] for g in groups)
         return ([(ver, g[0], g[1]) for g in picked],
-                f", {len(ips)} IP en {len(groups)} groupe(s), {len(picked)} banni(s) "
-                f"({covered:.0%} des requêtes)")
+                f", {len(ips)} IP(s) in {len(groups)} group(s), {len(picked)} banned "
+                f"({covered:.0%} of the requests)")
 
     def trigger(self, key, sec, n, ip):
         if sec - self.recent_ban.get(key, -10**12) < RECENT_BAN_SECS:
             return
         self.recent_ban[key] = sec
         thr = self.threshold
-        reason = f"{n} req/s > {thr:g}, vu avec {ip}, {self.hits[key]} requêtes au total"
+        reason = f"{n} req/s > {thr:g}, seen with {ip}, {self.hits[key]} requests in total"
         if self.load.level:
-            reason += f", niveau de charge {LEVELS[self.load.level]}"
+            reason += f", load level {LEVELS[self.load.level]}"
         targets, detail = self.targets(key, sec)
         reason += detail
         try:
@@ -923,7 +923,7 @@ class Detector:
                 if self.banner.ban(t, reason, seconds) and self.watched:
                     self.report_watched(t, seconds)
         except NftError as e:
-            log.error("ban de %s impossible : %s", fmt_range(key), e)
+            log.error("cannot ban %s: %s", fmt_range(key), e)
 
     def purge(self):
         self.last_purge = cutoff = self.latest
@@ -949,31 +949,31 @@ class Detector:
             del self.watched[ip]
 
     def dump(self, top=30):
-        log.info("--- %d plages suivies, %d lignes illisibles, %d lignes exclues, "
-                 "%d IP surveillées, %s ---", len(self.hits), self.skipped, self.ignored,
+        log.info("--- %d ranges tracked, %d unreadable lines, %d excluded lines, "
+                 "%d monitored IPs, %s ---", len(self.hits), self.skipped, self.ignored,
                  len(self.watched), self.load.describe())
         for site in self.sites:
-            log.info("site %s : %d lignes lues, %d exclues", site.name, site.lines, site.ignored)
+            log.info("site %s: %d lines read, %d excluded", site.name, site.lines, site.ignored)
         for key, n in self.hits.most_common(top):
-            label = fmt_range(key) if isinstance(key, tuple) else f"(non résolu) {key}"
+            label = fmt_range(key) if isinstance(key, tuple) else f"(unresolved) {key}"
             log.info("%10d  %s", n, label)
 
 
-# --- lecture du log ----------------------------------------------------------
+# --- reading the log ---------------------------------------------------------
 
 def follow(path, from_start=False, poll=0.5, grace=2.0):
-    """Comme `tail -F` : suit le fichier à travers rotation et troncature.
+    """Like `tail -F`: follows the file through rotation and truncation.
 
-    Après un renommage (logrotate `create`), le serveur écrit encore dans l'ancien
-    fichier jusqu'à ce qu'il le rouvre : on le lit `grace` secondes de plus avant
-    de passer au nouveau, pour ne perdre aucune ligne."""
+    After a rename (logrotate `create`), the server still writes to the old file until it
+    reopens it: we read it `grace` more seconds before moving to the new one, so as not
+    to lose any line."""
     f, inode, buf, first, rotated_at = None, None, b"", True, None
     while True:
         if f is None:
             try:
                 f = open(path, "rb")
             except OSError:
-                first = False  # le fichier apparaîtra plus tard : on le lira en entier
+                first = False  # the file will appear later: we will read it entirely
                 time.sleep(poll)
                 continue
             inode = os.fstat(f.fileno()).st_ino
@@ -983,7 +983,7 @@ def follow(path, from_start=False, poll=0.5, grace=2.0):
         line = f.readline()
         if line:
             buf += line
-            if buf.endswith(b"\n"):  # sinon l'écriture est en cours : on attend la suite
+            if buf.endswith(b"\n"):  # otherwise the write is in progress: wait for the rest
                 yield buf.decode(errors="replace")
                 buf = b""
             continue
@@ -991,7 +991,7 @@ def follow(path, from_start=False, poll=0.5, grace=2.0):
             st = os.stat(path)
         except OSError:
             st = None
-        if st is None or st.st_ino != inode:  # rotation : on passera au nouveau fichier
+        if st is None or st.st_ino != inode:  # rotation: we will move to the new file
             now = time.monotonic()
             rotated_at = rotated_at or now
             if now - rotated_at < grace:
@@ -1001,14 +1001,14 @@ def follow(path, from_start=False, poll=0.5, grace=2.0):
             f, rotated_at = None, None
             if st is None:
                 time.sleep(poll)
-        elif st.st_size < f.tell():          # troncature (copytruncate)
+        elif st.st_size < f.tell():          # truncation (copytruncate)
             f.seek(0)
         else:
             time.sleep(poll)
 
 
 def stdin_is_feed():
-    """stdin est-il un flux exploitable (tube ou fichier) ? Ni terminal, ni /dev/null, ni fermé."""
+    """Is stdin a usable feed (pipe or file)? Neither a terminal, nor /dev/null, nor closed."""
     try:
         mode = os.fstat(sys.stdin.fileno()).st_mode
     except (OSError, ValueError, AttributeError):
@@ -1017,7 +1017,7 @@ def stdin_is_feed():
 
 
 def log_lines(args):
-    if args.files:  # fichiers donnés en ligne de commande : lus une fois (- = stdin)
+    if args.files:  # files given on the command line: read once (- = stdin)
         for path in args.files:
             f = sys.stdin if path == "-" else open(path, errors="replace")
             with f:
@@ -1026,23 +1026,23 @@ def log_lines(args):
         yield from sys.stdin
 
 
-# --- commandes ---------------------------------------------------------------
+# --- commands ----------------------------------------------------------------
 
 def paths(args):
-    """(cache RDAP, liste welcome). La liste welcome se trouve à côté de la conf utilisée,
-    sinon dans CONF_DIR : jamais relative au dossier courant."""
+    """(RDAP cache, welcome list). The welcome list is next to the configuration used,
+    otherwise in CONF_DIR: never relative to the current directory."""
     wl_base = os.path.dirname(os.path.abspath(args.config)) if args.config else CONF_DIR
     return (args.cache or os.path.join(args.dir, "ip_ranges.json"),
             args.welcome or os.path.join(wl_base, "welcome.txt"))
 
 
 def ensure_dir(path):
-    """Crée le dossier (0750) s'il manque ; arrêt avec un message clair sinon."""
+    """Creates the directory (0750) if missing; stops with a clear message otherwise."""
     try:
         os.makedirs(path, mode=0o750, exist_ok=True)
     except OSError as e:
-        sys.exit(f"impossible de créer {path} : {e} (créer le dossier avec les bons droits, "
-                 "ou donner --dir)")
+        sys.exit(f"cannot create {path}: {e} (create the directory with the right permissions, "
+                 "or give --dir)")
 
 
 def watch_file_path(args):
@@ -1057,15 +1057,15 @@ def cmd_run(args):
     nft = Nft(args.nft_bin, args.dry_run)
     try:
         for ver in (4, 6):
-            log.info("IPv%d : %d plage(s) déjà bannie(s)", ver, len(nft.elements(ver)))
+            log.info("IPv%d: %d range(s) already banned", ver, len(nft.elements(ver)))
     except NftError as e:
-        log.error("nft : %s", e)
+        log.error("nft: %s", e)
         return 1
     rdap = Rdap(store, args.delay, args.rdap_per_hour)
     rdap.start()
     load = None
     if args.load_signal not in ("none", "psi", "loadavg"):
-        log.error("load_signal invalide : %r (none, psi ou loadavg)", args.load_signal)
+        log.error("invalid load_signal: %r (none, psi or loadavg)", args.load_signal)
         return 1
     if args.load_signal != "none":
         signal_name = args.load_signal
@@ -1073,9 +1073,9 @@ def cmd_run(args):
             read_load(signal_name)
         except (OSError, ValueError) as e:
             if signal_name != "psi":
-                log.error("charge : %s", e)
+                log.error("load: %s", e)
                 return 1
-            log.warning("PSI indisponible (%s), repli sur loadavg", e)
+            log.warning("PSI unavailable (%s), falling back to loadavg", e)
             signal_name = "loadavg"
         d_tense, d_crit = LOAD_DEFAULTS[signal_name]
         load = LoadMonitor(signal_name,
@@ -1083,7 +1083,7 @@ def cmd_run(args):
                            d_crit if args.load_critical is None else args.load_critical,
                            args.load_recover, (args.tense_factor, args.critical_factor))
         load.start()
-        log.info("surveillance de la charge : %s, paliers %s, retour après %d s",
+        log.info("load monitoring: %s, levels %s, recovery after %d s",
                  signal_name, load.thresholds, args.load_recover)
     watch = None
     if args.watch_agent or args.watch_path:
@@ -1091,43 +1091,43 @@ def cmd_run(args):
             watch = (re.compile(args.watch_agent) if args.watch_agent else None,
                      re.compile(args.watch_path) if args.watch_path else None)
         except re.error as e:
-            log.error("expression régulière invalide : %s", e)
+            log.error("invalid regular expression: %s", e)
             return 1
-        log.info("surveillance des requêtes : agent=%r chemin=%r (comptées normalement, "
-                 "journalisées si leur plage est bannie)", args.watch_agent, args.watch_path)
+        log.info("request monitoring: agent=%r path=%r (counted normally, "
+                 "logged if their range is banned)", args.watch_agent, args.watch_path)
     ignore_path = None
     if args.ignore_path:
         try:
             ignore_path = re.compile(args.ignore_path)
         except re.error as e:
-            log.error("expression régulière invalide pour ignore_path : %s", e)
+            log.error("invalid regular expression for ignore_path: %s", e)
             return 1
-        log.info("requêtes exclues du comptage (chemin) : %r", args.ignore_path)
+        log.info("requests excluded from the count (path): %r", args.ignore_path)
     sites = [Site(d["name"], d["log"], d["prefixes"], d["regex"], d["all"])
              for d in (getattr(args, "sites", None) or [])]
-    if args.log:  # log unique de [fobots] ou --log : une cible sans règle propre
+    if args.log:  # single log of [fobots] or --log: a target without rules of its own
         if any(x.log == args.log for x in sites):
-            log.error("le log %s est à la fois dans [fobots] et dans une section [site:…]", args.log)
+            log.error("the log %s is both in [fobots] and in a [site:…] section", args.log)
             return 1
-        sites.insert(0, Site("défaut", args.log))
+        sites.insert(0, Site("default", args.log))
     if args.files:
-        sites = []  # fichiers donnés en argument : lecture unique, sans suivi
+        sites = []  # files given as arguments: read once, not followed
     for x in sites:
-        log.info("cible %s : suivi de %s (%s)", x.name, x.log, x.describe())
+        log.info("target %s: following %s (%s)", x.name, x.log, x.describe())
     if args.ban_scope not in SCOPES:
-        log.error("ban_scope invalide : %r (%s)", args.ban_scope, " ou ".join(SCOPES))
+        log.error("invalid ban_scope: %r (%s)", args.ban_scope, " or ".join(SCOPES))
         return 1
     if not 8 <= args.observed_prefix <= 32:
-        log.error("observed_prefix doit être entre 8 et 32 (IPv4)")
+        log.error("observed_prefix must be between 8 and 32 (IPv4)")
         return 1
     if args.observed_max_prefix and not 8 <= args.observed_max_prefix <= args.observed_prefix:
-        log.error("observed_max_prefix doit être 0 (allocation entière) ou entre 8 et "
+        log.error("observed_max_prefix must be 0 (whole allocation) or between 8 and "
                   "observed_prefix (%d)", args.observed_prefix)
         return 1
     if not sites and not args.files and not stdin_is_feed():
-        log.error("aucun log à suivre : définir `log =` dans [fobots] ou une section [site:NOM] "
-                  "avec `log =` (configuration utilisée : %s), ou passer --log FICHIER ; "
-                  "pour lire stdin explicitement : `run -`", args.config or "aucune")
+        log.error("no log to follow: define `log =` in [fobots] or in a [site:NAME] section "
+                  "(configuration used: %s), or pass --log FILE; "
+                  "to read stdin explicitly: `run -`", args.config or "none")
         return 1
     watch_file = watch_file_path(args) if watch else None
     if watch_file:
@@ -1138,29 +1138,29 @@ def cmd_run(args):
                    ignore_path, sites, args.ban_scope, args.observed_prefix, args.observed_escalate,
                    args.observed_max_prefix)
     if det.observed:
-        log.info("ban_scope observed : groupes d'IP d'au plus /%d (IPv6 /%d), repli en blocs "
-                 "de %s si dispersé ou après %d bans partiels", args.observed_prefix,
+        log.info("ban_scope observed: groups of IPs of at most /%d (IPv6 /%d), fallback to blocks "
+                 "of %s if scattered or after %d partial bans", args.observed_prefix,
                  OBSERVED_PREFIX6,
                  f"/{args.observed_max_prefix} (IPv6 /{OBSERVED_WIDE6})"
-                 if args.observed_max_prefix else "l'allocation entière", args.observed_escalate)
+                 if args.observed_max_prefix else "the whole allocation", args.observed_escalate)
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     signal.signal(signal.SIGUSR1, lambda *_: det.dump())
     if args.config:
-        log.info("configuration : %s", args.config)
-    log.info("démon prêt : seuil %s req/s, ban %d s, %d plage(s) en cache dans %s",
+        log.info("configuration: %s", args.config)
+    log.info("daemon ready: threshold %s req/s, ban %d s, %d range(s) cached in %s",
              args.threshold, args.ban_seconds, len(store.ranges), os.path.abspath(cache))
     try:
         if sites:
             run_sites(det, sites, args.from_start)
-        else:  # fichiers (lus une fois) ou stdin
+        else:  # files (read once) or stdin
             for line in log_lines(args):
                 det.feed_line(line)
     except KeyboardInterrupt:
         pass
-    except OSError as e:  # stdin ou fichier illisible
-        log.error("lecture impossible : %s", e)
+    except OSError as e:  # stdin or file unreadable
+        log.error("cannot read: %s", e)
         return 1
-    log.info("arrêt")
+    log.info("stopping")
     return 0
 
 
@@ -1169,10 +1169,10 @@ def cmd_setup(args):
     if args.dry_run:
         print(NFT_SETUP, end="")
     elif nft.table_exists():
-        print("table inet fobots déjà en place")
+        print("table inet fobots already in place")
     else:
         nft.setup()
-        print("table inet fobots créée")
+        print("table inet fobots created")
     return 0
 
 
@@ -1180,17 +1180,17 @@ def cmd_bans(args):
     nft = Nft(args.nft_bin, args.dry_run)
     for ver in (4, 6):
         for n, exp in sorted(nft.elements(ver), key=lambda e: e[0].network_address):
-            print(f"{str(n):<24} {'' if exp is None else f'{exp} s restantes'}")
+            print(f"{str(n):<24} {'' if exp is None else f'{exp} s left'}")
     return 0
 
 
 def cmd_watched(args):
-    """IP surveillées prises dans un ban (historique + état actuel), pour repérer les faux positifs."""
+    """Monitored IPs caught in a ban (history + current state), to spot false positives."""
     path = watch_file_path(args)
     events = read_events(path, time.time() - args.since)
     if not events:
-        print(f"aucun constat dans {path} sur cette période (watch_agent / watch_path "
-              "activés dans la conf du démon ?)")
+        print(f"no finding in {path} for this period (watch_agent / watch_path "
+              "enabled in the daemon's configuration?)")
         return 0
     active, known = [], False
     if not args.dry_run:
@@ -1199,7 +1199,7 @@ def cmd_watched(args):
             active = [(n, e) for ver in (4, 6) for n, e in nft.elements(ver)]
             known = True
         except NftError as e:
-            print(f"état des bans indisponible ({e}) : colonne ÉTAT inconnue", file=sys.stderr)
+            print(f"ban state unavailable ({e}): STATE column unknown", file=sys.stderr)
     agg = {}
     for ev in events:
         for ip, n, rpath in ev["ips"]:
@@ -1214,14 +1214,14 @@ def cmd_watched(args):
         if known:
             addr = ipaddress.ip_address(ip)
             left = [e for n, e in active if n.version == addr.version and addr in n]
-            state = f"actif ({max(e or 0 for e in left)} s)" if left else "expiré"
+            state = f"active ({max(e or 0 for e in left)} s)" if left else "expired"
         a["state"] = state
         rows.append((ip, a))
     if args.active:
-        rows = [r for r in rows if r[1]["state"].startswith("actif")]
-    rows.sort(key=lambda r: (not r[1]["state"].startswith("actif"), -r[1]["bans"], -r[1]["req"]))
+        rows = [r for r in rows if r[1]["state"].startswith("active")]
+    rows.sort(key=lambda r: (not r[1]["state"].startswith("active"), -r[1]["bans"], -r[1]["req"]))
     if not rows:
-        print("aucune IP surveillée dans un ban actif")
+        print("no monitored IP in an active ban")
         return 0
     cmd = "fobots.py welcome add " + " ".join(str(ipaddress.ip_network(ip)) for ip, _ in rows)
     if args.config:
@@ -1229,58 +1229,58 @@ def cmd_watched(args):
     if args.cmd:
         print(cmd)
         return 0
-    print(f"{'IP':<40} {'BANS':>4} {'REQ':>6}  {'DERNIER BAN':<16} {'PLAGE':<20} {'ÉTAT':<14} ROUTE")
+    print(f"{'IP':<40} {'BANS':>4} {'REQ':>6}  {'LAST BAN':<16} {'RANGE':<20} {'STATE':<14} ROUTE")
     for ip, a in rows:
         when = datetime.fromtimestamp(a["t"]).strftime("%Y-%m-%d %H:%M")
         print(f"{ip:<40} {a['bans']:>4} {a['req']:>6}  {when:<16} {a['range']:<20} "
               f"{a['state']:<14} {a['path']}")
-    print(f"\n{len(rows)} IP sur {args.since / 86400:g} j. Pour toutes les protéger :\n  {cmd}")
+    print(f"\n{len(rows)} IP(s) over {args.since / 86400:g} d. To protect them all:\n  {cmd}")
     return 0
 
 
 class Installer:
-    """Installation sur Debian/Ubuntu : nftables, utilisateur, dossiers, programme, conf, unité."""
+    """Installation on Debian/Ubuntu: nftables, user, directories, program, configuration, unit."""
 
     def __init__(self, args):
         self.args = args
         self.dry = args.dry_run
-        self.dest = args.destdir  # préfixe de test : écrit les fichiers sans toucher au système
+        self.dest = args.destdir  # test prefix: writes the files without touching the system
         self.system = not self.dest and not self.dry
 
     def path(self, p):
         return os.path.join(self.dest, p.lstrip("/")) if self.dest else p
 
     def say(self, status, msg):
-        if self.dry and status == "ok":  # rien n'est fait : ne pas affirmer le contraire
-            status, msg = "..", f"(simulé) {msg}"
+        if self.dry and status == "ok":  # nothing is done: do not claim otherwise
+            status, msg = "..", f"(simulated) {msg}"
         print(f"[{status}] {msg}")
 
     def said_done(self, msg):
-        """Action système (apt, useradd…) : « ok » seulement si elle a vraiment eu lieu."""
+        """System action (apt, useradd…): "ok" only if it really took place."""
         self.say("ok" if self.system or self.dry else "..",
-                 msg if self.system or self.dry else f"{msg} (non fait : --destdir)")
+                 msg if self.system or self.dry else f"{msg} (not done: --destdir)")
 
     def confirm(self, question):
         if self.args.yes or self.dry:
             return True
         if sys.stdin.isatty():
-            return input(f"{question} [o/N] ").strip().lower() in ("o", "oui", "y", "yes")
-        sys.exit(f"{question} : réponse impossible hors terminal, relancer avec --yes")
+            return input(f"{question} [y/N] ").strip().lower() in ("y", "yes", "o", "oui")
+        sys.exit(f"{question}: cannot answer outside a terminal, run again with --yes")
 
     def run(self, cmd, check=True):
-        """Commande système ; avec --dry-run ou --destdir, elle est seulement affichée."""
+        """System command; with --dry-run or --destdir, it is only printed."""
         if not self.system:
-            note = "" if self.dry else "   (ignoré : --destdir)"
+            note = "" if self.dry else "   (ignored: --destdir)"
             print(f"  $ {' '.join(cmd)}{note}")
             return subprocess.CompletedProcess(cmd, 0, "", "")
         r = subprocess.run(cmd, capture_output=True, text=True)
         if check and r.returncode:
-            sys.exit(f"échec de {' '.join(cmd)} :\n{r.stderr.strip()}")
+            sys.exit(f"{' '.join(cmd)} failed:\n{r.stderr.strip()}")
         return r
 
     def ensure_dir(self, path, mode, owner=None):
         if self.dry:
-            print(f"  créer {path} (mode {mode:o})")
+            print(f"  create {path} (mode {mode:o})")
             return
         real = self.path(path)
         os.makedirs(real, exist_ok=True)
@@ -1290,7 +1290,7 @@ class Installer:
 
     def write(self, path, content, mode):
         if self.dry:
-            print(f"  écrire {path} (mode {mode:o})")
+            print(f"  write {path} (mode {mode:o})")
             return
         real = self.path(path)
         os.makedirs(os.path.dirname(real), exist_ok=True)
@@ -1304,8 +1304,8 @@ class Installer:
     def template(name):
         p = os.path.join(SRC_DIR, name)
         if not os.path.exists(p):
-            sys.exit(f"{name} introuvable à côté de {os.path.abspath(__file__)} : "
-                     "lancer l'installation depuis un clone du dépôt")
+            sys.exit(f"{name} not found next to {os.path.abspath(__file__)}: "
+                     "run the installation from a clone of the repository")
         with open(p) as f:
             return f.read()
 
@@ -1319,47 +1319,47 @@ class Installer:
     def check_python(self):
         v = sys.version_info
         if v < (3, 7):
-            sys.exit(f"Python 3.7 ou plus requis (trouvé {v.major}.{v.minor})")
+            sys.exit(f"Python 3.7 or later required (found {v.major}.{v.minor})")
         self.say("ok", f"Python {v.major}.{v.minor}.{v.micro}")
 
     def ensure_nft(self):
         binary = self.args.nft_bin
         found = shutil.which(binary)
         if found:
-            self.say("ok", f"nft : {found}")
+            self.say("ok", f"nft: {found}")
             return
         if not shutil.which("apt-get"):
-            self.say("!!", "nft introuvable et apt-get absent : installer le paquet nftables à la main")
+            self.say("!!", "nft not found and apt-get absent: install the nftables package by hand")
             if self.system:
                 sys.exit(1)
             return
-        if not self.confirm("nft est absent. Installer le paquet nftables avec apt-get ?"):
-            sys.exit("nftables est indispensable")
+        if not self.confirm("nft is missing. Install the nftables package with apt-get?"):
+            sys.exit("nftables is required")
         self.run(["apt-get", "install", "-y", "nftables"])
-        self.said_done("nftables installé")
+        self.said_done("nftables installed")
 
     def selftest(self):
         if not self.system:
-            self.say("..", "test de nft (sets d'intervalles avec expiration) : fait à l'installation réelle")
+            self.say("..", "nft test (interval sets with timeouts): done at the real installation")
             return
         ok, expires, msg = Nft(self.args.nft_bin).selftest()
         if not ok:
-            sys.exit(f"[!!] nft ne convient pas : {msg}\n"
-                     "     (noyau sans nf_tables, paquet nftables trop ancien, ou droits ?)")
-        self.say("ok", "nft : sets d'intervalles avec expiration, sortie JSON lisible")
+            sys.exit(f"[!!] nft is not suitable: {msg}\n"
+                     "     (kernel without nf_tables, nftables package too old, or permissions?)")
+        self.say("ok", "nft: interval sets with timeouts, readable JSON output")
         if not expires:
-            self.say("..", "cette version de nft n'indique pas le temps restant des bans "
-                     "(`bans` et `watched` ne l'affichent donc pas)")
+            self.say("..", "this version of nft does not show the remaining time of bans "
+                     "(`bans` and `watched` therefore do not show it)")
 
     def ensure_user(self):
         import pwd
         try:
             pwd.getpwnam(SERVICE_USER)
-            self.say("ok", f"utilisateur {SERVICE_USER} existe")
+            self.say("ok", f"user {SERVICE_USER} exists")
         except KeyError:
             self.run(["useradd", "--system", "--user-group", "--no-create-home",
                       "--shell", "/usr/sbin/nologin", SERVICE_USER])
-            self.said_done(f"utilisateur {SERVICE_USER} créé")
+            self.said_done(f"user {SERVICE_USER} created")
 
     def log_paths(self):
         if self.args.log:
@@ -1369,7 +1369,7 @@ class Installer:
 
     @staticmethod
     def group_for(log_file):
-        """Groupe donnant accès à ce log s'il n'est pas public (et pas root), sinon adm."""
+        """Group giving access to this log if it is not public (and not root), otherwise adm."""
         import grp
         try:
             st = os.stat(log_file)
@@ -1381,7 +1381,7 @@ class Installer:
         return "adm"
 
     def log_groups(self):
-        """Groupes d'accès à tous les logs (--log-group impose le sien)."""
+        """Access groups for all the logs (--log-group imposes its own)."""
         if self.args.log_group:
             return [self.args.log_group]
         groups = []
@@ -1396,69 +1396,69 @@ class Installer:
         dst = os.path.join(INSTALL_DIR, "fobots.py")
         src = os.path.abspath(__file__)
         if os.path.abspath(self.path(dst)) == src:
-            self.say("ok", f"programme déjà en place : {dst}")
+            self.say("ok", f"program already in place: {dst}")
         else:
             with open(src) as f:
                 self.write(dst, f.read(), 0o755)
-            self.say("ok", f"programme : {dst}")
+            self.say("ok", f"program: {dst}")
 
         self.ensure_dir(CONF_DIR, 0o755)
         conf = os.path.join(CONF_DIR, "fobots.conf")
         if self.read(conf) is not None:
-            self.say("ok", f"{conf} existe : conservé tel quel")
+            self.say("ok", f"{conf} exists: kept as is")
             if self.args.log:
-                self.say("!!", f"--log ignoré : modifier la ligne `log =` de {conf} à la main")
+                self.say("!!", f"--log ignored: edit the `log =` line of {conf} by hand")
         else:
             text = self.template("fobots.conf.example")
             if self.args.log:
                 text = re.sub(r"(?m)^log\s*=.*$", lambda m: f"log = {self.args.log}", text)
             self.write(conf, text, 0o644)
-            self.say("ok", f"configuration : {conf}")
+            self.say("ok", f"configuration: {conf}")
         wl = os.path.join(CONF_DIR, "welcome.txt")
         if self.read(wl) is None:
-            self.write(wl, "# Plages à ne jamais bannir, un CIDR par ligne.\n"
-                       "# Ajouter avec : fobots.py welcome add CIDR (retire aussi les bans concernés)\n", 0o644)
-            self.say("ok", f"liste welcome : {wl}")
+            self.write(wl, "# Ranges never to ban, one CIDR per line.\n"
+                       "# Add with: fobots.py welcome add CIDR (also removes the bans concerned)\n", 0o644)
+            self.say("ok", f"welcome list: {wl}")
 
         self.ensure_dir(STATE_DIR, 0o750, (SERVICE_USER, SERVICE_USER))
-        self.say("ok", f"dossier d'état : {STATE_DIR}")
+        self.say("ok", f"state directory: {STATE_DIR}")
 
         unit = re.sub(r"(?m)^SupplementaryGroups=.*$", f"SupplementaryGroups={' '.join(self.log_groups())}",
                       self.template("fobots.service.example"))
         if self.read(UNIT_PATH) == unit:
-            self.say("ok", f"unité systemd à jour : {UNIT_PATH}")
+            self.say("ok", f"systemd unit up to date: {UNIT_PATH}")
         else:
             self.write(UNIT_PATH, unit, 0o644)
-            self.say("ok", f"unité systemd : {UNIT_PATH} (groupes d'accès aux logs : {' '.join(self.log_groups())})")
+            self.say("ok", f"systemd unit: {UNIT_PATH} (log access groups: {' '.join(self.log_groups())})")
             self.run(["systemctl", "daemon-reload"])
 
     def check_log_access(self):
         logs = self.log_paths()
         if not logs:
-            self.say("..", "aucun log configuré : le démon lira stdin")
+            self.say("..", "no log configured: the daemon will read stdin")
             return
         for log_file in logs:
             if not self.system:
-                self.say("..", f"accès de {SERVICE_USER} à {log_file} : vérifié à l'installation réelle")
+                self.say("..", f"access of {SERVICE_USER} to {log_file}: checked at the real installation")
                 continue
             if not os.path.exists(log_file):
-                self.say("!!", f"{log_file} n'existe pas encore (le démon l'attendra) : vérifier le chemin")
+                self.say("!!", f"{log_file} does not exist yet (the daemon will wait for it): check the path")
                 continue
             group = self.args.log_group or self.group_for(log_file)
             r = self.run(["runuser", "-u", SERVICE_USER, "-g", group, "--",
                           "test", "-r", log_file], check=False)
             if r.returncode == 0:
-                self.say("ok", f"{SERVICE_USER} peut lire {log_file}")
+                self.say("ok", f"{SERVICE_USER} can read {log_file}")
             else:
-                self.say("!!", f"{SERVICE_USER} ne peut pas lire {log_file} : donner l'accès, par ex. "
-                         f"`setfacl -m u:{SERVICE_USER}:r {log_file}` (et x sur les dossiers parents), "
-                         "ou --log-group")
+                self.say("!!", f"{SERVICE_USER} cannot read {log_file}: grant access, e.g. "
+                         f"`setfacl -m u:{SERVICE_USER}:r {log_file}` (and x on the parent directories), "
+                         "or --log-group")
 
     def run_all(self):
         if self.system and os.geteuid() != 0:
-            sys.exit("l'installation demande les droits root : sudo ./fobots.py install")
+            sys.exit("the installation needs root rights: sudo ./fobots.py install")
         if self.dry:
-            print("--dry-run : rien n'est modifié, voici ce qui serait fait\n")
+            print("--dry-run: nothing is modified, here is what would be done\n")
         self.check_python()
         self.ensure_nft()
         self.selftest()
@@ -1467,16 +1467,16 @@ class Installer:
         self.check_log_access()
         if self.args.start:
             self.run(["systemctl", "enable", "--now", "fobots"])
-            self.said_done("service activé et démarré")
+            self.said_done("service enabled and started")
         elif self.args.enable:
             self.run(["systemctl", "enable", "fobots"])
-            self.said_done("service activé au démarrage (non démarré)")
+            self.said_done("service enabled at boot (not started)")
         print(f"""
-Étapes suivantes :
-  1. vérifier / adapter {CONF_DIR}/fobots.conf (log, seuils)
-  2. ajouter vos réseaux à {CONF_DIR}/welcome.txt (administrateurs, CI, supervision)
-  3. essai sans rien bannir : {INSTALL_DIR}/fobots.py run --dry-run
-  4. démarrer : systemctl enable --now fobots      suivre : journalctl -u fobots -f""")
+Next steps:
+  1. check / adapt {CONF_DIR}/fobots.conf (log, thresholds)
+  2. add your networks to {CONF_DIR}/welcome.txt (administrators, CI, monitoring)
+  3. trial without banning anything: {INSTALL_DIR}/fobots.py run --dry-run
+  4. start: systemctl enable --now fobots      follow: journalctl -u fobots -f""")
 
 
 def cmd_install(args):
@@ -1495,13 +1495,13 @@ def cmd_welcome(args):
         try:
             nets.append(ipaddress.ip_network(x, strict=False))
         except ValueError:
-            print(f"plage invalide : {x}", file=sys.stderr)
+            print(f"invalid range: {x}", file=sys.stderr)
             return 2
     try:
         os.makedirs(os.path.dirname(os.path.abspath(wl_path)), exist_ok=True)
-        Welcome.append(wl_path, nets)  # d'abord : le démon cesse de bannir
+        Welcome.append(wl_path, nets)  # first: the daemon stops banning it
     except OSError as e:
-        print(f"écriture de {wl_path} impossible : {e} (droits ? lancer avec sudo)",
+        print(f"cannot write {wl_path}: {e} (permissions? run with sudo)",
               file=sys.stderr)
         return 1
     nft = Nft(args.nft_bin, args.dry_run)
@@ -1509,14 +1509,14 @@ def cmd_welcome(args):
         try:
             deletes, adds = welcome_add(nft, net, args.ban_seconds)
         except NftError as e:
-            print(f"{net} ajoutée à {wl_path}, mais nft a échoué : {e}", file=sys.stderr)
+            print(f"{net} added to {wl_path}, but nft failed: {e}", file=sys.stderr)
             return 1
-        print(f"{net} : liste welcome ; {len(deletes)} ban(s) retiré(s)"
-              + (f", {len(adds)} morceau(x) du reste conservé(s)" if adds else ""))
+        print(f"{net}: welcome list; {len(deletes)} ban(s) removed"
+              + (f", {len(adds)} piece(s) of the rest kept" if adds else ""))
     return 0
 
 
-CONF_KEYS = {  # clé du fichier -> (destination argparse, conversion)
+CONF_KEYS = {  # file key -> (argparse destination, conversion)
     "dir": ("dir", str), "cache": ("cache", str), "welcome": ("welcome", str),
     "log": ("log", str), "nft_bin": ("nft_bin", str),
     "ban_time": ("ban_seconds", parse_duration),
@@ -1536,7 +1536,7 @@ CONF_KEYS = {  # clé du fichier -> (destination argparse, conversion)
     "from_start": ("from_start", lambda v: v.lower() in ("1", "true", "yes", "oui", "on")),
 }
 PATH_KEYS = {"dir", "cache", "welcome", "log", "watch_file"}
-# /etc d'abord : le résultat ne dépend pas du dossier courant (./fobots.conf sert au développement)
+# /etc first: the result does not depend on the current directory (./fobots.conf is for development)
 CONF_SEARCH = (os.path.join(CONF_DIR, "fobots.conf"), "fobots.conf")
 
 
@@ -1545,15 +1545,15 @@ TRUE_VALUES = ("1", "true", "yes", "oui", "on")
 
 
 def load_config(path):
-    """Lit [fobots] et les sections [site:NOM] ; les chemins relatifs le sont par rapport au fichier."""
+    """Reads [fobots] and the [site:NAME] sections; relative paths are relative to the file."""
     cp = configparser.ConfigParser(interpolation=None, inline_comment_prefixes=("#", ";"))
     try:
         with open(path) as f:
             cp.read_file(f)
     except (OSError, configparser.Error) as e:
-        sys.exit(f"configuration {path} illisible : {e}")
+        sys.exit(f"configuration {path} unreadable: {e}")
     if not cp.has_section("fobots"):
-        sys.exit(f"{path} : section [fobots] absente")
+        sys.exit(f"{path}: section [fobots] missing")
     base = os.path.dirname(os.path.abspath(path))
 
     def fix_path(v):
@@ -1563,7 +1563,7 @@ def load_config(path):
     out = {}
     for key, val in cp["fobots"].items():
         if key not in CONF_KEYS:
-            sys.exit(f"{path} : option inconnue {key!r} (connues : {', '.join(CONF_KEYS)})")
+            sys.exit(f"{path}: unknown option {key!r} (known: {', '.join(CONF_KEYS)})")
         if not val.strip():
             continue
         dest, conv = CONF_KEYS[key]
@@ -1572,7 +1572,7 @@ def load_config(path):
         try:
             out[dest] = conv(val.strip())
         except (ValueError, argparse.ArgumentTypeError) as e:
-            sys.exit(f"{path} : valeur invalide pour {key} ({val!r}) : {e}")
+            sys.exit(f"{path}: invalid value for {key} ({val!r}): {e}")
 
     sites, seen = [], {}
     for section in cp.sections():
@@ -1580,32 +1580,32 @@ def load_config(path):
             continue
         name = section[5:].strip() if section.startswith("site:") else ""
         if not name:
-            sys.exit(f"{path} : section [{section}] inconnue (attendu : [fobots] ou [site:NOM])")
+            sys.exit(f"{path}: unknown section [{section}] (expected: [fobots] or [site:NAME])")
         opts = cp[section]
         for key in opts:
             if key not in SITE_KEYS:
-                sys.exit(f"{path} : [{section}] option inconnue {key!r} "
-                         f"(connues : {', '.join(SITE_KEYS)})")
+                sys.exit(f"{path}: [{section}] unknown option {key!r} "
+                         f"(known: {', '.join(SITE_KEYS)})")
         if not opts.get("log", "").strip():
-            sys.exit(f"{path} : [{section}] : `log` est obligatoire")
+            sys.exit(f"{path}: [{section}]: `log` is required")
         log_file = fix_path(opts["log"])
         if log_file in seen:
-            sys.exit(f"{path} : [{section}] et [site:{seen[log_file]}] suivent le même log {log_file}")
+            sys.exit(f"{path}: [{section}] and [site:{seen[log_file]}] follow the same log {log_file}")
         seen[log_file] = name
         prefixes = [x for x in re.split(r"[,\s]+", opts.get("ignore_prefix", "").strip()) if x]
         for x in prefixes:
             if not x.startswith("/"):
-                sys.exit(f"{path} : [{section}] ignore_prefix {x!r} doit commencer par /")
+                sys.exit(f"{path}: [{section}] ignore_prefix {x!r} must start with /")
         regex = opts.get("ignore_path", "").strip() or None
         if regex:
             try:
                 re.compile(regex)
             except re.error as e:
-                sys.exit(f"{path} : [{section}] ignore_path invalide : {e}")
+                sys.exit(f"{path}: [{section}] invalid ignore_path: {e}")
         sites.append({"name": name, "log": log_file, "prefixes": prefixes, "regex": regex,
                       "all": opts.get("ignore_all", "").strip().lower() in TRUE_VALUES})
     if out.get("log") in seen:
-        sys.exit(f"{path} : le log {out['log']} est à la fois dans [fobots] et dans [site:{seen[out['log']]}]")
+        sys.exit(f"{path}: the log {out['log']} is both in [fobots] and in [site:{seen[out['log']]}]")
     if sites:
         out["sites"] = sites
     return out
@@ -1618,133 +1618,133 @@ def main(argv=None):
     if conf_path is None:
         conf_path = next((c for c in CONF_SEARCH if os.path.exists(c)), None)
     elif not os.path.exists(conf_path):
-        sys.exit(f"configuration introuvable : {conf_path}")
+        sys.exit(f"configuration not found: {conf_path}")
     conf = load_config(conf_path) if conf_path else {}
 
     common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("-f", "--config", help="fichier de configuration "
-                        "(défaut: /etc/fobots/fobots.conf, puis ./fobots.conf)")
+    common.add_argument("-f", "--config", help="configuration file "
+                        "(default: /etc/fobots/fobots.conf, then ./fobots.conf)")
     common.add_argument("--dir", default=STATE_DIR,
-                        help=f"dossier d'état : ip_ranges.json, watched.jsonl (défaut: {STATE_DIR})")
-    common.add_argument("-c", "--cache", help="fichier des plages RDAP (défaut: DIR/ip_ranges.json)")
-    common.add_argument("-w", "--welcome", help="liste welcome (défaut: welcome.txt à côté de la conf, "
-                        f"sinon {CONF_DIR}/welcome.txt)")
+                        help=f"state directory: ip_ranges.json, watched.jsonl (default: {STATE_DIR})")
+    common.add_argument("-c", "--cache", help="file of RDAP ranges (default: DIR/ip_ranges.json)")
+    common.add_argument("-w", "--welcome", help="welcome list (default: welcome.txt next to the configuration, "
+                        f"otherwise {CONF_DIR}/welcome.txt)")
     common.add_argument("--watch-file",
-                        help="fichier des constats surveillés (défaut: DIR/watched.jsonl)")
+                        help="file of monitoring findings (default: DIR/watched.jsonl)")
     common.add_argument("--ban-time", dest="ban_seconds", type=parse_duration, default=3600,
-                        help="durée d'un ban : 30m, 1h, 1d… (défaut: 1h)")
-    common.add_argument("--nft-bin", default="nft", help="binaire nft (défaut: nft)")
+                        help="duration of a ban: 30m, 1h, 1d… (default: 1h)")
+    common.add_argument("--nft-bin", default="nft", help="nft binary (default: nft)")
     common.add_argument("--dry-run", action="store_true",
-                        help="n'appelle pas nft : affiche les commandes (sets simulés)")
+                        help="does not call nft: prints the commands (simulated sets)")
     common.add_argument("-v", "--verbose", action="store_true")
 
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    r = sub.add_parser("run", parents=[common], help="démon : lit le log et bannit")
+    r = sub.add_parser("run", parents=[common], help="daemon: reads the log and bans")
     r.add_argument("files", nargs="*",
-                   help="logs lus une fois (- = stdin) ; sinon on suit --log, sinon stdin")
-    r.add_argument("-l", "--log", help="log à suivre en continu (rotation gérée, comme tail -F)")
+                   help="logs read once (- = stdin); otherwise --log is followed, otherwise stdin")
+    r.add_argument("-l", "--log", help="log to follow continuously (rotation handled, like tail -F)")
     r.add_argument("--from-start", action="store_true",
-                   help="avec --log : lit d'abord le contenu existant (défaut: fin du fichier)")
+                   help="with --log: first reads the existing content (default: end of the file)")
     r.add_argument("-t", "--threshold", type=float, default=5.0,
-                   help="req/s d'une plage au-delà desquelles on bannit (défaut: 5)")
+                   help="req/s of a range above which it is banned (default: 5)")
     r.add_argument("-p", "--prefix-threshold", type=float,
-                   help="req/s d'un préfixe /16 non résolu qui déclenchent une requête RDAP "
-                        "(défaut: = --threshold)")
+                   help="req/s of an unresolved /16 prefix that trigger an RDAP request "
+                        "(default: = --threshold)")
     r.add_argument("--sustain", type=int, default=1,
-                   help="nombre de secondes au-dessus du seuil exigées (défaut: 1)")
+                   help="number of seconds above the threshold required (default: 1)")
     r.add_argument("--window", type=int, default=60,
-                   help="fenêtre en secondes pour --sustain (défaut: 60)")
+                   help="window in seconds for --sustain (default: 60)")
     r.add_argument("--load-signal", choices=["none", "psi", "loadavg"], default="none",
-                   help="durcit les règles selon la charge : psi (réactif), loadavg "
-                        "(charge/cœurs) ou none (défaut)")
+                   help="hardens the rules according to the load: psi (reactive), loadavg "
+                        "(load/cores) or none (default)")
     r.add_argument("--load-tense", type=float,
-                   help="valeur du signal au niveau tendu (défaut: 20 %% en psi, 1.0 en loadavg)")
+                   help="signal value at the tense level (default: 20 %% for psi, 1.0 for loadavg)")
     r.add_argument("--load-critical", type=float,
-                   help="valeur au niveau critique (défaut: 50 %% en psi, 2.0 en loadavg)")
+                   help="value at the critical level (default: 50 %% for psi, 2.0 for loadavg)")
     r.add_argument("--load-recover", type=parse_duration, default=300,
-                   help="durée sous le palier avant de redescendre d'un niveau (défaut: 5m)")
+                   help="time below the level before going down one level (default: 5m)")
     r.add_argument("--tense-factor", type=float, default=0.5,
-                   help="multiplicateur du seuil ET de la durée de ban au niveau tendu (défaut: 0.5)")
+                   help="multiplier of the threshold AND of the ban duration at the tense level (default: 0.5)")
     r.add_argument("--critical-factor", type=float, default=0.25,
-                   help="idem au niveau critique (défaut: 0.25)")
+                   help="same at the critical level (default: 0.25)")
     r.add_argument("--min-threshold", type=float, default=1.0,
-                   help="plancher du seuil effectif en req/s (défaut: 1)")
+                   help="floor of the effective threshold in req/s (default: 1)")
     r.add_argument("--min-ban-time", dest="min_ban_seconds", type=parse_duration, default=60,
-                   help="plancher de la durée de ban effective (défaut: 1m)")
+                   help="floor of the effective ban duration (default: 1m)")
     r.add_argument("--ignore-path", metavar="REGEX",
-                   help="opt-in : ne compte pas les requêtes dont le chemin correspond "
-                        "(pages statiques peu coûteuses, ex. ^/(assets|uploads)/)")
+                   help="opt-in: does not count the requests whose path matches "
+                        "(cheap static pages, e.g. ^/(assets|uploads)/)")
     r.add_argument("--watch-agent", metavar="REGEX",
-                   help="opt-in : journalise (WATCH) les IP dont l'user-agent correspond quand "
-                        "leur plage est bannie (ex. ^gitlab-runner) ; ne change pas le comptage")
+                   help="opt-in: logs (WATCH) the IPs whose user agent matches when "
+                        "their range is banned (e.g. ^gitlab-runner); does not change the count")
     r.add_argument("--watch-path", metavar="REGEX",
-                   help="restreint --watch-agent aux chemins correspondants (ex. ^/api/v4/) ; "
-                        "si les deux sont donnés, les deux doivent correspondre")
+                   help="restricts --watch-agent to the matching paths (e.g. ^/api/v4/); "
+                        "if both are given, both must match")
     r.add_argument("--ban-scope", choices=SCOPES, default="allocation",
-                   help="allocation : on bannit toute la plage RDAP (défaut) ; observed : seulement "
-                        "les groupes d'IP vues, à l'intérieur de l'allocation")
+                   help="allocation: the whole RDAP range is banned (default); observed: only "
+                        "the groups of IPs seen, inside the allocation")
     r.add_argument("--observed-prefix", type=int, default=20,
-                   help="ban_scope=observed : largeur maximale d'un groupe d'IP, en préfixe IPv4 "
-                        "(défaut: 20, soit 4096 adresses ; IPv6 : /48)")
+                   help="ban_scope=observed: maximum width of a group of IPs, as an IPv4 prefix "
+                        "(default: 20, i.e. 4096 addresses; IPv6: /48)")
     r.add_argument("--observed-escalate", type=int, default=4,
-                   help="ban_scope=observed : bans partiels d'une même allocation (pendant la durée "
-                        "d'un ban) avant de bannir l'allocation entière (défaut: 4)")
+                   help="ban_scope=observed: partial bans of the same allocation (within the duration "
+                        "of a ban) before falling back to wide blocks (default: 4)")
     r.add_argument("--observed-max-prefix", type=int, default=16,
-                   help="ban_scope=observed : si le trafic est dispersé, on bannit des blocs de cette "
-                        "largeur (préfixe IPv4, défaut: 16 ; IPv6 : /32) au lieu de l'allocation "
-                        "entière ; 0 = allocation entière")
+                   help="ban_scope=observed: if the traffic is scattered, blocks of this width are "
+                        "banned (IPv4 prefix, default: 16; IPv6: /32) instead of the whole "
+                        "allocation; 0 = whole allocation")
     r.add_argument("--rdap-per-hour", type=int, default=100,
-                   help="budget de requêtes RDAP par heure (défaut: 100)")
+                   help="budget of RDAP requests per hour (default: 100)")
     r.add_argument("--delay", type=float, default=2.0,
-                   help="secondes minimum entre deux requêtes RDAP (défaut: 2)")
+                   help="minimum seconds between two RDAP requests (default: 2)")
     r.set_defaults(fn=cmd_run)
 
     sub.add_parser("setup", parents=[common],
-                   help="crée la table nft si absente").set_defaults(fn=cmd_setup)
-    sub.add_parser("bans", parents=[common], help="liste les bans actifs").set_defaults(fn=cmd_bans)
+                   help="creates the nft table if absent").set_defaults(fn=cmd_setup)
+    sub.add_parser("bans", parents=[common], help="lists the active bans").set_defaults(fn=cmd_bans)
 
     ins = sub.add_parser("install", parents=[common],
-                         help="installe fobots (nftables, utilisateur, dossiers, conf, unité systemd)")
-    ins.add_argument("--log", help="log à suivre, écrit dans la conf créée (défaut: celui de l'exemple)")
-    ins.add_argument("--log-group", help="groupe donnant accès au log (défaut: détecté, sinon adm)")
-    ins.add_argument("--yes", action="store_true", help="répond oui aux questions (installation d'apt)")
-    ins.add_argument("--enable", action="store_true", help="active le service au démarrage")
-    ins.add_argument("--start", action="store_true", help="active ET démarre le service")
-    ins.add_argument("--destdir", help="écrit les fichiers sous ce préfixe sans toucher au système (test)")
+                         help="installs fobots (nftables, user, directories, configuration, systemd unit)")
+    ins.add_argument("--log", help="log to follow, written in the configuration created (default: the example's)")
+    ins.add_argument("--log-group", help="group giving access to the log (default: detected, otherwise adm)")
+    ins.add_argument("--yes", action="store_true", help="answers yes to the questions (apt installation)")
+    ins.add_argument("--enable", action="store_true", help="enables the service at boot")
+    ins.add_argument("--start", action="store_true", help="enables AND starts the service")
+    ins.add_argument("--destdir", help="writes the files under this prefix without touching the system (test)")
     ins.set_defaults(fn=cmd_install)
 
     wd = sub.add_parser("watched", parents=[common],
-                        help="IP surveillées (watch_*) prises dans un ban : faux positifs possibles")
+                        help="monitored IPs (watch_*) caught in a ban: possible false positives")
     wd.add_argument("--since", type=parse_duration, default=7 * 86400,
-                    help="période à considérer : 12h, 3d… (défaut: 7d)")
-    wd.add_argument("--active", action="store_true", help="seulement celles dont le ban est actif")
+                    help="period to consider: 12h, 3d… (default: 7d)")
+    wd.add_argument("--active", action="store_true", help="only those whose ban is active")
     wd.add_argument("--cmd", action="store_true",
-                    help="n'affiche que la commande `welcome add` correspondante")
+                    help="only prints the corresponding `welcome add` command")
     wd.set_defaults(fn=cmd_watched)
 
-    w = sub.add_parser("welcome", parents=[common], help="gère la liste welcome")
+    w = sub.add_parser("welcome", parents=[common], help="manages the welcome list")
     w.add_argument("action", choices=["add", "list"])
-    w.add_argument("nets", nargs="*", help="CIDR à ajouter (add)")
+    w.add_argument("nets", nargs="*", help="CIDRs to add (add)")
     w.set_defaults(fn=cmd_welcome)
 
     for p in sub.choices.values():
-        p.set_defaults(config=conf_path, **conf)  # ligne de commande > conf > défauts
+        p.set_defaults(config=conf_path, **conf)  # command line > configuration > defaults
     args = ap.parse_args(argv)
     if args.cmd == "run":
         for name in ("tense_factor", "critical_factor"):
             if not 0 < getattr(args, name) <= 1:
-                ap.error(f"--{name.replace('_', '-')} doit être dans ]0, 1]")
+                ap.error(f"--{name.replace('_', '-')} must be in ]0, 1]")
     if args.cmd == "welcome" and args.action == "add" and not args.nets:
-        ap.error("welcome add : indiquer au moins une plage")
+        ap.error("welcome add: give at least one range")
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="%(asctime)s %(levelname)s %(message)s", stream=sys.stderr)
     try:
         return args.fn(args)
-    except NftError as e:  # nft absent, refus du noyau, droits insuffisants…
-        log.error("nft : %s", e)
+    except NftError as e:  # nft missing, kernel refusal, insufficient permissions…
+        log.error("nft: %s", e)
         return 1
 
 
