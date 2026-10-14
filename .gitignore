@@ -7,11 +7,23 @@ build/
 dist/
 .venv/
 venv/
+env/
+.env
+.tox/
+.nox/
+*.egg
+wheels/
+pip-wheel-metadata/
+.python-version
+.ipynb_checkpoints/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
 .coverage
+.coverage.*
 htmlcov/
+coverage.xml
+.hypothesis/
 
 # Éditeurs
 .idea/
@@ -25,5 +37,3 @@ ip_ranges.json.tmp
 welcome.txt
 watched.jsonl
 watched.jsonl.tmp
-build/
-dist/
