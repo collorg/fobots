@@ -63,6 +63,14 @@ MAX_WATCHED = 5000    # IP « surveillées » gardées en mémoire (opt-in --wat
 WATCH_RETENTION = 3600  # secondes (temps du log) pendant lesquelles on s'en souvient
 WATCH_FILE_KEEP = 30 * 86400  # le fichier des constats est élagué au-delà (au démarrage)
 WATCH_EVENT_IPS = 200         # IP enregistrées au plus par ban
+# ban_scope = observed : les IP vues (fenêtre `window`) sont regroupées en groupes d'étendue
+# bornée ; on bannit les plus actifs, jusqu'à couvrir cette part des requêtes de l'allocation.
+OBSERVED_COVERAGE = 0.8
+OBSERVED_MAX_GROUPS = 4       # au-delà : trop dispersé, on bannit l'allocation entière
+OBSERVED_MAX_IPS = 200_000    # IP suivies au plus (mémoire)
+OBSERVED_PREFIX6 = 48         # largeur maximale d'un groupe en IPv6 (réglable en IPv4)
+OBSERVED_WIDE6 = 32           # largeur maximale d'un ban de repli en IPv6 (réglable en IPv4)
+SCOPES = ("allocation", "observed")
 
 NFT_SETUP = """\
 add table inet banbot
@@ -106,6 +114,49 @@ def fmt_range(r):
 
 def prefix_of(addr):
     return ipaddress.ip_network((addr, 16 if addr.version == 4 else 32), strict=False)
+
+
+def cluster_ips(ips, span):
+    """Groupes d'IP : [(adresse entière, requêtes)] -> [[début, fin, requêtes, nb d'IP]].
+    Balayage glouton : un groupe s'étend tant que son étendue reste sous `span` adresses ;
+    il est borné par ses IP extrêmes (intervalle observé), pas par un préfixe CIDR, donc
+    deux IP voisines de part et d'autre d'une frontière de bloc restent ensemble."""
+    out = []
+    for a, n in sorted(ips):
+        if out and a - out[-1][0] < span:
+            c = out[-1]
+            c[1], c[2], c[3] = a, c[2] + n, c[3] + 1
+        else:
+            out.append([a, a, n, 1])
+    return out
+
+
+def pick_groups(groups, coverage, max_groups):
+    """Les groupes les plus actifs qui couvrent `coverage` des requêtes, ou None si il en
+    faudrait plus de `max_groups`."""
+    total = sum(g[2] for g in groups)
+    picked, got = [], 0
+    for g in sorted(groups, key=lambda g: -g[2]):
+        picked.append(g)
+        got += g[2]
+        if got >= coverage * total:
+            break
+    return picked if len(picked) <= max_groups else None
+
+
+def wide_blocks(ips, lo, hi, shift, coverage):
+    """Repli quand le trafic est dispersé : les blocs alignés de 2**shift adresses (découpés aux
+    bornes [lo, hi] de l'allocation) qui portent `coverage` des requêtes -> [(début, fin)]."""
+    per = Counter()
+    for a, n in ips:
+        per[a >> shift] += n
+    total, got, out = sum(per.values()), 0, []
+    for b, n in per.most_common():
+        out.append((max(b << shift, lo), min(((b + 1) << shift) - 1, hi)))
+        got += n
+        if got >= coverage * total:
+            break
+    return sorted(out)
 
 
 def subtract(net, whitelist):
@@ -337,25 +388,42 @@ class Nft:
             raise NftError(r.stderr.strip() or "set introuvable (lancer `setup` ?)")
         return parse_elems(json.loads(r.stdout))
 
-    def apply(self, ver, deletes, adds):
-        """Une seule transaction : retraits puis ajouts [(réseau, timeout en s)]."""
-        name, lines = SETS[ver], []
-        if deletes:
-            lines.append(f"delete element inet banbot {name} "
-                         f"{{ {', '.join(str(n) for n in deletes)} }}")
-        if adds:
-            elems = ", ".join(f"{n} timeout {max(1, int(t))}s" for n, t in adds)
-            lines.append(f"add element inet banbot {name} {{ {elems} }}")
-        script = "\n".join(lines) + "\n"
+    def _script(self, script):
         if self.dry_run:
             print(script, end="", flush=True)
-            gone = set(deletes)
-            self.sim[ver] = [(n, e) for n, e in self.sim[ver] if n not in gone] + \
-                            [(n, t) for n, t in adds]
             return
         r = self._run(["-f", "-"], script)
         if r.returncode:
             raise NftError(r.stderr.strip())
+
+    def apply(self, ver, deletes, adds, restore=()):
+        """Retraits puis ajouts [(réseau, timeout en s)], en deux transactions : nft 0.9.x refuse
+        qu'une même transaction retire des éléments puis en ajoute un qui les recouvre
+        (« interval overlaps with an existing one »). Si l'ajout échoue, `restore`
+        [(réseau, timeout)] remet les éléments retirés."""
+        name = SETS[ver]
+        if deletes:
+            self._script(f"delete element inet banbot {name} "
+                         f"{{ {', '.join(str(n) for n in deletes)} }}\n")
+            if self.dry_run:
+                gone = set(deletes)
+                self.sim[ver] = [(n, e) for n, e in self.sim[ver] if n not in gone]
+        if adds:
+            try:
+                self._add(ver, adds)
+            except NftError:
+                if restore:
+                    try:
+                        self._add(ver, restore)
+                    except NftError as e:
+                        log.error("bans retirés non rétablis : %s", e)
+                raise
+
+    def _add(self, ver, adds):
+        elems = ", ".join(f"{n} timeout {max(1, int(t))}s" for n, t in adds)
+        self._script(f"add element inet banbot {SETS[ver]} {{ {elems} }}\n")
+        if self.dry_run:
+            self.sim[ver] += [(n, t) for n, t in adds]
 
 
 # --- liste blanche et bans ---------------------------------------------------
@@ -413,7 +481,8 @@ class Banner:
             log.info("%s : entièrement en liste blanche, pas de ban", fmt_range(rng))
             return False
         for attempt in (1, 2):
-            existing = [n for n, _ in self.nft.elements(ver)]
+            elems = self.nft.elements(ver)
+            existing = [n for n, _ in elems]
             adds, deletes = [], set()
             for p in pieces:
                 if any(p.subnet_of(e) for e in existing):
@@ -424,7 +493,8 @@ class Banner:
                 log.debug("%s : déjà banni", fmt_range(rng))
                 return False
             try:
-                self.nft.apply(ver, sorted(deletes, key=lambda n: n.network_address), adds)
+                restore = [(n, e or seconds) for n, e in elems if n in deletes]
+                self.nft.apply(ver, sorted(deletes, key=lambda n: n.network_address), adds, restore)
                 break
             except NftError as e:
                 # souvent un élément expiré entre la lecture et le retrait : on relit
@@ -441,15 +511,16 @@ def whitelist_add(nft, net, ban_seconds):
     """Retire des sets les bans qui touchent `net` ; garde le reste des plus larges."""
     ver = net.version
     existing = nft.elements(ver)
-    deletes, adds = [], []
+    deletes, adds, restore = [], [], []
     for e, exp in existing:
         if not e.overlaps(net):
             continue
         deletes.append(e)
+        restore.append((e, exp or ban_seconds))
         if not e.subnet_of(net):  # `net` est strictement dans e : on regarde le reste
             adds += [(p, exp or ban_seconds) for p in e.address_exclude(net)]
     if deletes:
-        nft.apply(ver, deletes, adds)
+        nft.apply(ver, deletes, adds, restore)
     return deletes, adds
 
 
@@ -635,7 +706,8 @@ def run_sites(det, sites, from_start, queue_size=200_000):
 class Detector:
     def __init__(self, threshold, prefix_threshold, sustain, window, store, banner, rdap,
                  load=None, min_threshold=1.0, min_ban_seconds=60, watch=None,
-                 watch_file=None, ignore_path=None, sites=()):
+                 watch_file=None, ignore_path=None, sites=(), scope="allocation",
+                 observed_prefix=20, escalate=4, wide_prefix=16):
         self.base_threshold, self.base_prefix_threshold = threshold, prefix_threshold
         self.load, self.min_threshold, self.min_ban = load or NoLoad(), min_threshold, min_ban_seconds
         self.sustain, self.window = sustain, window
@@ -649,6 +721,14 @@ class Detector:
         self.skipped = self.ignored = 0
         self.ignore_path = ignore_path  # regex globale : requêtes non comptées (pages statiques)
         self.sites = tuple(sites)       # cibles (statistiques de SIGUSR1)
+        self.observed = scope == "observed"
+        self.span4 = 2 ** (32 - observed_prefix)
+        self.span6 = 2 ** (128 - OBSERVED_PREFIX6)
+        self.wide_shift4 = 32 - wide_prefix if wide_prefix else None  # None : allocation entière
+        self.wide_shift6 = 128 - OBSERVED_WIDE6 if wide_prefix else None
+        self.escalate = escalate        # bans partiels récents d'une allocation avant de la bannir
+        self.ips = {}      # ip -> [requêtes, début, dernière seconde, plage] (mode observed)
+        self.partial = {}  # plage -> secondes des bans partiels
         self.watch = watch  # (regex agent ou None, regex chemin ou None) ; None = désactivé
         self.watched = {}   # ip -> [requêtes, dernière seconde vue, chemin exemple]
         self.watch_file = watch_file  # constats écrits ici (relus par `banbot.py watched`)
@@ -769,6 +849,8 @@ class Detector:
         n = c[sec] = c.get(sec, 0) + 1
         self.hits[key] += 1
         if isinstance(key, tuple):
+            if self.observed:
+                self.note_ip(ip, sec, key)
             if n > self.threshold:
                 over = self.over[key]
                 over.add(sec)
@@ -778,6 +860,46 @@ class Detector:
         elif n > self.prefix_threshold:
             self.rdap.request(addr or ipaddress.ip_address(ip), key)
 
+    def note_ip(self, ip, sec, key):
+        e = self.ips.get(ip)
+        if e is None:
+            if len(self.ips) < OBSERVED_MAX_IPS:
+                self.ips[ip] = [1, sec, sec, key]
+        elif sec - e[1] > self.window:  # fenêtre glissante grossière : on repart de zéro
+            e[:] = [1, sec, sec, key]
+        else:
+            e[0] += 1
+            e[2], e[3] = sec, key
+
+    def targets(self, key, sec):
+        """(plages à bannir, précision pour le journal) pour une allocation qui a déclenché."""
+        if not self.observed:
+            return [key], ""
+        ver = key[0]
+        ips = [(int(ipaddress.ip_address(s)), e[0]) for s, e in self.ips.items()
+               if e[3] == key and e[2] >= sec - self.window]
+        recent = [t for t in self.partial.get(key, ()) if sec - t < self.banner.ban_seconds]
+        groups = cluster_ips(ips, self.span4 if ver == 4 else self.span6)
+        picked = None
+        why = f"escalade : {len(recent)} bans partiels récents"
+        if len(recent) < self.escalate and groups:
+            picked = pick_groups(groups, OBSERVED_COVERAGE, OBSERVED_MAX_GROUPS)
+            why = f"{len(groups)} groupe(s) d'IP, trop dispersé"
+        if picked is None:  # repli : blocs larges (ou l'allocation entière), jamais plus étroit
+            self.partial.pop(key, None)
+            shift = self.wide_shift4 if ver == 4 else self.wide_shift6
+            if shift is None or not ips or (key[2] - key[1] + 1) <= (1 << shift):
+                return [key], f", {why} : allocation entière"
+            blocks = wide_blocks(ips, key[1], key[2], shift, OBSERVED_COVERAGE)
+            return ([(ver, a, b) for a, b in blocks],
+                    f", {why} : {len(blocks)} bloc(s) de /{(32 if ver == 4 else 128) - shift} "
+                    f"au lieu de l'allocation")
+        self.partial[key] = recent + [sec]
+        covered = sum(g[2] for g in picked) / sum(g[2] for g in groups)
+        return ([(ver, g[0], g[1]) for g in picked],
+                f", {len(ips)} IP en {len(groups)} groupe(s), {len(picked)} banni(s) "
+                f"({covered:.0%} des requêtes)")
+
     def trigger(self, key, sec, n, ip):
         if sec - self.recent_ban.get(key, -10**12) < RECENT_BAN_SECS:
             return
@@ -786,10 +908,13 @@ class Detector:
         reason = f"{n} req/s > {thr:g}, vu avec {ip}, {self.hits[key]} requêtes au total"
         if self.load.level:
             reason += f", niveau de charge {LEVELS[self.load.level]}"
+        targets, detail = self.targets(key, sec)
+        reason += detail
         try:
             seconds = self.ban_seconds()
-            if self.banner.ban(key, reason, seconds) and self.watched:
-                self.report_watched(key, seconds)
+            for t in targets:
+                if self.banner.ban(t, reason, seconds) and self.watched:
+                    self.report_watched(t, seconds)
         except NftError as e:
             log.error("ban de %s impossible : %s", fmt_range(key), e)
 
@@ -807,6 +932,11 @@ class Detector:
             if not self.over[key]:
                 del self.over[key]
         self.recent_ban = {k: s for k, s in self.recent_ban.items() if s >= cutoff}
+        if self.observed:
+            self.ips = {ip: e for ip, e in self.ips.items() if e[2] >= cutoff}
+            keep = self.latest - self.banner.ban_seconds
+            self.partial = {k: v for k, v in
+                            ((k, [t for t in v if t >= keep]) for k, v in self.partial.items()) if v}
         old = self.latest - WATCH_RETENTION
         for ip in [ip for ip, e in self.watched.items() if e[1] < old]:
             del self.watched[ip]
@@ -977,6 +1107,16 @@ def cmd_run(args):
         sites = []  # fichiers donnés en argument : lecture unique, sans suivi
     for x in sites:
         log.info("cible %s : suivi de %s (%s)", x.name, x.log, x.describe())
+    if args.ban_scope not in SCOPES:
+        log.error("ban_scope invalide : %r (%s)", args.ban_scope, " ou ".join(SCOPES))
+        return 1
+    if not 8 <= args.observed_prefix <= 32:
+        log.error("observed_prefix doit être entre 8 et 32 (IPv4)")
+        return 1
+    if args.observed_max_prefix and not 8 <= args.observed_max_prefix <= args.observed_prefix:
+        log.error("observed_max_prefix doit être 0 (allocation entière) ou entre 8 et "
+                  "observed_prefix (%d)", args.observed_prefix)
+        return 1
     if not sites and not args.files and not stdin_is_feed():
         log.error("aucun log à suivre : définir `log =` dans [banbot] ou une section [site:NOM] "
                   "avec `log =` (configuration utilisée : %s), ou passer --log FICHIER ; "
@@ -988,7 +1128,14 @@ def cmd_run(args):
     det = Detector(args.threshold, args.prefix_threshold or args.threshold, args.sustain,
                    args.window, store, Banner(nft, wl, args.ban_seconds), rdap,
                    load, args.min_threshold, args.min_ban_seconds, watch, watch_file,
-                   ignore_path, sites)
+                   ignore_path, sites, args.ban_scope, args.observed_prefix, args.observed_escalate,
+                   args.observed_max_prefix)
+    if det.observed:
+        log.info("ban_scope observed : groupes d'IP d'au plus /%d (IPv6 /%d), repli en blocs "
+                 "de %s si dispersé ou après %d bans partiels", args.observed_prefix,
+                 OBSERVED_PREFIX6,
+                 f"/{args.observed_max_prefix} (IPv6 /{OBSERVED_WIDE6})"
+                 if args.observed_max_prefix else "l'allocation entière", args.observed_escalate)
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     signal.signal(signal.SIGUSR1, lambda *_: det.dump())
     if args.config:
@@ -1374,6 +1521,9 @@ CONF_KEYS = {  # clé du fichier -> (destination argparse, conversion)
     "tense_factor": ("tense_factor", float), "critical_factor": ("critical_factor", float),
     "min_threshold": ("min_threshold", float), "min_ban_time": ("min_ban_seconds", parse_duration),
     "ignore_path": ("ignore_path", str),
+    "ban_scope": ("ban_scope", str), "observed_prefix": ("observed_prefix", int),
+    "observed_escalate": ("observed_escalate", int),
+    "observed_max_prefix": ("observed_max_prefix", int),
     "watch_agent": ("watch_agent", str), "watch_path": ("watch_path", str),
     "watch_file": ("watch_file", str),
     "from_start": ("from_start", lambda v: v.lower() in ("1", "true", "yes", "oui", "on")),
@@ -1526,6 +1676,19 @@ def main(argv=None):
     r.add_argument("--watch-path", metavar="REGEX",
                    help="restreint --watch-agent aux chemins correspondants (ex. ^/api/v4/) ; "
                         "si les deux sont donnés, les deux doivent correspondre")
+    r.add_argument("--ban-scope", choices=SCOPES, default="allocation",
+                   help="allocation : on bannit toute la plage RDAP (défaut) ; observed : seulement "
+                        "les groupes d'IP vues, à l'intérieur de l'allocation")
+    r.add_argument("--observed-prefix", type=int, default=20,
+                   help="ban_scope=observed : largeur maximale d'un groupe d'IP, en préfixe IPv4 "
+                        "(défaut: 20, soit 4096 adresses ; IPv6 : /48)")
+    r.add_argument("--observed-escalate", type=int, default=4,
+                   help="ban_scope=observed : bans partiels d'une même allocation (pendant la durée "
+                        "d'un ban) avant de bannir l'allocation entière (défaut: 4)")
+    r.add_argument("--observed-max-prefix", type=int, default=16,
+                   help="ban_scope=observed : si le trafic est dispersé, on bannit des blocs de cette "
+                        "largeur (préfixe IPv4, défaut: 16 ; IPv6 : /32) au lieu de l'allocation "
+                        "entière ; 0 = allocation entière")
     r.add_argument("--rdap-per-hour", type=int, default=100,
                    help="budget de requêtes RDAP par heure (défaut: 100)")
     r.add_argument("--delay", type=float, default=2.0,

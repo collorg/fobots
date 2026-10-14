@@ -54,6 +54,13 @@ ban_time = 1h        # durée d'un ban : 30m, 1h, 1d…
 # watch_file = watched.jsonl   # constats enregistrés (défaut: <dir>/watched.jsonl), relus par
 #                              `banbot.py watched` ; élagués au-delà de 30 jours au démarrage
 
+# Ban resserré : au lieu de bannir toute l'allocation RDAP, on bannit les groupes d'IP vues
+# dedans ; repli sur l'allocation si le trafic est dispersé ou après plusieurs bans partiels.
+# ban_scope = allocation   # allocation | observed (à essayer d'abord avec --dry-run)
+# observed_prefix = 20     # étendue maximale d'un groupe (préfixe IPv4 ; IPv6 : /48)
+# observed_escalate = 4    # bans partiels d'une allocation avant le repli en blocs larges
+# observed_max_prefix = 16 # repli (trafic dispersé) : blocs /16 au lieu de l'allocation ; 0 = allocation entière
+
 rdap_per_hour = 100  # budget de requêtes RDAP
 delay = 2            # secondes minimum entre deux requêtes RDAP
 # nft_bin = nft

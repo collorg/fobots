@@ -31,9 +31,11 @@ noyau 5.4) : `apt install nftables` (version 0.9.3).
    `prefix_threshold` req/s, avec un budget horaire, un délai entre requêtes et
    une pause sur HTTP 429. Les plages trouvées sont enregistrées sur disque
    (`ip_ranges.json`) et réutilisées.
-4. Le ban est une transaction nft unique. Une plage déjà couverte par un ban plus
+4. Par défaut le ban couvre **toute l'allocation**. Avec `ban_scope = observed`, il se
+   resserre sur les IP réellement vues : voir « Ban resserré » plus bas.
+5. Le ban est une transaction nft unique. Une plage déjà couverte par un ban plus
    large est ignorée ; une plage qui en englobe d'autres les remplace.
-5. L'état des bans est **dans nft** (lu au démarrage) : le démon peut être
+6. L'état des bans est **dans nft** (lu au démarrage) : le démon peut être
    relancé sans perte, et chaque ban expire seul.
 
 ## Installation
@@ -236,6 +238,10 @@ conf.** Voir `banbot.conf.example` pour toutes les clés :
 | `prefix_threshold` | = `threshold` | req/s d'un `/16` non résolu qui autorisent RDAP |
 | `sustain`, `window` | 1, 60 | secondes au-dessus du seuil exigées, dans la fenêtre |
 | `ban_time` | 1h | durée d'un ban (`30m`, `1h`, `1d`) |
+| `ban_scope` | `allocation` | `allocation` : on bannit la plage RDAP entière ; `observed` : seulement les groupes d'IP vues dedans |
+| `observed_prefix` | 20 | `observed` : étendue maximale d'un groupe d'IP (préfixe IPv4 ; IPv6 : `/48`) |
+| `observed_escalate` | 4 | `observed` : bans partiels d'une allocation, pendant la durée d'un ban, avant le repli en blocs larges |
+| `observed_max_prefix` | 16 | `observed` : largeur des blocs bannis en repli (préfixe IPv4 ; IPv6 : `/32`) ; `0` = allocation entière |
 | `rdap_per_hour`, `delay` | 100, 2 | budget et espacement des requêtes RDAP |
 | `load_signal` | `none` | durcissement selon la charge : `psi`, `loadavg` ou `none` |
 | `load_tense`, `load_critical` | 20 / 50 (psi), 1.0 / 2.0 (loadavg) | paliers du signal |
@@ -308,9 +314,39 @@ Les journaux vont sur stderr (journal systemd sous service). Chaque ban indique
 la plage, le débit, l'IP déclenchante et le total de requêtes. `SIGUSR1` affiche
 les plages les plus actives depuis le démarrage ; `SIGTERM`/`SIGINT` arrêtent.
 
+## Ban resserré (`ban_scope = observed`)
+
+Désactivé par défaut : le comportement reste celui décrit plus haut. RDAP continue de
+fournir la **frontière** (l'allocation) et de décider *quand* bannir (même seuil, même
+comptage par allocation). Ce qui change, c'est *quoi* : au lieu de l'allocation entière,
+on bannit les IP vues pendant la fenêtre `window`, regroupées ainsi :
+
+- les IP sont triées et regroupées tant que l'étendue du groupe reste sous
+  `observed_prefix` (4096 adresses par défaut) ; un groupe est borné par ses IP extrêmes
+  (un intervalle, pas un CIDR : deux IP voisines de part et d'autre d'une frontière de
+  bloc restent ensemble) ;
+- on bannit les groupes les plus actifs jusqu'à couvrir 80 % des requêtes de l'allocation ;
+  les IP isolées qui restent (visiteurs légitimes) ne sont pas touchées ;
+- **repli en blocs larges** si le trafic est trop dispersé (plus de 4 groupes nécessaires),
+  ou après `observed_escalate` bans partiels de la même allocation pendant la durée d'un
+  ban (le scraper change de plage). On bannit alors les blocs de `observed_max_prefix`
+  (`/16` par défaut) qui portent 80 % des requêtes, **jamais plus larges**, même si
+  l'allocation est un `/10` : une allocation Google Cloud donne quelques `/16`, pas un
+  `/10`. Une allocation plus étroite que le bloc est bannie telle quelle ; avec
+  `observed_max_prefix = 0`, le repli bannit l'allocation entière.
+
+Le journal indique pour chaque ban le nombre d'IP, de groupes et la part des requêtes
+couverte. Pour comparer sans risque : `run --dry-run --ban-scope observed` sur un même log
+rejoué (`banbot.py run --dry-run --ban-scope allocation LOG`, puis `observed`).
+Quand un ban en remplace d'autres (un `/16` qui englobe des `/32`), le démon retire les
+anciens éléments puis ajoute le nouveau en **deux transactions** nft : nft 0.9.x refuse de
+le faire en une seule (« interval overlaps with an existing one »). Si l'ajout échoue, les
+éléments retirés sont remis.
+Mémoire : au plus 200 000 IP suivies. Les IPv4 et IPv6 sont traitées de la même façon.
+
 ## Limites connues
 
-- **Plage = allocation RIR**, souvent très large (`17.0.0.0/8`, `43.0.0.0/9`,
+- **Plage = allocation RIR** par défaut (voir `ban_scope = observed` pour resserrer), souvent très large (`17.0.0.0/8`, `43.0.0.0/9`,
   `36.128.0.0/10`). Un ban frappe toute l'allocation, y compris des visiteurs
   légitimes. Garde-fou : le ban expire, la liste blanche corrige. Les réponses
   RDAP plus larges que `/8` (IPv4) ou `/16` (IPv6) sont rejetées.
