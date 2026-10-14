@@ -26,11 +26,15 @@ if [ -z "${MAINTAINER:-}" ]; then
     MAINTAINER=${name:-fobots}\ \<${mail:-root@localhost}\>
 fi
 
-python3 -m py_compile fobots.py
+python3 -m py_compile fobots.py fobots/*.py
+find fobots -name __pycache__ -prune -exec rm -rf {} +
 rm -rf "$BUILD" build/__pycache__
 mkdir -p "$BUILD/DEBIAN" "$OUT"
 
 install -D -m 0755 fobots.py          "$BUILD/opt/fobots/fobots.py"
+for module in fobots/*.py; do
+    install -D -m 0644 "$module"       "$BUILD/opt/fobots/$module"
+done
 install -D -m 0644 fobots.conf.example "$BUILD/etc/fobots/fobots.conf"
 install -D -m 0644 README.md          "$BUILD/usr/share/doc/$PKG/README.md"
 install -D -m 0644 README.fr.md       "$BUILD/usr/share/doc/$PKG/README.fr.md"

@@ -234,7 +234,7 @@ from, and the daemon, `welcome`, `bans` and `watched` see the same files.
 | Configuration, welcome list | `/etc/fobots/` | decided by the administrator; the daemon only reads them |
 | RDAP cache, monitoring findings | `/var/lib/fobots/` | state written by the daemon (created if missing, mode 0750) |
 | Logs | journald (`journalctl -u fobots`) | no file |
-| Program | `/opt/fobots/` or `/usr/local/sbin/` | local installation |
+| Program | `/opt/fobots/` (`fobots.py` launcher + `fobots/` package) | local installation |
 
 **Permissions:** the daemon can run as a dedicated user with only the `CAP_NET_ADMIN`
 capability (see `fobots.service.example`). The administration commands (`setup`, `bans`,
@@ -384,7 +384,8 @@ Memory: at most 200,000 IPs tracked. IPv4 and IPv6 are handled the same way.
 
 | File | Role |
 |---|---|
-| `fobots.py` | the daemon and its commands |
+| `fobots.py` | launcher (the code is in the `fobots/` package) |
+| `fobots/` | the package: `cli` (commands), `detector`, `nft`, `welcome` (bans), `rdap`, `grouping`, `follow` (logs), `load`, `sites`, `events`, `config`, `install`, `util`, `constants` |
 | `fobots.conf.example` | example configuration |
 | `fobots.service.example` | example systemd unit |
 | `build-deb.sh`, `Makefile` | Debian package, `make test` |

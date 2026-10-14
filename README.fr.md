@@ -244,7 +244,7 @@ lance une commande, et le démon, `welcome`, `bans` et `watched` voient les mêm
 | Configuration, liste welcome | `/etc/fobots/` | décidées par l'administrateur ; le démon ne fait que les lire |
 | Cache RDAP, constats surveillés | `/var/lib/fobots/` | état écrit par le démon (créé s'il manque, mode 0750) |
 | Journaux | journald (`journalctl -u fobots`) | aucun fichier |
-| Programme | `/opt/fobots/` ou `/usr/local/sbin/` | installation locale |
+| Programme | `/opt/fobots/` (lanceur `fobots.py` + paquet `fobots/`) | installation locale |
 
 **Droits :** le démon peut tourner sous un utilisateur dédié avec la seule capacité
 `CAP_NET_ADMIN` (voir `fobots.service.example`). Les commandes d'administration
@@ -398,7 +398,8 @@ Mémoire : au plus 200 000 IP suivies. Les IPv4 et IPv6 sont traitées de la mê
 
 | Fichier | Rôle |
 |---|---|
-| `fobots.py` | le démon et ses commandes |
+| `fobots.py` | lanceur (le code est dans le paquet `fobots/`) |
+| `fobots/` | le paquet : `cli` (commandes), `detector`, `nft`, `welcome` (bans), `rdap`, `grouping`, `follow` (logs), `load`, `sites`, `events`, `config`, `install`, `util`, `constants` |
 | `fobots.conf.example` | configuration d'exemple |
 | `fobots.service.example` | unité systemd d'exemple |
 | `build-deb.sh`, `Makefile` | paquet Debian, `make test` |

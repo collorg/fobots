@@ -10,7 +10,7 @@
 COUNT   := $(shell git rev-list --count HEAD 2>/dev/null || echo 0)
 VERSION ?= 0.$(COUNT)
 DEB     := dist/fobots_$(VERSION)_all.deb
-SOURCES := fobots.py fobots.conf.example fobots.service.example README.md README.fr.md build-deb.sh
+SOURCES := fobots.py $(wildcard fobots/*.py) fobots.conf.example fobots.service.example README.md README.fr.md build-deb.sh
 
 .PHONY: deb test check lint clean help
 .DEFAULT_GOAL := deb
@@ -27,7 +27,7 @@ test:
 	python3 -m unittest discover -s tests
 
 check: test
-	python3 -m py_compile fobots.py
+	python3 -m py_compile fobots.py fobots/*.py
 	sh -n build-deb.sh
 	python3 fobots.py --help >/dev/null
 	@rm -rf __pycache__
@@ -36,4 +36,4 @@ lint: $(DEB)
 	lintian $(DEB)
 
 clean:
-	rm -rf build dist __pycache__
+	rm -rf build dist __pycache__ fobots/__pycache__ tests/__pycache__

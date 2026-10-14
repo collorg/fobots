@@ -8,6 +8,7 @@ import ipaddress
 import json
 import logging
 import os
+import subprocess
 import sys
 import tempfile
 import threading
@@ -17,7 +18,18 @@ import warnings
 from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-import fobots as fb  # noqa: E402
+from fobots.cli import main  # noqa: E402
+from fobots.config import CONF_KEYS, SITE_KEYS, load_config  # noqa: E402
+from fobots.detector import Detector  # noqa: E402
+from fobots.events import append_event, read_events, trim_events  # noqa: E402
+from fobots.follow import follow  # noqa: E402
+from fobots.grouping import cluster_ips, pick_groups, wide_blocks  # noqa: E402
+from fobots.load import LoadMonitor, read_psi  # noqa: E402
+from fobots.nft import Nft, NftError, parse_elems, val_nets  # noqa: E402
+from fobots.rdap import RangeStore  # noqa: E402
+from fobots.sites import Site  # noqa: E402
+from fobots.util import fmt_range, parse_duration, parse_ts, prefix_of, range_nets, subtract  # noqa: E402
+from fobots.welcome import Banner, Welcome, welcome_add  # noqa: E402
 
 # main() calls logging.basicConfig; with a handler already on the root logger it does nothing,
 # so the tests control where the log records go.
@@ -55,7 +67,7 @@ class FakeNft:
         self.calls.append((ver, list(deletes), list(adds)))
         if self.fail_adds:
             self.fail_adds -= 1
-            raise fb.NftError("interval overlaps with an existing one")
+            raise NftError("interval overlaps with an existing one")
         gone = set(deletes)
         self.sets[ver] = [(n, e) for n, e in self.sets[ver] if n not in gone] + list(adds)
 
@@ -92,102 +104,102 @@ class TmpDirCase(unittest.TestCase):
 
 class Utilities(unittest.TestCase):
     def test_parse_duration(self):
-        self.assertEqual(fb.parse_duration("30s"), 30)
-        self.assertEqual(fb.parse_duration("10m"), 600)
-        self.assertEqual(fb.parse_duration("1h"), 3600)
-        self.assertEqual(fb.parse_duration("2d"), 172800)
+        self.assertEqual(parse_duration("30s"), 30)
+        self.assertEqual(parse_duration("10m"), 600)
+        self.assertEqual(parse_duration("1h"), 3600)
+        self.assertEqual(parse_duration("2d"), 172800)
         for bad in ("", "10", "h", "1x", "-5m", "1.5h"):
             with self.assertRaises(argparse.ArgumentTypeError):
-                fb.parse_duration(bad)
+                parse_duration(bad)
 
     def test_parse_ts(self):
-        self.assertEqual(fb.parse_ts("14/Oct/2026:10:00:01 +0000") - fb.parse_ts("14/Oct/2026:10:00:00 +0000"), 1)
-        self.assertEqual(fb.parse_ts("14/Oct/2026:12:00:00 +0200"), fb.parse_ts("14/Oct/2026:10:00:00 +0000"))
+        self.assertEqual(parse_ts("14/Oct/2026:10:00:01 +0000") - parse_ts("14/Oct/2026:10:00:00 +0000"), 1)
+        self.assertEqual(parse_ts("14/Oct/2026:12:00:00 +0200"), parse_ts("14/Oct/2026:10:00:00 +0000"))
         with self.assertRaises(ValueError):
-            fb.parse_ts("garbage")
+            parse_ts("garbage")
 
     def test_fmt_range(self):
-        self.assertEqual(fb.fmt_range(rng("10.0.0.0", "10.0.255.255")), "10.0.0.0/16")
-        self.assertEqual(fb.fmt_range(rng("34.4.5.0", "34.63.255.255")), "34.4.5.0-34.63.255.255")
-        self.assertEqual(fb.fmt_range(rng("2001:db8::", "2001:db8:ffff:ffff:ffff:ffff:ffff:ffff")), "2001:db8::/32")
+        self.assertEqual(fmt_range(rng("10.0.0.0", "10.0.255.255")), "10.0.0.0/16")
+        self.assertEqual(fmt_range(rng("34.4.5.0", "34.63.255.255")), "34.4.5.0-34.63.255.255")
+        self.assertEqual(fmt_range(rng("2001:db8::", "2001:db8:ffff:ffff:ffff:ffff:ffff:ffff")), "2001:db8::/32")
 
     def test_range_nets_roundtrip(self):
         r = rng("34.4.5.0", "34.63.255.255")
-        nets = fb.range_nets(r)
+        nets = range_nets(r)
         self.assertEqual(int(nets[0].network_address), r[1])
         self.assertEqual(int(nets[-1].broadcast_address), r[2])
         self.assertEqual(sum(n.num_addresses for n in nets), r[2] - r[1] + 1)
 
     def test_prefix_of(self):
-        self.assertEqual(fb.prefix_of(ipaddress.ip_address("1.2.3.4")), net("1.2.0.0/16"))
-        self.assertEqual(fb.prefix_of(ipaddress.ip_address("2001:db8:1::1")), net("2001:db8::/32"))
+        self.assertEqual(prefix_of(ipaddress.ip_address("1.2.3.4")), net("1.2.0.0/16"))
+        self.assertEqual(prefix_of(ipaddress.ip_address("2001:db8:1::1")), net("2001:db8::/32"))
 
     def test_subtract(self):
-        self.assertEqual(fb.subtract(net("10.0.0.0/8"), []), [net("10.0.0.0/8")])
-        self.assertEqual(fb.subtract(net("10.1.0.0/16"), [net("10.0.0.0/8")]), [])
-        self.assertEqual(fb.subtract(net("10.0.0.0/8"), [net("192.168.0.0/16")]), [net("10.0.0.0/8")])
-        pieces = fb.subtract(net("10.0.0.0/24"), [net("10.0.0.0/26")])
+        self.assertEqual(subtract(net("10.0.0.0/8"), []), [net("10.0.0.0/8")])
+        self.assertEqual(subtract(net("10.1.0.0/16"), [net("10.0.0.0/8")]), [])
+        self.assertEqual(subtract(net("10.0.0.0/8"), [net("192.168.0.0/16")]), [net("10.0.0.0/8")])
+        pieces = subtract(net("10.0.0.0/24"), [net("10.0.0.0/26")])
         self.assertEqual(sorted(pieces), [net("10.0.0.64/26"), net("10.0.0.128/25")])
-        self.assertEqual(fb.subtract(net("2001:db8::/32"), [net("2001:db8::/32")]), [])
+        self.assertEqual(subtract(net("2001:db8::/32"), [net("2001:db8::/32")]), [])
         # IPv4 and IPv6 entries do not interfere
-        self.assertEqual(fb.subtract(net("10.0.0.0/8"), [net("2001:db8::/32")]), [net("10.0.0.0/8")])
+        self.assertEqual(subtract(net("10.0.0.0/8"), [net("2001:db8::/32")]), [net("10.0.0.0/8")])
 
 
 class Grouping(unittest.TestCase):
     def test_cluster_groups_close_ips_and_bounds_by_extremes(self):
-        groups = fb.cluster_ips([(100, 1), (110, 2), (5000, 1)], span=4096)
+        groups = cluster_ips([(100, 1), (110, 2), (5000, 1)], span=4096)
         self.assertEqual(groups, [[100, 110, 3, 2], [5000, 5000, 1, 1]])
 
     def test_cluster_not_split_on_block_boundary(self):
         a, b = ip("127.255.255.255"), ip("128.0.0.0")
-        self.assertEqual(fb.cluster_ips([(a, 1), (b, 1)], 4096), [[a, b, 2, 2]])
+        self.assertEqual(cluster_ips([(a, 1), (b, 1)], 4096), [[a, b, 2, 2]])
 
     def test_cluster_span_is_extent_from_first_ip(self):
-        self.assertEqual(len(fb.cluster_ips([(0, 1), (4095, 1), (4096, 1)], 4096)), 2)
-        self.assertEqual(len(fb.cluster_ips([(0, 1), (4095, 1)], 4096)), 1)
+        self.assertEqual(len(cluster_ips([(0, 1), (4095, 1), (4096, 1)], 4096)), 2)
+        self.assertEqual(len(cluster_ips([(0, 1), (4095, 1)], 4096)), 1)
 
     def test_cluster_input_order_irrelevant(self):
-        self.assertEqual(fb.cluster_ips([(5000, 1), (100, 1)], 4096), fb.cluster_ips([(100, 1), (5000, 1)], 4096))
+        self.assertEqual(cluster_ips([(5000, 1), (100, 1)], 4096), cluster_ips([(100, 1), (5000, 1)], 4096))
 
     def test_pick_groups_covers_requested_share(self):
         groups = [[0, 0, 80, 1], [10**6, 10**6, 15, 1], [2 * 10**6, 2 * 10**6, 5, 1]]
-        self.assertEqual(fb.pick_groups(groups, 0.8, 4), [groups[0]])
-        self.assertEqual(len(fb.pick_groups(groups, 0.9, 4)), 2)
+        self.assertEqual(pick_groups(groups, 0.8, 4), [groups[0]])
+        self.assertEqual(len(pick_groups(groups, 0.9, 4)), 2)
 
     def test_pick_groups_too_scattered(self):
         groups = [[i * 10**6, i * 10**6, 1, 1] for i in range(6)]
-        self.assertIsNone(fb.pick_groups(groups, 0.8, 4))
+        self.assertIsNone(pick_groups(groups, 0.8, 4))
 
     def test_wide_blocks_clamped_to_allocation_bounds(self):
         lo, hi = ip("34.64.0.0"), ip("34.127.255.255")
         ips = [(ip("34.67.1.1"), 5), (ip("34.67.9.9"), 3), (ip("34.100.0.1"), 2)]
-        blocks = fb.wide_blocks(ips, lo, hi, 16, 0.8)
+        blocks = wide_blocks(ips, lo, hi, 16, 0.8)
         self.assertEqual(blocks, [(ip("34.67.0.0"), ip("34.67.255.255"))])
-        blocks = fb.wide_blocks(ips, lo, hi, 16, 1.0)
+        blocks = wide_blocks(ips, lo, hi, 16, 1.0)
         self.assertEqual(blocks, [(ip("34.67.0.0"), ip("34.67.255.255")), (ip("34.100.0.0"), ip("34.100.255.255"))])
 
     def test_wide_blocks_clamp_at_edges(self):
         lo, hi = ip("10.0.5.0"), ip("10.0.9.255")  # allocation narrower than a /16
-        self.assertEqual(fb.wide_blocks([(ip("10.0.6.1"), 1)], lo, hi, 16, 0.8), [(lo, hi)])
+        self.assertEqual(wide_blocks([(ip("10.0.6.1"), 1)], lo, hi, 16, 0.8), [(lo, hi)])
 
 
 class WelcomeList(TmpDirCase):
     def test_reads_comments_blank_and_bad_lines(self):
         p = self.write("w.txt", "# header\n10.0.0.0/8  # admins\n\nnot-an-ip\n2001:db8::/32\n")
         with self.assertLogs("fobots", "WARNING"):
-            w = fb.Welcome(p)
+            w = Welcome(p)
         self.assertEqual(w.nets, [net("10.0.0.0/8"), net("2001:db8::/32")])
 
     def test_missing_file_is_empty(self):
         with self.assertLogs("fobots", "INFO") as cm:
-            w = fb.Welcome(self.path("absent.txt"))
+            w = Welcome(self.path("absent.txt"))
         self.assertEqual(w.nets, [])
         self.assertIn("file missing", cm.output[0])
 
     def test_reload_after_change(self):
         p = self.write("w.txt", "10.0.0.0/8\n")
-        w = fb.Welcome(p)
-        fb.Welcome.append(p, [net("192.168.0.0/16")])
+        w = Welcome(p)
+        Welcome.append(p, [net("192.168.0.0/16")])
         os.utime(p, (time.time() + 5, time.time() + 5))
         w.reload()
         self.assertEqual(w.nets, [net("10.0.0.0/8"), net("192.168.0.0/16")])
@@ -195,7 +207,7 @@ class WelcomeList(TmpDirCase):
 
 class RangeStoreTests(TmpDirCase):
     def test_find_returns_most_specific(self):
-        s = fb.RangeStore(None)
+        s = RangeStore(None)
         s.add(rng("10.0.0.0", "10.255.255.255"))
         s.add(rng("10.1.0.0", "10.1.255.255"))
         self.assertEqual(s.find(ipaddress.ip_address("10.1.2.3")), rng("10.1.0.0", "10.1.255.255"))
@@ -205,26 +217,26 @@ class RangeStoreTests(TmpDirCase):
 
     def test_persistence_and_version(self):
         p = self.path("ranges.json")
-        s = fb.RangeStore(p)
+        s = RangeStore(p)
         v = s.version
         s.add(rng("10.0.0.0", "10.255.255.255"))
         s.add(rng("10.0.0.0", "10.255.255.255"))  # duplicate: no change
         self.assertEqual(s.version, v + 1)
-        self.assertEqual(fb.RangeStore(p).ranges, s.ranges)
+        self.assertEqual(RangeStore(p).ranges, s.ranges)
 
     def test_old_format_and_corrupt_file(self):
         p = self.write("old.json", json.dumps([[4, 1, 2, "name"]]))
-        self.assertEqual(fb.RangeStore(p).ranges, ((4, 1, 2),))
+        self.assertEqual(RangeStore(p).ranges, ((4, 1, 2),))
         bad = self.write("bad.json", "{not json")
         with self.assertLogs("fobots", "WARNING"):
-            self.assertEqual(fb.RangeStore(bad).ranges, ())
+            self.assertEqual(RangeStore(bad).ranges, ())
 
 
 class NftParsing(unittest.TestCase):
     def test_val_nets(self):
-        self.assertEqual(fb.val_nets("1.2.3.4"), [net("1.2.3.4/32")])
-        self.assertEqual(fb.val_nets({"prefix": {"addr": "10.0.0.0", "len": 8}}), [net("10.0.0.0/8")])
-        self.assertEqual(fb.val_nets({"range": ["10.0.0.0", "10.0.0.255"]}), [net("10.0.0.0/24")])
+        self.assertEqual(val_nets("1.2.3.4"), [net("1.2.3.4/32")])
+        self.assertEqual(val_nets({"prefix": {"addr": "10.0.0.0", "len": 8}}), [net("10.0.0.0/8")])
+        self.assertEqual(val_nets({"range": ["10.0.0.0", "10.0.0.255"]}), [net("10.0.0.0/24")])
 
     def test_parse_elems_with_and_without_expires(self):
         data = {"nftables": [{"metainfo": {}}, {"set": {"elem": [
@@ -233,14 +245,14 @@ class NftParsing(unittest.TestCase):
             "1.2.3.4",
             {"elem": {"val": {"range": ["34.4.5.0", "34.4.6.255"]}, "timeout": 3600}},
         ]}}]}
-        got = fb.parse_elems(data)
+        got = parse_elems(data)
         self.assertEqual(got[0], (net("10.0.0.0/8"), 120))
         self.assertEqual(got[1], (net("20.0.0.0/8"), None))
         self.assertEqual(got[2], (net("1.2.3.4/32"), None))
         self.assertEqual([n for n, _ in got[3:]], [net("34.4.5.0/24"), net("34.4.6.0/24")])
 
     def test_parse_elems_empty_set(self):
-        self.assertEqual(fb.parse_elems({"nftables": [{"set": {"name": "x"}}]}), [])
+        self.assertEqual(parse_elems({"nftables": [{"set": {"name": "x"}}]}), [])
 
 
 class NftDryRun(unittest.TestCase):
@@ -251,7 +263,7 @@ class NftDryRun(unittest.TestCase):
         return out.getvalue()
 
     def test_delete_and_add_are_two_transactions_in_order(self):
-        nft = fb.Nft(dry_run=True)
+        nft = Nft(dry_run=True)
         nft.sim[4] = [(net("34.66.63.27/32"), 100)]
         out = self.apply(nft, 4, [net("34.66.63.27/32")], [(net("34.64.0.0/10"), 3600)])
         lines = out.strip().splitlines()
@@ -260,12 +272,12 @@ class NftDryRun(unittest.TestCase):
         self.assertEqual(nft.sim[4], [(net("34.64.0.0/10"), 3600)])
 
     def test_add_only_and_timeout_floor(self):
-        nft = fb.Nft(dry_run=True)
+        nft = Nft(dry_run=True)
         out = self.apply(nft, 4, [], [(net("1.2.3.0/24"), 0)])
         self.assertEqual(out.strip(), "add element inet fobots banned4 { 1.2.3.0/24 timeout 1s }")
 
     def test_restore_when_add_fails(self):
-        nft = fb.Nft(dry_run=True)
+        nft = Nft(dry_run=True)
         nft.sim[4] = [(net("1.1.1.1/32"), 50)]
         calls = []
         orig = nft._add
@@ -273,11 +285,11 @@ class NftDryRun(unittest.TestCase):
         def flaky(ver, adds):
             calls.append(adds)
             if len(calls) == 1:
-                raise fb.NftError("overlap")
+                raise NftError("overlap")
             orig(ver, adds)
         nft._add = flaky
         with contextlib.redirect_stdout(io.StringIO()):
-            with self.assertRaises(fb.NftError):
+            with self.assertRaises(NftError):
                 nft.apply(4, [net("1.1.1.1/32")], [(net("1.1.0.0/16"), 3600)], restore=[(net("1.1.1.1/32"), 50)])
         self.assertEqual(calls[1], [(net("1.1.1.1/32"), 50)])
         self.assertEqual(nft.sim[4], [(net("1.1.1.1/32"), 50)])
@@ -285,8 +297,8 @@ class NftDryRun(unittest.TestCase):
 
 class BannerTests(TmpDirCase):
     def banner(self, nft, welcome_text=""):
-        w = fb.Welcome(self.write("w.txt", welcome_text))
-        return fb.Banner(nft, w, 3600)
+        w = Welcome(self.write("w.txt", welcome_text))
+        return Banner(nft, w, 3600)
 
     def test_ban_adds_cidr_pieces(self):
         nft = FakeNft()
@@ -322,7 +334,7 @@ class BannerTests(TmpDirCase):
         with self.assertLogs("fobots", "WARNING"):
             self.assertTrue(self.banner(nft).ban(rng("1.2.3.0", "1.2.3.255"), "t"))
         nft = FakeNft(fail_adds=2)
-        with self.assertLogs("fobots", "WARNING"), self.assertRaises(fb.NftError):
+        with self.assertLogs("fobots", "WARNING"), self.assertRaises(NftError):
             self.banner(nft).ban(rng("1.2.3.0", "1.2.3.255"), "t")
 
     def test_replaced_elements_are_offered_for_restoration(self):
@@ -338,7 +350,7 @@ class BannerTests(TmpDirCase):
 
     def test_welcome_add_removes_and_keeps_the_rest(self):
         nft = FakeNft([(net("17.0.0.0/8"), 500)])
-        deletes, adds = fb.welcome_add(nft, net("17.1.0.0/16"), 3600)
+        deletes, adds = welcome_add(nft, net("17.1.0.0/16"), 3600)
         self.assertEqual(deletes, [net("17.0.0.0/8")])
         self.assertEqual(len(adds), 8)
         self.assertTrue(all(t == 500 for _, t in adds))
@@ -351,12 +363,12 @@ class DetectorBase(TmpDirCase):
     def detector(self, ranges=(), threshold=5, sustain=1, window=60, scope="allocation", nft=None,
                  welcome="", **kw):
         self.nft = nft or FakeNft()
-        self.store = fb.RangeStore(None)
+        self.store = RangeStore(None)
         for r in ranges:
             self.store.add(r)
         self.rdap = NoRdap()
-        banner = fb.Banner(self.nft, fb.Welcome(self.write("w.txt", welcome)), 3600)
-        self.det = fb.Detector(threshold, kw.pop("prefix_threshold", threshold), sustain, window,
+        banner = Banner(self.nft, Welcome(self.write("w.txt", welcome)), 3600)
+        self.det = Detector(threshold, kw.pop("prefix_threshold", threshold), sustain, window,
                                self.store, banner, self.rdap, scope=scope, **kw)
         return self.det
 
@@ -430,7 +442,7 @@ class DetectorAllocation(DetectorBase):
 
     def test_ignore_path_and_site_rules(self):
         import re
-        site = fb.Site("gitlab", "/x.log", prefixes=["/assets/"])
+        site = Site("gitlab", "/x.log", prefixes=["/assets/"])
         self.detector([self.ALLOC], threshold=2, ignore_path=re.compile(r"^/favicon"), sites=[site])
         for p in ("/assets/a.js", "/assets/b.js", "/favicon.ico", "/favicon.png"):
             for _ in range(3):
@@ -443,7 +455,7 @@ class DetectorAllocation(DetectorBase):
         self.assertEqual(self.nft.banned(), ["43.0.0.0/9"])
 
     def test_site_ignore_all(self):
-        site = fb.Site("static", "/x.log", all=True)
+        site = Site("static", "/x.log", all=True)
         self.detector([self.ALLOC], threshold=1)
         for _ in range(10):
             self.det.feed_line(line("43.1.1.1", 0), site)
@@ -464,7 +476,7 @@ class DetectorAllocation(DetectorBase):
             for _ in range(3):
                 self.det.feed_line(line("43.1.1.1", 0, "/api/v4/jobs", agent="runner/1"))
         self.assertTrue(any("WATCH 43.0.0.0/9 banned" in m for m in cm.output))
-        events = fb.read_events(wf, 0)
+        events = read_events(wf, 0)
         self.assertEqual(events[0]["ips"][0][0], "43.1.1.1")
         self.assertEqual(events[0]["range"], "43.0.0.0/9")
 
@@ -542,7 +554,7 @@ class DetectorObserved(DetectorBase):
 class LoadMonitorTests(unittest.TestCase):
     def monitor(self, values):
         it = iter(values)
-        return fb.LoadMonitor("loadavg", 1.0, 2.0, 300, (0.5, 0.25), sampler=lambda: next(it))
+        return LoadMonitor("loadavg", 1.0, 2.0, 300, (0.5, 0.25), sampler=lambda: next(it))
 
     def test_goes_up_immediately(self):
         m = self.monitor([0.1, 1.5, 2.5])
@@ -580,7 +592,7 @@ class LoadMonitorTests(unittest.TestCase):
     def test_sampler_failure_keeps_level(self):
         def boom():
             raise OSError("no psi")
-        m = fb.LoadMonitor("psi", 20, 50, 300, (0.5, 0.25), sampler=boom)
+        m = LoadMonitor("psi", 20, 50, 300, (0.5, 0.25), sampler=boom)
         m.level = 1
         with self.assertLogs("fobots", "WARNING"):
             m.step(0)
@@ -589,28 +601,28 @@ class LoadMonitorTests(unittest.TestCase):
     def test_read_psi(self):
         data = "some avg10=12.50 avg60=1.00 avg300=0.00 total=1\nfull avg10=0.00 avg60=0 avg300=0 total=0\n"
         with mock.patch("builtins.open", mock.mock_open(read_data=data)):
-            self.assertEqual(fb.read_psi("cpu"), 12.5)
+            self.assertEqual(read_psi("cpu"), 12.5)
         with mock.patch("builtins.open", mock.mock_open(read_data="full avg10=0.00\n")):
             with self.assertRaises(OSError):
-                fb.read_psi("cpu")
+                read_psi("cpu")
 
 
 class SiteTests(unittest.TestCase):
     def test_rules(self):
-        s = fb.Site("s", "/l", prefixes=["/assets/", "/favicon.ico"], regex=r"\.png$")
+        s = Site("s", "/l", prefixes=["/assets/", "/favicon.ico"], regex=r"\.png$")
         self.assertTrue(s.ignores("/assets/x.js"))
         self.assertTrue(s.ignores("/favicon.ico"))
         self.assertTrue(s.ignores("/img/a.png"))
         self.assertFalse(s.ignores("/projects/assets/x.js"))
         self.assertTrue(s.has_path_rules)
-        self.assertFalse(fb.Site("t", "/l").has_path_rules)
-        self.assertEqual(fb.Site("t", "/l").describe(), "no exclusion of its own")
-        self.assertEqual(fb.Site("t", "/l", all=True).describe(), "everything is excluded")
+        self.assertFalse(Site("t", "/l").has_path_rules)
+        self.assertEqual(Site("t", "/l").describe(), "no exclusion of its own")
+        self.assertEqual(Site("t", "/l", all=True).describe(), "everything is excluded")
 
 
 class ConfigTests(TmpDirCase):
     def conf(self, text):
-        return fb.load_config(self.write("fobots.conf", text))
+        return load_config(self.write("fobots.conf", text))
 
     def test_values_are_converted_and_paths_resolved(self):
         c = self.conf("[fobots]\nlog = access.log\nthreshold = 2.5\nban_time = 30m\nsustain = 3\n"
@@ -651,7 +663,7 @@ class ConfigTests(TmpDirCase):
 
     def test_example_files_load(self):
         root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
-        c = fb.load_config(os.path.join(root, "fobots.conf.example"))
+        c = load_config(os.path.join(root, "fobots.conf.example"))
         self.assertEqual(c["threshold"], 5.0)
 
 
@@ -659,16 +671,16 @@ class Events(TmpDirCase):
     def test_append_read_trim(self):
         p = self.path("w.jsonl")
         now = int(time.time())
-        fb.append_event(p, {"t": now - 100 * 86400, "ips": []})
-        fb.append_event(p, {"t": now, "ips": [["1.2.3.4", 1, "/é"]]})
+        append_event(p, {"t": now - 100 * 86400, "ips": []})
+        append_event(p, {"t": now, "ips": [["1.2.3.4", 1, "/é"]]})
         with open(p, "a") as f:
             f.write("garbage\n")
-        self.assertEqual(len(fb.read_events(p, 0)), 2)
-        fb.trim_events(p, keep=30 * 86400)
-        events = fb.read_events(p, 0)
+        self.assertEqual(len(read_events(p, 0)), 2)
+        trim_events(p, keep=30 * 86400)
+        events = read_events(p, 0)
         self.assertEqual([e["t"] for e in events], [now])
         self.assertEqual(events[0]["ips"][0][2], "/é")
-        self.assertEqual(fb.read_events(self.path("absent"), 0), [])
+        self.assertEqual(read_events(self.path("absent"), 0), [])
 
 
 class Follow(TmpDirCase):
@@ -681,7 +693,7 @@ class Follow(TmpDirCase):
         out = []
 
         def run():
-            for ln in fb.follow(path, poll=0.01, grace=0.2, **kw):
+            for ln in follow(path, poll=0.01, grace=0.2, **kw):
                 out.append(ln)
                 if len(out) >= n:
                     return
@@ -771,7 +783,7 @@ class Commands(TmpDirCase):
         try:
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
                 try:
-                    rc = fb.main(list(argv))
+                    rc = main(list(argv))
                 except SystemExit as e:
                     rc = e.code
         finally:
@@ -826,7 +838,7 @@ class Commands(TmpDirCase):
         self.assertIn("flags interval,timeout", out)
 
     def test_watched_table_and_cmd(self):
-        fb.append_event(self.path("watched.jsonl"), {
+        append_event(self.path("watched.jsonl"), {
             "t": int(time.time()), "range": "40.0.0.0/12", "seconds": 3600,
             "ips": [["40.2.2.2", 2, "/api/v4/jobs/7"], ["20.1.1.1", 6, "/api/v4/jobs/request"]]})
         rc, out, err = self.run_main("watched", "--dry-run", "--dir", self.dir)
@@ -847,6 +859,13 @@ class Commands(TmpDirCase):
         unit = self.read("root", "etc/systemd/system/fobots.service")
         self.assertIn("ExecStart=/opt/fobots/fobots.py run -f /etc/fobots/fobots.conf", unit)
         self.assertTrue(os.access(os.path.join(dest, "opt/fobots/fobots.py"), os.X_OK))
+        for module in ("cli", "detector", "nft", "welcome", "constants"):
+            self.assertTrue(os.path.exists(os.path.join(dest, "opt/fobots/fobots", module + ".py")), module)
+        # the installed copy runs on its own (package found next to the launcher)
+        r = subprocess.run([sys.executable, os.path.join(dest, "opt/fobots/fobots.py"), "--help"],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("daemon that bans", r.stdout)
         self.assertTrue(os.path.exists(os.path.join(dest, "etc/fobots/welcome.txt")))
         # idempotent: an existing configuration is kept
         with open(os.path.join(dest, "etc/fobots/fobots.conf"), "a") as f:
@@ -860,9 +879,9 @@ class Commands(TmpDirCase):
         with open(os.path.join(root, "fobots.conf.example")) as f:
             text = f.read()
         keys = set(re.findall(r"(?m)^#?\s*([a-z_]+)\s*=", text)) - {"log"}
-        site_only = set(fb.SITE_KEYS)
+        site_only = set(SITE_KEYS)
         for k in keys - site_only:
-            self.assertIn(k, fb.CONF_KEYS, k)
+            self.assertIn(k, CONF_KEYS, k)
 
 
 if __name__ == "__main__":

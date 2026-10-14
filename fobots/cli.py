@@ -1,0 +1,440 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# Copyright (C) 2026 Joël Maizi
+"""fobots: daemon that bans (nftables) overly aggressive IP ranges.
+
+Continuously reads an access log in "combined" format (nginx / Apache / GitLab),
+counts requests per IP range and per second, and adds the offending range to the
+nftables set as soon as the threshold is exceeded. Bans expire by themselves (nft timeout).
+
+  fobots.py run                      # follows the log given in fobots.conf
+  tail -F /var/log/gitlab/nginx/gitlab_access.log | fobots.py run -t 5 -
+  fobots.py setup                    # creates nft table, sets and rules (idempotent)
+  fobots.py bans                     # active bans with remaining time
+  fobots.py welcome add 17.0.0.0/8   # welcome list + removal of the bans concerned
+  fobots.py welcome list
+
+Ranges come from RDAP (the successor of whois), queried in the background only for a
+/16 prefix (IPv6: /32) that already exceeds --prefix-threshold, with an hourly budget.
+The ranges found are kept on disk. The ban state is read from nft: the daemon can be
+restarted without losing anything.
+Configuration: fobots.conf (see fobots.conf.example), looked up in the current directory
+then in /etc/fobots/, or given with -f. The command line overrides it.
+Signals: SIGUSR1 prints the most active ranges, SIGTERM/SIGINT stop the daemon.
+"""
+import argparse
+import ipaddress
+import logging
+import os
+import re
+import signal
+import sys
+import time
+from datetime import datetime
+
+from .config import CONF_SEARCH, load_config
+from .constants import CONF_DIR, STATE_DIR
+from .detector import OBSERVED_PREFIX6, OBSERVED_WIDE6, SCOPES, Detector
+from .events import read_events, trim_events
+from .follow import log_lines, run_sites, stdin_is_feed
+from .install import Installer
+from .load import LOAD_DEFAULTS, LoadMonitor, read_load
+from .nft import NFT_SETUP, Nft, NftError
+from .rdap import Rdap, RangeStore
+from .sites import Site
+from .util import parse_duration
+from .welcome import Banner, Welcome, welcome_add
+
+log = logging.getLogger("fobots")
+
+
+def paths(args):
+    """(RDAP cache, welcome list). The welcome list is next to the configuration used,
+    otherwise in CONF_DIR: never relative to the current directory."""
+    wl_base = os.path.dirname(os.path.abspath(args.config)) if args.config else CONF_DIR
+    return (args.cache or os.path.join(args.dir, "ip_ranges.json"),
+            args.welcome or os.path.join(wl_base, "welcome.txt"))
+
+
+
+def ensure_dir(path):
+    """Creates the directory (0750) if missing; stops with a clear message otherwise."""
+    try:
+        os.makedirs(path, mode=0o750, exist_ok=True)
+    except OSError as e:
+        sys.exit(f"cannot create {path}: {e} (create the directory with the right permissions, "
+                 "or give --dir)")
+
+
+
+def watch_file_path(args):
+    return args.watch_file or os.path.join(args.dir, "watched.jsonl")
+
+
+
+def cmd_run(args):
+    cache, wl_path = paths(args)
+    ensure_dir(os.path.dirname(os.path.abspath(cache)))
+    ensure_dir(os.path.dirname(os.path.abspath(watch_file_path(args))))
+    store, wl = RangeStore(cache), Welcome(wl_path)
+    nft = Nft(args.nft_bin, args.dry_run)
+    try:
+        for ver in (4, 6):
+            log.info("IPv%d: %d range(s) already banned", ver, len(nft.elements(ver)))
+    except NftError as e:
+        log.error("nft: %s", e)
+        return 1
+    rdap = Rdap(store, args.delay, args.rdap_per_hour)
+    rdap.start()
+    load = None
+    if args.load_signal not in ("none", "psi", "loadavg"):
+        log.error("invalid load_signal: %r (none, psi or loadavg)", args.load_signal)
+        return 1
+    if args.load_signal != "none":
+        signal_name = args.load_signal
+        try:
+            read_load(signal_name)
+        except (OSError, ValueError) as e:
+            if signal_name != "psi":
+                log.error("load: %s", e)
+                return 1
+            log.warning("PSI unavailable (%s), falling back to loadavg", e)
+            signal_name = "loadavg"
+        d_tense, d_crit = LOAD_DEFAULTS[signal_name]
+        load = LoadMonitor(signal_name,
+                           d_tense if args.load_tense is None else args.load_tense,
+                           d_crit if args.load_critical is None else args.load_critical,
+                           args.load_recover, (args.tense_factor, args.critical_factor))
+        load.start()
+        log.info("load monitoring: %s, levels %s, recovery after %d s",
+                 signal_name, load.thresholds, args.load_recover)
+    watch = None
+    if args.watch_agent or args.watch_path:
+        try:
+            watch = (re.compile(args.watch_agent) if args.watch_agent else None,
+                     re.compile(args.watch_path) if args.watch_path else None)
+        except re.error as e:
+            log.error("invalid regular expression: %s", e)
+            return 1
+        log.info("request monitoring: agent=%r path=%r (counted normally, "
+                 "logged if their range is banned)", args.watch_agent, args.watch_path)
+    ignore_path = None
+    if args.ignore_path:
+        try:
+            ignore_path = re.compile(args.ignore_path)
+        except re.error as e:
+            log.error("invalid regular expression for ignore_path: %s", e)
+            return 1
+        log.info("requests excluded from the count (path): %r", args.ignore_path)
+    sites = [Site(d["name"], d["log"], d["prefixes"], d["regex"], d["all"])
+             for d in (getattr(args, "sites", None) or [])]
+    if args.log:  # single log of [fobots] or --log: a target without rules of its own
+        if any(x.log == args.log for x in sites):
+            log.error("the log %s is both in [fobots] and in a [site:…] section", args.log)
+            return 1
+        sites.insert(0, Site("default", args.log))
+    if args.files:
+        sites = []  # files given as arguments: read once, not followed
+    for x in sites:
+        log.info("target %s: following %s (%s)", x.name, x.log, x.describe())
+    if args.ban_scope not in SCOPES:
+        log.error("invalid ban_scope: %r (%s)", args.ban_scope, " or ".join(SCOPES))
+        return 1
+    if not 8 <= args.observed_prefix <= 32:
+        log.error("observed_prefix must be between 8 and 32 (IPv4)")
+        return 1
+    if args.observed_max_prefix and not 8 <= args.observed_max_prefix <= args.observed_prefix:
+        log.error("observed_max_prefix must be 0 (whole allocation) or between 8 and "
+                  "observed_prefix (%d)", args.observed_prefix)
+        return 1
+    if not sites and not args.files and not stdin_is_feed():
+        log.error("no log to follow: define `log =` in [fobots] or in a [site:NAME] section "
+                  "(configuration used: %s), or pass --log FILE; "
+                  "to read stdin explicitly: `run -`", args.config or "none")
+        return 1
+    watch_file = watch_file_path(args) if watch else None
+    if watch_file:
+        trim_events(watch_file)
+    det = Detector(args.threshold, args.prefix_threshold or args.threshold, args.sustain,
+                   args.window, store, Banner(nft, wl, args.ban_seconds), rdap,
+                   load, args.min_threshold, args.min_ban_seconds, watch, watch_file,
+                   ignore_path, sites, args.ban_scope, args.observed_prefix, args.observed_escalate,
+                   args.observed_max_prefix)
+    if det.observed:
+        log.info("ban_scope observed: groups of IPs of at most /%d (IPv6 /%d), fallback to blocks "
+                 "of %s if scattered or after %d partial bans", args.observed_prefix,
+                 OBSERVED_PREFIX6,
+                 f"/{args.observed_max_prefix} (IPv6 /{OBSERVED_WIDE6})"
+                 if args.observed_max_prefix else "the whole allocation", args.observed_escalate)
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    signal.signal(signal.SIGUSR1, lambda *_: det.dump())
+    if args.config:
+        log.info("configuration: %s", args.config)
+    log.info("daemon ready: threshold %s req/s, ban %d s, %d range(s) cached in %s",
+             args.threshold, args.ban_seconds, len(store.ranges), os.path.abspath(cache))
+    try:
+        if sites:
+            run_sites(det, sites, args.from_start)
+        else:  # files (read once) or stdin
+            for line in log_lines(args):
+                det.feed_line(line)
+    except KeyboardInterrupt:
+        pass
+    except OSError as e:  # stdin or file unreadable
+        log.error("cannot read: %s", e)
+        return 1
+    log.info("stopping")
+    return 0
+
+
+
+def cmd_setup(args):
+    nft = Nft(args.nft_bin, args.dry_run)
+    if args.dry_run:
+        print(NFT_SETUP, end="")
+    elif nft.table_exists():
+        print("table inet fobots already in place")
+    else:
+        nft.setup()
+        print("table inet fobots created")
+    return 0
+
+
+
+def cmd_bans(args):
+    nft = Nft(args.nft_bin, args.dry_run)
+    for ver in (4, 6):
+        for n, exp in sorted(nft.elements(ver), key=lambda e: e[0].network_address):
+            print(f"{str(n):<24} {'' if exp is None else f'{exp} s left'}")
+    return 0
+
+
+
+def cmd_watched(args):
+    """Monitored IPs caught in a ban (history + current state), to spot false positives."""
+    path = watch_file_path(args)
+    events = read_events(path, time.time() - args.since)
+    if not events:
+        print(f"no finding in {path} for this period (watch_agent / watch_path "
+              "enabled in the daemon's configuration?)")
+        return 0
+    active, known = [], False
+    if not args.dry_run:
+        try:
+            nft = Nft(args.nft_bin)
+            active = [(n, e) for ver in (4, 6) for n, e in nft.elements(ver)]
+            known = True
+        except NftError as e:
+            print(f"ban state unavailable ({e}): STATE column unknown", file=sys.stderr)
+    agg = {}
+    for ev in events:
+        for ip, n, rpath in ev["ips"]:
+            a = agg.setdefault(ip, {"bans": 0, "req": 0, "t": 0, "range": "", "path": ""})
+            a["bans"] += 1
+            a["req"] += n
+            if ev["t"] >= a["t"]:
+                a.update(t=ev["t"], range=ev["range"], path=rpath)
+    rows = []
+    for ip, a in agg.items():
+        state = "?"
+        if known:
+            addr = ipaddress.ip_address(ip)
+            left = [e for n, e in active if n.version == addr.version and addr in n]
+            state = f"active ({max(e or 0 for e in left)} s)" if left else "expired"
+        a["state"] = state
+        rows.append((ip, a))
+    if args.active:
+        rows = [r for r in rows if r[1]["state"].startswith("active")]
+    rows.sort(key=lambda r: (not r[1]["state"].startswith("active"), -r[1]["bans"], -r[1]["req"]))
+    if not rows:
+        print("no monitored IP in an active ban")
+        return 0
+    cmd = "fobots.py welcome add " + " ".join(str(ipaddress.ip_network(ip)) for ip, _ in rows)
+    if args.config:
+        cmd += f" -f {args.config}"
+    if args.cmd:
+        print(cmd)
+        return 0
+    print(f"{'IP':<40} {'BANS':>4} {'REQ':>6}  {'LAST BAN':<16} {'RANGE':<20} {'STATE':<14} ROUTE")
+    for ip, a in rows:
+        when = datetime.fromtimestamp(a["t"]).strftime("%Y-%m-%d %H:%M")
+        print(f"{ip:<40} {a['bans']:>4} {a['req']:>6}  {when:<16} {a['range']:<20} "
+              f"{a['state']:<14} {a['path']}")
+    print(f"\n{len(rows)} IP(s) over {args.since / 86400:g} d. To protect them all:\n  {cmd}")
+    return 0
+
+
+
+def cmd_install(args):
+    Installer(args).run_all()
+    return 0
+
+
+
+def cmd_welcome(args):
+    _, wl_path = paths(args)
+    if args.action == "list":
+        for n in Welcome(wl_path).nets:
+            print(n)
+        return 0
+    nets = []
+    for x in args.nets:
+        try:
+            nets.append(ipaddress.ip_network(x, strict=False))
+        except ValueError:
+            print(f"invalid range: {x}", file=sys.stderr)
+            return 2
+    try:
+        os.makedirs(os.path.dirname(os.path.abspath(wl_path)), exist_ok=True)
+        Welcome.append(wl_path, nets)  # first: the daemon stops banning it
+    except OSError as e:
+        print(f"cannot write {wl_path}: {e} (permissions? run with sudo)",
+              file=sys.stderr)
+        return 1
+    nft = Nft(args.nft_bin, args.dry_run)
+    for net in nets:
+        try:
+            deletes, adds = welcome_add(nft, net, args.ban_seconds)
+        except NftError as e:
+            print(f"{net} added to {wl_path}, but nft failed: {e}", file=sys.stderr)
+            return 1
+        print(f"{net}: welcome list; {len(deletes)} ban(s) removed"
+              + (f", {len(adds)} piece(s) of the rest kept" if adds else ""))
+    return 0
+
+
+
+def main(argv=None):
+    pre = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    pre.add_argument("-f", "--config")
+    conf_path = pre.parse_known_args(argv)[0].config
+    if conf_path is None:
+        conf_path = next((c for c in CONF_SEARCH if os.path.exists(c)), None)
+    elif not os.path.exists(conf_path):
+        sys.exit(f"configuration not found: {conf_path}")
+    conf = load_config(conf_path) if conf_path else {}
+
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("-f", "--config", help="configuration file "
+                        "(default: /etc/fobots/fobots.conf, then ./fobots.conf)")
+    common.add_argument("--dir", default=STATE_DIR,
+                        help=f"state directory: ip_ranges.json, watched.jsonl (default: {STATE_DIR})")
+    common.add_argument("-c", "--cache", help="file of RDAP ranges (default: DIR/ip_ranges.json)")
+    common.add_argument("-w", "--welcome", help="welcome list (default: welcome.txt next to the configuration, "
+                        f"otherwise {CONF_DIR}/welcome.txt)")
+    common.add_argument("--watch-file",
+                        help="file of monitoring findings (default: DIR/watched.jsonl)")
+    common.add_argument("--ban-time", dest="ban_seconds", type=parse_duration, default=3600,
+                        help="duration of a ban: 30m, 1h, 1d… (default: 1h)")
+    common.add_argument("--nft-bin", default="nft", help="nft binary (default: nft)")
+    common.add_argument("--dry-run", action="store_true",
+                        help="does not call nft: prints the commands (simulated sets)")
+    common.add_argument("-v", "--verbose", action="store_true")
+
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    r = sub.add_parser("run", parents=[common], help="daemon: reads the log and bans")
+    r.add_argument("files", nargs="*",
+                   help="logs read once (- = stdin); otherwise --log is followed, otherwise stdin")
+    r.add_argument("-l", "--log", help="log to follow continuously (rotation handled, like tail -F)")
+    r.add_argument("--from-start", action="store_true",
+                   help="with --log: first reads the existing content (default: end of the file)")
+    r.add_argument("-t", "--threshold", type=float, default=5.0,
+                   help="req/s of a range above which it is banned (default: 5)")
+    r.add_argument("-p", "--prefix-threshold", type=float,
+                   help="req/s of an unresolved /16 prefix that trigger an RDAP request "
+                        "(default: = --threshold)")
+    r.add_argument("--sustain", type=int, default=1,
+                   help="number of seconds above the threshold required (default: 1)")
+    r.add_argument("--window", type=int, default=60,
+                   help="window in seconds for --sustain (default: 60)")
+    r.add_argument("--load-signal", choices=["none", "psi", "loadavg"], default="none",
+                   help="hardens the rules according to the load: psi (reactive), loadavg "
+                        "(load/cores) or none (default)")
+    r.add_argument("--load-tense", type=float,
+                   help="signal value at the tense level (default: 20 %% for psi, 1.0 for loadavg)")
+    r.add_argument("--load-critical", type=float,
+                   help="value at the critical level (default: 50 %% for psi, 2.0 for loadavg)")
+    r.add_argument("--load-recover", type=parse_duration, default=300,
+                   help="time below the level before going down one level (default: 5m)")
+    r.add_argument("--tense-factor", type=float, default=0.5,
+                   help="multiplier of the threshold AND of the ban duration at the tense level (default: 0.5)")
+    r.add_argument("--critical-factor", type=float, default=0.25,
+                   help="same at the critical level (default: 0.25)")
+    r.add_argument("--min-threshold", type=float, default=1.0,
+                   help="floor of the effective threshold in req/s (default: 1)")
+    r.add_argument("--min-ban-time", dest="min_ban_seconds", type=parse_duration, default=60,
+                   help="floor of the effective ban duration (default: 1m)")
+    r.add_argument("--ignore-path", metavar="REGEX",
+                   help="opt-in: does not count the requests whose path matches "
+                        "(cheap static pages, e.g. ^/(assets|uploads)/)")
+    r.add_argument("--watch-agent", metavar="REGEX",
+                   help="opt-in: logs (WATCH) the IPs whose user agent matches when "
+                        "their range is banned (e.g. ^gitlab-runner); does not change the count")
+    r.add_argument("--watch-path", metavar="REGEX",
+                   help="restricts --watch-agent to the matching paths (e.g. ^/api/v4/); "
+                        "if both are given, both must match")
+    r.add_argument("--ban-scope", choices=SCOPES, default="allocation",
+                   help="allocation: the whole RDAP range is banned (default); observed: only "
+                        "the groups of IPs seen, inside the allocation")
+    r.add_argument("--observed-prefix", type=int, default=20,
+                   help="ban_scope=observed: maximum width of a group of IPs, as an IPv4 prefix "
+                        "(default: 20, i.e. 4096 addresses; IPv6: /48)")
+    r.add_argument("--observed-escalate", type=int, default=4,
+                   help="ban_scope=observed: partial bans of the same allocation (within the duration "
+                        "of a ban) before falling back to wide blocks (default: 4)")
+    r.add_argument("--observed-max-prefix", type=int, default=16,
+                   help="ban_scope=observed: if the traffic is scattered, blocks of this width are "
+                        "banned (IPv4 prefix, default: 16; IPv6: /32) instead of the whole "
+                        "allocation; 0 = whole allocation")
+    r.add_argument("--rdap-per-hour", type=int, default=100,
+                   help="budget of RDAP requests per hour (default: 100)")
+    r.add_argument("--delay", type=float, default=2.0,
+                   help="minimum seconds between two RDAP requests (default: 2)")
+    r.set_defaults(fn=cmd_run)
+
+    sub.add_parser("setup", parents=[common],
+                   help="creates the nft table if absent").set_defaults(fn=cmd_setup)
+    sub.add_parser("bans", parents=[common], help="lists the active bans").set_defaults(fn=cmd_bans)
+
+    ins = sub.add_parser("install", parents=[common],
+                         help="installs fobots (nftables, user, directories, configuration, systemd unit)")
+    ins.add_argument("--log", help="log to follow, written in the configuration created (default: the example's)")
+    ins.add_argument("--log-group", help="group giving access to the log (default: detected, otherwise adm)")
+    ins.add_argument("--yes", action="store_true", help="answers yes to the questions (apt installation)")
+    ins.add_argument("--enable", action="store_true", help="enables the service at boot")
+    ins.add_argument("--start", action="store_true", help="enables AND starts the service")
+    ins.add_argument("--destdir", help="writes the files under this prefix without touching the system (test)")
+    ins.set_defaults(fn=cmd_install)
+
+    wd = sub.add_parser("watched", parents=[common],
+                        help="monitored IPs (watch_*) caught in a ban: possible false positives")
+    wd.add_argument("--since", type=parse_duration, default=7 * 86400,
+                    help="period to consider: 12h, 3d… (default: 7d)")
+    wd.add_argument("--active", action="store_true", help="only those whose ban is active")
+    wd.add_argument("--cmd", action="store_true",
+                    help="only prints the corresponding `welcome add` command")
+    wd.set_defaults(fn=cmd_watched)
+
+    w = sub.add_parser("welcome", parents=[common], help="manages the welcome list")
+    w.add_argument("action", choices=["add", "list"])
+    w.add_argument("nets", nargs="*", help="CIDRs to add (add)")
+    w.set_defaults(fn=cmd_welcome)
+
+    for p in sub.choices.values():
+        p.set_defaults(config=conf_path, **conf)  # command line > configuration > defaults
+    args = ap.parse_args(argv)
+    if args.cmd == "run":
+        for name in ("tense_factor", "critical_factor"):
+            if not 0 < getattr(args, name) <= 1:
+                ap.error(f"--{name.replace('_', '-')} must be in ]0, 1]")
+    if args.cmd == "welcome" and args.action == "add" and not args.nets:
+        ap.error("welcome add: give at least one range")
+    logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
+                        format="%(asctime)s %(levelname)s %(message)s", stream=sys.stderr)
+    try:
+        return args.fn(args)
+    except NftError as e:  # nft missing, kernel refusal, insufficient permissions…
+        log.error("nft: %s", e)
+        return 1

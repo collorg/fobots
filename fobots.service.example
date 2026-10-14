@@ -3,7 +3,7 @@
 # Installation: sudo ./fobots.py install   (creates the user, the directories, the configuration
 # and this unit, with the log access group). Manually:
 #   useradd --system --no-create-home --shell /usr/sbin/nologin fobots
-#   install -m 0755 fobots.py /opt/fobots/fobots.py
+#   install -d /opt/fobots && cp -r fobots.py fobots /opt/fobots/   # launcher + package
 #   install -D -m 0644 fobots.conf.example /etc/fobots/fobots.conf   # then edit it
 #   systemctl daemon-reload && systemctl enable --now fobots
 #
