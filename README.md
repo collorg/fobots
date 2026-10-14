@@ -1,4 +1,4 @@
-# banbot
+# fobots
 
 Démon qui protège un serveur web (pensé pour un GitLab derrière nginx) des
 scrapers trop agressifs. Il suit l'access log, repère les **plages d'IP** dont le
@@ -43,8 +43,8 @@ noyau 5.4) : `apt install nftables` (version 0.9.3).
 Sur Debian/Ubuntu, depuis un clone du dépôt :
 
 ```
-sudo ./banbot.py install --dry-run            # le plan, sans rien modifier
-sudo ./banbot.py install --log /var/log/gitlab/nginx/gitlab_access.log
+sudo ./fobots.py install --dry-run            # le plan, sans rien modifier
+sudo ./fobots.py install --log /var/log/gitlab/nginx/gitlab_access.log
 ```
 La commande est **idempotente** (on peut la relancer pour mettre à jour le programme et
 l'unité) et ne touche jamais une conf ou une liste welcome existantes. Elle :
@@ -54,29 +54,29 @@ l'unité) et ne touche jamais une conf ou une liste welcome existantes. Elle :
 2. **teste nft** sur une table jetable : sets d'intervalles avec expiration, sortie JSON
    lisible (s'arrête avec un message sinon) ; signale si cette version n'indique pas le
    temps restant des bans ;
-3. crée l'utilisateur système `banbot` s'il manque ;
-4. installe le programme dans `/opt/banbot/`, la conf dans `/etc/banbot/banbot.conf` (avec
-   `--log` s'il est donné), une liste welcome vide `/etc/banbot/welcome.txt`, le dossier
-   d'état `/var/lib/banbot` (0750, propriété de `banbot`) ;
+3. crée l'utilisateur système `fobots` s'il manque ;
+4. installe le programme dans `/opt/fobots/`, la conf dans `/etc/fobots/fobots.conf` (avec
+   `--log` s'il est donné), une liste welcome vide `/etc/fobots/welcome.txt`, le dossier
+   d'état `/var/lib/fobots` (0750, propriété de `fobots`) ;
 5. installe l'unité systemd, avec le groupe qui donne accès au log (détecté, sinon `adm` ;
    `--log-group` pour l'imposer), puis `systemctl daemon-reload` ;
-6. vérifie que l'utilisateur `banbot` peut lire le log, et dit quoi faire sinon.
+6. vérifie que l'utilisateur `fobots` peut lire le log, et dit quoi faire sinon.
 
 Le service n'est **ni activé ni démarré** par défaut : adapter la conf, remplir la liste
-welcome, essayer `/opt/banbot/banbot.py run --dry-run`, puis `systemctl enable --now banbot`
+welcome, essayer `/opt/fobots/fobots.py run --dry-run`, puis `systemctl enable --now fobots`
 (ou relancer `install` avec `--enable` / `--start`). `--destdir DIR` écrit les fichiers sous
 un préfixe sans toucher au système (tests, empaquetage).
 
 À la main, sans `install` :
 
 ```
-./banbot.py setup                          # crée la table nft (idempotent)
-cp banbot.conf.example banbot.conf         # puis adapter log, seuils
-./banbot.py run --dry-run -v               # affiche les bans sans toucher à nft
-./banbot.py run                            # le vrai démon
+./fobots.py setup                          # crée la table nft (idempotent)
+cp fobots.conf.example fobots.conf         # puis adapter log, seuils
+./fobots.py run --dry-run -v               # affiche les bans sans toucher à nft
+./fobots.py run                            # le vrai démon
 ```
 
-Pour un service permanent, voir `banbot.service.example` (utilisateur dédié,
+Pour un service permanent, voir `fobots.service.example` (utilisateur dédié,
 `CAP_NET_ADMIN` seulement, durcissement systemd).
 
 Commencer prudemment : `ban_time = 10m`, un seuil qui ne vise que les cas
@@ -107,7 +107,7 @@ Les faux positifs se corrigent avec `welcome add`.
 ## Un log par hôte : règles par cible
 
 Un serveur bien configuré écrit **un log par hôte virtuel**. Chaque log devient une
-*cible*, avec ses propres règles, dans `banbot.conf` :
+*cible*, avec ses propres règles, dans `fobots.conf` :
 
 ```ini
 [site:gitlab]
@@ -123,14 +123,14 @@ log = /var/log/nginx/api.access.log
 ```
 - `log` (obligatoire), `ignore_prefix` (préfixes de chemin, séparés par des virgules),
   `ignore_path` (regex), `ignore_all` (rien n'est compté pour cette cible).
-- Les règles propres **s'ajoutent** à l'`ignore_path` global de `[banbot]`.
+- Les règles propres **s'ajoutent** à l'`ignore_path` global de `[fobots]`.
 - Les alias CNAME d'un hôte n'ont aucun effet : ils aboutissent dans le même log, donc
   dans la même cible. Le nom d'hôte n'est jamais lu dans les lignes.
 - Le **comptage reste global par plage d'IP** : les requêtes de toutes les cibles
   s'additionnent, puisque le pare-feu bannit une plage pour tous les hôtes (ports 80/443).
 - Un thread suit chaque log (rotation gérée) ; les formats peuvent différer d'un log à
   l'autre (il faut l'IP, l'horodatage et la ligne de requête).
-- Le `log` unique de `[banbot]` fonctionne toujours (cible « défaut » sans règle propre),
+- Le `log` unique de `[fobots]` fonctionne toujours (cible « défaut » sans règle propre),
   mais ne peut pas désigner le même fichier qu'une section `[site:…]`.
 - Des fichiers donnés en argument (`run fichier.log`) sont lus une fois, sans suivre les
   cibles ; seule la règle globale s'applique.
@@ -180,9 +180,9 @@ le journal (ligne `WATCH`) **et** dans `<dir>/watched.jsonl` (un constat par ban
 journalctl, et l'associe à l'état actuel des bans dans nft :
 
 ```
-banbot.py watched                 # 7 derniers jours (--since 12h, 3d…)
-banbot.py watched --active        # seulement celles dont le ban est actif
-banbot.py watched --cmd           # n'affiche que la commande welcome add
+fobots.py watched                 # 7 derniers jours (--since 12h, 3d…)
+fobots.py watched --active        # seulement celles dont le ban est actif
+fobots.py watched --cmd           # n'affiche que la commande welcome add
 ```
 ```
 IP          BANS  REQ  DERNIER BAN       PLAGE        ÉTAT           ROUTE
@@ -190,7 +190,7 @@ IP          BANS  REQ  DERNIER BAN       PLAGE        ÉTAT           ROUTE
 20.1.1.1       2    6  2026-10-10 13:40  20.0.0.0/12  expiré         /api/v4/jobs/request
 
 Pour toutes les protéger :
-  banbot.py welcome add 40.2.2.2/32 20.1.1.1/32
+  fobots.py welcome add 40.2.2.2/32 20.1.1.1/32
 ```
 Les IP sont agrégées sur la période : *BANS* = nombre de bans où elles ont été prises
 (une IP prise plusieurs fois est un suspect sérieux). Les bans expirant vite, c'est
@@ -211,29 +211,29 @@ lance une commande, et le démon, `welcome`, `bans` et `watched` voient les mêm
 
 | Quoi | Où | Pourquoi |
 |---|---|---|
-| Configuration, liste welcome | `/etc/banbot/` | décidées par l'administrateur ; le démon ne fait que les lire |
-| Cache RDAP, constats surveillés | `/var/lib/banbot/` | état écrit par le démon (créé s'il manque, mode 0750) |
-| Journaux | journald (`journalctl -u banbot`) | aucun fichier |
-| Programme | `/opt/banbot/` ou `/usr/local/sbin/` | installation locale |
+| Configuration, liste welcome | `/etc/fobots/` | décidées par l'administrateur ; le démon ne fait que les lire |
+| Cache RDAP, constats surveillés | `/var/lib/fobots/` | état écrit par le démon (créé s'il manque, mode 0750) |
+| Journaux | journald (`journalctl -u fobots`) | aucun fichier |
+| Programme | `/opt/fobots/` ou `/usr/local/sbin/` | installation locale |
 
 **Droits :** le démon peut tourner sous un utilisateur dédié avec la seule capacité
-`CAP_NET_ADMIN` (voir `banbot.service.example`). Les commandes d'administration
+`CAP_NET_ADMIN` (voir `fobots.service.example`). Les commandes d'administration
 (`setup`, `bans`, `watched`, `welcome add`) doivent s'exécuter **en root (`sudo`)** :
-elles lisent ou modifient nft, et `welcome add` écrit dans `/etc/banbot/`.
+elles lisent ou modifient nft, et `welcome add` écrit dans `/etc/fobots/`.
 
 ## Configuration
 
-`banbot.conf` (section `[banbot]`), cherché d'abord dans `/etc/banbot/`, puis dans le
+`fobots.conf` (section `[fobots]`), cherché d'abord dans `/etc/fobots/`, puis dans le
 dossier courant (pratique pour le développement), ou donné par `-f`. Les chemins
 relatifs y sont relatifs au fichier de conf. **La ligne de commande l'emporte sur la
-conf.** Voir `banbot.conf.example` pour toutes les clés :
+conf.** Voir `fobots.conf.example` pour toutes les clés :
 
 | Clé | Défaut | Rôle |
 |---|---|---|
 | `log` | aucun | log suivi en continu (rotation gérée) ; voir aussi les sections `[site:NOM]` |
-| `dir` | `/var/lib/banbot` | dossier d'état : `ip_ranges.json`, `watched.jsonl` (créé s'il manque) |
+| `dir` | `/var/lib/fobots` | dossier d'état : `ip_ranges.json`, `watched.jsonl` (créé s'il manque) |
 | `cache` | `<dir>/ip_ranges.json` | cache des plages RDAP |
-| `welcome` | `welcome.txt` à côté de la conf utilisée, sinon `/etc/banbot/` | plages à ne jamais bannir |
+| `welcome` | `welcome.txt` à côté de la conf utilisée, sinon `/etc/fobots/` | plages à ne jamais bannir |
 | `threshold` | 5 | req/s d'une plage au-delà desquelles on bannit |
 | `prefix_threshold` | = `threshold` | req/s d'un `/16` non résolu qui autorisent RDAP |
 | `sustain`, `window` | 1, 60 | secondes au-dessus du seuil exigées, dans la fenêtre |
@@ -251,7 +251,7 @@ conf.** Voir `banbot.conf.example` pour toutes les clés :
 | `from_start` | non | lire d'abord le contenu existant du log |
 
 Sans `log` ni section `[site:…]`, le démon **refuse de démarrer** (erreur claire), sauf si
-stdin est un tube ou un fichier (`tail -F fichier | banbot.py run`) ou si `-` est passé
+stdin est un tube ou un fichier (`tail -F fichier | fobots.py run`) ou si `-` est passé
 explicitement. Des fichiers passés en argument sont lus une fois (`-` = stdin), ce qui sert
 à rejouer un log.
 
@@ -264,13 +264,13 @@ indique aussi le nombre de lignes illisibles (format de log inattendu, par ex. l
 ## Commandes
 
 ```
-banbot.py run [-t SEUIL] [-p SEUIL_PREFIXE] [--log FICHIER] [fichiers…]   (sans argument : suit les logs de la conf)
-banbot.py install [--dry-run] [--log F] installe nftables, l'utilisateur, la conf, l'unité systemd
-banbot.py setup                      crée la table, les sets et les règles nft
-banbot.py bans                       bans actifs et temps restant
-banbot.py welcome add CIDR…        liste welcome + retrait des bans concernés
-banbot.py welcome list
-banbot.py watched [--active] [--cmd]  IP surveillées (watch_*) prises dans un ban
+fobots.py run [-t SEUIL] [-p SEUIL_PREFIXE] [--log FICHIER] [fichiers…]   (sans argument : suit les logs de la conf)
+fobots.py install [--dry-run] [--log F] installe nftables, l'utilisateur, la conf, l'unité systemd
+fobots.py setup                      crée la table, les sets et les règles nft
+fobots.py bans                       bans actifs et temps restant
+fobots.py welcome add CIDR…        liste welcome + retrait des bans concernés
+fobots.py welcome list
+fobots.py watched [--active] [--cmd]  IP surveillées (watch_*) prises dans un ban
 ```
 Options communes : `-f CONF`, `--dir`, `-c`, `-w`, `--ban-time`, `--nft-bin`,
 `--dry-run`, `-v`. `--dry-run` n'appelle pas nft : il affiche les commandes et
@@ -279,7 +279,7 @@ simule les sets en mémoire.
 ## Liste welcome
 
 ```
-banbot.py welcome add 17.0.0.0/8 -f /etc/banbot/banbot.conf
+fobots.py welcome add 17.0.0.0/8 -f /etc/fobots/fobots.conf
 ```
 La plage est ajoutée à `welcome.txt` (le démon cesse aussitôt de la bannir : il
 relit le fichier avant chaque ban), puis les bans qui la touchent sont retirés.
@@ -290,10 +290,10 @@ Une plage bannie qui recoupe la liste welcome l'est sans la partie protégée.
 ## Remise à zéro
 
 ```
-nft flush set inet banbot banned4        # et banned6 : tous les bans, immédiat
-nft list set inet banbot banned4         # voir ce qui est banni
-nft delete element inet banbot banned4 { 47.74.0.0/15 }
-nft delete table inet banbot             # tout retirer (refaire `setup`)
+nft flush set inet fobots banned4        # et banned6 : tous les bans, immédiat
+nft list set inet fobots banned4         # voir ce qui est banni
+nft delete element inet fobots banned4 { 47.74.0.0/15 }
+nft delete table inet fobots             # tout retirer (refaire `setup`)
 ```
 Le cache RDAP (`ip_ranges.json`) est indépendant : le supprimer force à refaire
 les requêtes RDAP, rien de plus.
@@ -305,7 +305,7 @@ Le suivi du log fonctionne comme `tail -F` : renommage (`create`), troncature
 envoyer. Après un renommage, l'ancien fichier est encore lu 2 s (le serveur y
 écrit jusqu'à la réouverture). Avec `copytruncate`, les lignes écrites entre la
 copie et la troncature sont perdues (limite de logrotate). Chaque log
-(sections `[site:…]` ou `log` de `[banbot]`) est suivi indépendamment, donc chacun peut
+(sections `[site:…]` ou `log` de `[fobots]`) est suivi indépendamment, donc chacun peut
 avoir sa propre rotation.
 
 ## Signaux et journal
@@ -337,7 +337,7 @@ on bannit les IP vues pendant la fenêtre `window`, regroupées ainsi :
 
 Le journal indique pour chaque ban le nombre d'IP, de groupes et la part des requêtes
 couverte. Pour comparer sans risque : `run --dry-run --ban-scope observed` sur un même log
-rejoué (`banbot.py run --dry-run --ban-scope allocation LOG`, puis `observed`).
+rejoué (`fobots.py run --dry-run --ban-scope allocation LOG`, puis `observed`).
 Quand un ban en remplace d'autres (un `/16` qui englobe des `/32`), le démon retire les
 anciens éléments puis ajoute le nouveau en **deux transactions** nft : nft 0.9.x refuse de
 le faire en une seule (« interval overlaps with an existing one »). Si l'ajout échoue, les
@@ -361,17 +361,17 @@ Mémoire : au plus 200 000 IP suivies. Les IPv4 et IPv6 sont traitées de la mê
   les seuils peuvent descendre jusqu'à `min_threshold` : surveiller les premiers jours.
 - Les plages RDAP non résolues (budget épuisé, échec réseau) ne sont jamais
   bannies ; l'échec est journalisé et retenté plus tard.
-- `nftables.service` avec `flush ruleset` efface la table `banbot` à chaque
-  rechargement (voir les commentaires de `banbot.service.example`).
+- `nftables.service` avec `flush ruleset` efface la table `fobots` à chaque
+  rechargement (voir les commentaires de `fobots.service.example`).
 
 ## Fichiers
 
 | Fichier | Rôle |
 |---|---|
-| `banbot.py` | le démon et ses commandes |
-| `banbot.conf.example` | configuration d'exemple |
-| `banbot.service.example` | unité systemd d'exemple |
-| `/etc/banbot/banbot.conf` | configuration |
-| `/etc/banbot/welcome.txt` | plages à ne jamais bannir, un CIDR par ligne (créé par `welcome add`) |
-| `/var/lib/banbot/ip_ranges.json` | cache des plages RDAP |
-| `/var/lib/banbot/watched.jsonl` | constats « IP surveillée prise dans un ban » (si `watch_*`) |
+| `fobots.py` | le démon et ses commandes |
+| `fobots.conf.example` | configuration d'exemple |
+| `fobots.service.example` | unité systemd d'exemple |
+| `/etc/fobots/fobots.conf` | configuration |
+| `/etc/fobots/welcome.txt` | plages à ne jamais bannir, un CIDR par ligne (créé par `welcome add`) |
+| `/var/lib/fobots/ip_ranges.json` | cache des plages RDAP |
+| `/var/lib/fobots/watched.jsonl` | constats « IP surveillée prise dans un ban » (si `watch_*`) |

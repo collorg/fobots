@@ -1,23 +1,23 @@
 #!/usr/bin/env python3
-"""banbot : démon qui bannit (nftables) les plages d'IP trop agressives.
+"""fobots : démon qui bannit (nftables) les plages d'IP trop agressives.
 
 Lit en continu un access log au format « combined » (nginx / Apache / GitLab),
 compte les requêtes par plage d'IP et par seconde, et ajoute la plage fautive au
 set nftables dès que le seuil est dépassé. Les bans expirent seuls (timeout nft).
 
-  banbot.py run                      # suit le log indiqué dans banbot.conf
-  tail -F /var/log/gitlab/nginx/gitlab_access.log | banbot.py run -t 5 -
-  banbot.py setup                    # crée table, sets et règles nft (idempotent)
-  banbot.py bans                     # bans actifs avec temps restant
-  banbot.py welcome add 17.0.0.0/8 # liste welcome + retrait des bans concernés
-  banbot.py welcome list
+  fobots.py run                      # suit le log indiqué dans fobots.conf
+  tail -F /var/log/gitlab/nginx/gitlab_access.log | fobots.py run -t 5 -
+  fobots.py setup                    # crée table, sets et règles nft (idempotent)
+  fobots.py bans                     # bans actifs avec temps restant
+  fobots.py welcome add 17.0.0.0/8 # liste welcome + retrait des bans concernés
+  fobots.py welcome list
 
 Les plages viennent de RDAP (successeur de whois), interrogé en tâche de fond
 seulement pour un préfixe /16 (IPv6 : /32) qui dépasse déjà --prefix-threshold,
 avec un budget horaire. Les plages trouvées sont conservées sur disque.
 L'état des bans est lu dans nft : on peut relancer le démon sans rien perdre.
-Configuration : banbot.conf (voir banbot.conf.example), cherché dans le dossier
-courant puis dans /etc/banbot/, ou donné par -f. La ligne de commande l'emporte.
+Configuration : fobots.conf (voir fobots.conf.example), cherché dans le dossier
+courant puis dans /etc/fobots/, ou donné par -f. La ligne de commande l'emporte.
 Signaux : SIGUSR1 affiche les plages les plus actives, SIGTERM/SIGINT arrêtent.
 """
 import argparse
@@ -41,7 +41,7 @@ from collections import Counter, defaultdict, deque
 from datetime import datetime
 from functools import lru_cache
 
-log = logging.getLogger("banbot")
+log = logging.getLogger("fobots")
 
 LINE_RE = re.compile(r'^(\S+) \S+ \S+ \[([^\]]+)\]')
 # Fin d'une ligne « combined » : "METHODE /chemin PROTO" statut taille "referer" "user-agent"
@@ -52,11 +52,11 @@ RDAP_URL = "https://rdap.org/ip/{}"  # redirige vers le RIR compétent
 SETS = {4: "banned4", 6: "banned6"}
 # Une réponse RDAP plus large que ça est rejetée (garde-fou contre 0.0.0.0/0).
 MIN_PREFIX = {4: 8, 6: 16}
-CONF_DIR = "/etc/banbot"      # configuration et liste welcome (décidées par l'administrateur)
-STATE_DIR = "/var/lib/banbot"  # cache RDAP et constats (écrits par le démon)
-INSTALL_DIR = "/opt/banbot"
-UNIT_PATH = "/etc/systemd/system/banbot.service"
-SERVICE_USER = "banbot"
+CONF_DIR = "/etc/fobots"      # configuration et liste welcome (décidées par l'administrateur)
+STATE_DIR = "/var/lib/fobots"  # cache RDAP et constats (écrits par le démon)
+INSTALL_DIR = "/opt/fobots"
+UNIT_PATH = "/etc/systemd/system/fobots.service"
+SERVICE_USER = "fobots"
 SRC_DIR = os.path.dirname(os.path.abspath(__file__))
 RECENT_BAN_SECS = 60  # pas de nouvelle tentative pour une plage juste bannie
 MAX_WATCHED = 5000    # IP « surveillées » gardées en mémoire (opt-in --watch-*)
@@ -73,12 +73,12 @@ OBSERVED_WIDE6 = 32           # largeur maximale d'un ban de repli en IPv6 (rég
 SCOPES = ("allocation", "observed")
 
 NFT_SETUP = """\
-add table inet banbot
-add set inet banbot banned4 { type ipv4_addr; flags interval,timeout; }
-add set inet banbot banned6 { type ipv6_addr; flags interval,timeout; }
-add chain inet banbot input { type filter hook input priority -10; policy accept; }
-add rule inet banbot input tcp dport { 80, 443 } ip saddr @banned4 drop
-add rule inet banbot input tcp dport { 80, 443 } ip6 saddr @banned6 drop
+add table inet fobots
+add set inet fobots banned4 { type ipv4_addr; flags interval,timeout; }
+add set inet fobots banned6 { type ipv6_addr; flags interval,timeout; }
+add chain inet fobots input { type filter hook input priority -10; policy accept; }
+add rule inet fobots input tcp dport { 80, 443 } ip saddr @banned4 drop
+add rule inet fobots input tcp dport { 80, 443 } ip6 saddr @banned6 drop
 """
 
 
@@ -222,7 +222,7 @@ class RdapError(Exception):
 def fetch_rdap(ip):
     req = urllib.request.Request(RDAP_URL.format(ip),
                                  headers={"Accept": "application/rdap+json",
-                                          "User-Agent": "banbot/1.0"})
+                                          "User-Agent": "fobots/1.0"})
     try:
         with urllib.request.urlopen(req, timeout=15) as r:
             data = json.load(r)
@@ -349,7 +349,7 @@ class Nft:
             raise NftError(f"{self.binary} : {e}")
 
     def table_exists(self):
-        return self._run(["list", "table", "inet", "banbot"]).returncode == 0
+        return self._run(["list", "table", "inet", "fobots"]).returncode == 0
 
     def setup(self):
         r = self._run(["-f", "-"], NFT_SETUP)
@@ -359,7 +359,7 @@ class Nft:
     def selftest(self):
         """Vérifie sur une table jetable que nft gère les sets d'intervalles avec expiration
         et que `nft -j` se lit comme le démon l'attend. -> (ok, expires_visible, message)."""
-        t, net = "banbot_selftest", ipaddress.ip_network("10.99.0.0/16")
+        t, net = "fobots_selftest", ipaddress.ip_network("10.99.0.0/16")
         self._run(["delete", "table", "inet", t])  # reste d'un essai précédent
         try:
             r = self._run(["-f", "-"], f"add table inet {t}\n"
@@ -383,7 +383,7 @@ class Nft:
     def elements(self, ver):
         if self.dry_run:
             return list(self.sim[ver])
-        r = self._run(["-j", "list", "set", "inet", "banbot", SETS[ver]])
+        r = self._run(["-j", "list", "set", "inet", "fobots", SETS[ver]])
         if r.returncode:
             raise NftError(r.stderr.strip() or "set introuvable (lancer `setup` ?)")
         return parse_elems(json.loads(r.stdout))
@@ -403,7 +403,7 @@ class Nft:
         [(réseau, timeout)] remet les éléments retirés."""
         name = SETS[ver]
         if deletes:
-            self._script(f"delete element inet banbot {name} "
+            self._script(f"delete element inet fobots {name} "
                          f"{{ {', '.join(str(n) for n in deletes)} }}\n")
             if self.dry_run:
                 gone = set(deletes)
@@ -421,7 +421,7 @@ class Nft:
 
     def _add(self, ver, adds):
         elems = ", ".join(f"{n} timeout {max(1, int(t))}s" for n, t in adds)
-        self._script(f"add element inet banbot {SETS[ver]} {{ {elems} }}\n")
+        self._script(f"add element inet fobots {SETS[ver]} {{ {elems} }}\n")
         if self.dry_run:
             self.sim[ver] += [(n, t) for n, t in adds]
 
@@ -731,7 +731,7 @@ class Detector:
         self.partial = {}  # plage -> secondes des bans partiels
         self.watch = watch  # (regex agent ou None, regex chemin ou None) ; None = désactivé
         self.watched = {}   # ip -> [requêtes, dernière seconde vue, chemin exemple]
-        self.watch_file = watch_file  # constats écrits ici (relus par `banbot.py watched`)
+        self.watch_file = watch_file  # constats écrits ici (relus par `fobots.py watched`)
 
     def watch_match(self, m):
         """Chemin de la requête (m : REQ_RE) si elle correspond aux motifs surveillés, sinon None.
@@ -768,7 +768,7 @@ class Detector:
                 "ips": [[ip, n, path] for n, ip, path in hit[:WATCH_EVENT_IPS]]})
         top = hit[:10]
         log.warning("WATCH %s banni : %d IP surveillée(s), %d requête(s) : %s%s ; "
-                    "pour les protéger : banbot.py welcome add %s",
+                    "pour les protéger : fobots.py welcome add %s",
                     fmt_range(key), len(hit), sum(n for n, _, _ in hit),
                     ", ".join(f"{ip} ({n} req, {path})" for n, ip, path in top),
                     f" (+{len(hit) - len(top)} autres)" if len(hit) > len(top) else "",
@@ -1098,9 +1098,9 @@ def cmd_run(args):
         log.info("requêtes exclues du comptage (chemin) : %r", args.ignore_path)
     sites = [Site(d["name"], d["log"], d["prefixes"], d["regex"], d["all"])
              for d in (getattr(args, "sites", None) or [])]
-    if args.log:  # log unique de [banbot] ou --log : une cible sans règle propre
+    if args.log:  # log unique de [fobots] ou --log : une cible sans règle propre
         if any(x.log == args.log for x in sites):
-            log.error("le log %s est à la fois dans [banbot] et dans une section [site:…]", args.log)
+            log.error("le log %s est à la fois dans [fobots] et dans une section [site:…]", args.log)
             return 1
         sites.insert(0, Site("défaut", args.log))
     if args.files:
@@ -1118,7 +1118,7 @@ def cmd_run(args):
                   "observed_prefix (%d)", args.observed_prefix)
         return 1
     if not sites and not args.files and not stdin_is_feed():
-        log.error("aucun log à suivre : définir `log =` dans [banbot] ou une section [site:NOM] "
+        log.error("aucun log à suivre : définir `log =` dans [fobots] ou une section [site:NOM] "
                   "avec `log =` (configuration utilisée : %s), ou passer --log FICHIER ; "
                   "pour lire stdin explicitement : `run -`", args.config or "aucune")
         return 1
@@ -1162,10 +1162,10 @@ def cmd_setup(args):
     if args.dry_run:
         print(NFT_SETUP, end="")
     elif nft.table_exists():
-        print("table inet banbot déjà en place")
+        print("table inet fobots déjà en place")
     else:
         nft.setup()
-        print("table inet banbot créée")
+        print("table inet fobots créée")
     return 0
 
 
@@ -1216,7 +1216,7 @@ def cmd_watched(args):
     if not rows:
         print("aucune IP surveillée dans un ban actif")
         return 0
-    cmd = "banbot.py welcome add " + " ".join(str(ipaddress.ip_network(ip)) for ip, _ in rows)
+    cmd = "fobots.py welcome add " + " ".join(str(ipaddress.ip_network(ip)) for ip, _ in rows)
     if args.config:
         cmd += f" -f {args.config}"
     if args.cmd:
@@ -1357,7 +1357,7 @@ class Installer:
     def log_paths(self):
         if self.args.log:
             return [self.args.log]
-        text = self.read(os.path.join(CONF_DIR, "banbot.conf")) or self.template("banbot.conf.example")
+        text = self.read(os.path.join(CONF_DIR, "fobots.conf")) or self.template("fobots.conf.example")
         return re.findall(r"(?m)^\s*log\s*=\s*(\S+)", text)
 
     @staticmethod
@@ -1386,7 +1386,7 @@ class Installer:
 
     def install_files(self):
         self.ensure_dir(INSTALL_DIR, 0o755)
-        dst = os.path.join(INSTALL_DIR, "banbot.py")
+        dst = os.path.join(INSTALL_DIR, "fobots.py")
         src = os.path.abspath(__file__)
         if os.path.abspath(self.path(dst)) == src:
             self.say("ok", f"programme déjà en place : {dst}")
@@ -1396,13 +1396,13 @@ class Installer:
             self.say("ok", f"programme : {dst}")
 
         self.ensure_dir(CONF_DIR, 0o755)
-        conf = os.path.join(CONF_DIR, "banbot.conf")
+        conf = os.path.join(CONF_DIR, "fobots.conf")
         if self.read(conf) is not None:
             self.say("ok", f"{conf} existe : conservé tel quel")
             if self.args.log:
                 self.say("!!", f"--log ignoré : modifier la ligne `log =` de {conf} à la main")
         else:
-            text = self.template("banbot.conf.example")
+            text = self.template("fobots.conf.example")
             if self.args.log:
                 text = re.sub(r"(?m)^log\s*=.*$", lambda m: f"log = {self.args.log}", text)
             self.write(conf, text, 0o644)
@@ -1410,14 +1410,14 @@ class Installer:
         wl = os.path.join(CONF_DIR, "welcome.txt")
         if self.read(wl) is None:
             self.write(wl, "# Plages à ne jamais bannir, un CIDR par ligne.\n"
-                       "# Ajouter avec : banbot.py welcome add CIDR (retire aussi les bans concernés)\n", 0o644)
+                       "# Ajouter avec : fobots.py welcome add CIDR (retire aussi les bans concernés)\n", 0o644)
             self.say("ok", f"liste welcome : {wl}")
 
         self.ensure_dir(STATE_DIR, 0o750, (SERVICE_USER, SERVICE_USER))
         self.say("ok", f"dossier d'état : {STATE_DIR}")
 
         unit = re.sub(r"(?m)^SupplementaryGroups=.*$", f"SupplementaryGroups={' '.join(self.log_groups())}",
-                      self.template("banbot.service.example"))
+                      self.template("fobots.service.example"))
         if self.read(UNIT_PATH) == unit:
             self.say("ok", f"unité systemd à jour : {UNIT_PATH}")
         else:
@@ -1449,7 +1449,7 @@ class Installer:
 
     def run_all(self):
         if self.system and os.geteuid() != 0:
-            sys.exit("l'installation demande les droits root : sudo ./banbot.py install")
+            sys.exit("l'installation demande les droits root : sudo ./fobots.py install")
         if self.dry:
             print("--dry-run : rien n'est modifié, voici ce qui serait fait\n")
         self.check_python()
@@ -1459,17 +1459,17 @@ class Installer:
         self.install_files()
         self.check_log_access()
         if self.args.start:
-            self.run(["systemctl", "enable", "--now", "banbot"])
+            self.run(["systemctl", "enable", "--now", "fobots"])
             self.said_done("service activé et démarré")
         elif self.args.enable:
-            self.run(["systemctl", "enable", "banbot"])
+            self.run(["systemctl", "enable", "fobots"])
             self.said_done("service activé au démarrage (non démarré)")
         print(f"""
 Étapes suivantes :
-  1. vérifier / adapter {CONF_DIR}/banbot.conf (log, seuils)
+  1. vérifier / adapter {CONF_DIR}/fobots.conf (log, seuils)
   2. ajouter vos réseaux à {CONF_DIR}/welcome.txt (administrateurs, CI, supervision)
-  3. essai sans rien bannir : {INSTALL_DIR}/banbot.py run --dry-run
-  4. démarrer : systemctl enable --now banbot      suivre : journalctl -u banbot -f""")
+  3. essai sans rien bannir : {INSTALL_DIR}/fobots.py run --dry-run
+  4. démarrer : systemctl enable --now fobots      suivre : journalctl -u fobots -f""")
 
 
 def cmd_install(args):
@@ -1529,8 +1529,8 @@ CONF_KEYS = {  # clé du fichier -> (destination argparse, conversion)
     "from_start": ("from_start", lambda v: v.lower() in ("1", "true", "yes", "oui", "on")),
 }
 PATH_KEYS = {"dir", "cache", "welcome", "log", "watch_file"}
-# /etc d'abord : le résultat ne dépend pas du dossier courant (./banbot.conf sert au développement)
-CONF_SEARCH = (os.path.join(CONF_DIR, "banbot.conf"), "banbot.conf")
+# /etc d'abord : le résultat ne dépend pas du dossier courant (./fobots.conf sert au développement)
+CONF_SEARCH = (os.path.join(CONF_DIR, "fobots.conf"), "fobots.conf")
 
 
 SITE_KEYS = ("log", "ignore_prefix", "ignore_path", "ignore_all")
@@ -1538,15 +1538,15 @@ TRUE_VALUES = ("1", "true", "yes", "oui", "on")
 
 
 def load_config(path):
-    """Lit [banbot] et les sections [site:NOM] ; les chemins relatifs le sont par rapport au fichier."""
+    """Lit [fobots] et les sections [site:NOM] ; les chemins relatifs le sont par rapport au fichier."""
     cp = configparser.ConfigParser(interpolation=None, inline_comment_prefixes=("#", ";"))
     try:
         with open(path) as f:
             cp.read_file(f)
     except (OSError, configparser.Error) as e:
         sys.exit(f"configuration {path} illisible : {e}")
-    if not cp.has_section("banbot"):
-        sys.exit(f"{path} : section [banbot] absente")
+    if not cp.has_section("fobots"):
+        sys.exit(f"{path} : section [fobots] absente")
     base = os.path.dirname(os.path.abspath(path))
 
     def fix_path(v):
@@ -1554,7 +1554,7 @@ def load_config(path):
         return v if os.path.isabs(v) else os.path.join(base, v)
 
     out = {}
-    for key, val in cp["banbot"].items():
+    for key, val in cp["fobots"].items():
         if key not in CONF_KEYS:
             sys.exit(f"{path} : option inconnue {key!r} (connues : {', '.join(CONF_KEYS)})")
         if not val.strip():
@@ -1569,11 +1569,11 @@ def load_config(path):
 
     sites, seen = [], {}
     for section in cp.sections():
-        if section == "banbot":
+        if section == "fobots":
             continue
         name = section[5:].strip() if section.startswith("site:") else ""
         if not name:
-            sys.exit(f"{path} : section [{section}] inconnue (attendu : [banbot] ou [site:NOM])")
+            sys.exit(f"{path} : section [{section}] inconnue (attendu : [fobots] ou [site:NOM])")
         opts = cp[section]
         for key in opts:
             if key not in SITE_KEYS:
@@ -1598,7 +1598,7 @@ def load_config(path):
         sites.append({"name": name, "log": log_file, "prefixes": prefixes, "regex": regex,
                       "all": opts.get("ignore_all", "").strip().lower() in TRUE_VALUES})
     if out.get("log") in seen:
-        sys.exit(f"{path} : le log {out['log']} est à la fois dans [banbot] et dans [site:{seen[out['log']]}]")
+        sys.exit(f"{path} : le log {out['log']} est à la fois dans [fobots] et dans [site:{seen[out['log']]}]")
     if sites:
         out["sites"] = sites
     return out
@@ -1616,7 +1616,7 @@ def main(argv=None):
 
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("-f", "--config", help="fichier de configuration "
-                        "(défaut: /etc/banbot/banbot.conf, puis ./banbot.conf)")
+                        "(défaut: /etc/fobots/fobots.conf, puis ./fobots.conf)")
     common.add_argument("--dir", default=STATE_DIR,
                         help=f"dossier d'état : ip_ranges.json, watched.jsonl (défaut: {STATE_DIR})")
     common.add_argument("-c", "--cache", help="fichier des plages RDAP (défaut: DIR/ip_ranges.json)")
@@ -1700,7 +1700,7 @@ def main(argv=None):
     sub.add_parser("bans", parents=[common], help="liste les bans actifs").set_defaults(fn=cmd_bans)
 
     ins = sub.add_parser("install", parents=[common],
-                         help="installe banbot (nftables, utilisateur, dossiers, conf, unité systemd)")
+                         help="installe fobots (nftables, utilisateur, dossiers, conf, unité systemd)")
     ins.add_argument("--log", help="log à suivre, écrit dans la conf créée (défaut: celui de l'exemple)")
     ins.add_argument("--log-group", help="groupe donnant accès au log (défaut: détecté, sinon adm)")
     ins.add_argument("--yes", action="store_true", help="répond oui aux questions (installation d'apt)")

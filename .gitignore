@@ -18,10 +18,10 @@ htmlcov/
 .vscode/
 *.swp
 
-# Fichiers locaux de banbot (configuration et état d'exécution : à ne pas committer)
-banbot.conf
+# Fichiers locaux de fobots (configuration et état d'exécution : à ne pas committer)
+fobots.conf
 ip_ranges.json
 ip_ranges.json.tmp
-whitelist.txt
+welcome.txt
 watched.jsonl
 watched.jsonl.tmp

@@ -1,14 +1,14 @@
-# banbot.conf : cherché dans /etc/banbot/ puis dans le dossier courant (ou -f FICHIER).
+# fobots.conf : cherché dans /etc/fobots/ puis dans le dossier courant (ou -f FICHIER).
 # Les chemins relatifs sont relatifs à ce fichier. La ligne de commande l'emporte.
-[banbot]
+[fobots]
 # Log à suivre en continu (rotation gérée). Sans cette option : stdin.
 log = /var/log/gitlab/nginx/gitlab_access.log
 # Dossier d'état (créé s'il manque) : cache RDAP et constats surveillés.
-# dir = /var/lib/banbot
+# dir = /var/lib/fobots
 # cache = ip_ranges.json        # plages RDAP trouvées (défaut: <dir>/ip_ranges.json)
-# La liste welcome est welcome.txt à côté de ce fichier (donc /etc/banbot/welcome.txt) ;
+# La liste welcome est welcome.txt à côté de ce fichier (donc /etc/fobots/welcome.txt) ;
 # pour la changer :
-# welcome = /etc/banbot/welcome.txt
+# welcome = /etc/fobots/welcome.txt
 
 threshold = 5        # req/s d'une plage au-delà desquelles on bannit
 # prefix_threshold = 5 # req/s d'un /16 non résolu qui déclenchent une requête RDAP
@@ -30,8 +30,8 @@ ban_time = 1h        # durée d'un ban : 30m, 1h, 1d…
 
 # Un log par hôte virtuel : une section [site:NOM] par cible, avec ses propres règles
 # d'exclusion (en plus de ignore_path ci-dessous). Un hôte à plusieurs noms (CNAME) n'a
-# qu'une section : son log est unique. Le log de [banbot] et ceux des sites doivent différer ;
-# pour n'utiliser que des sections, supprimer la ligne `log =` de [banbot].
+# qu'une section : son log est unique. Le log de [fobots] et ceux des sites doivent différer ;
+# pour n'utiliser que des sections, supprimer la ligne `log =` de [fobots].
 # [site:gitlab]
 # log = /var/log/gitlab/nginx/gitlab_access.log
 # ignore_prefix = /assets/, /favicon.ico, /robots.txt
@@ -52,7 +52,7 @@ ban_time = 1h        # durée d'un ban : 30m, 1h, 1d…
 # watch_agent = ^gitlab-runner
 # watch_path = ^/api/v4/
 # watch_file = watched.jsonl   # constats enregistrés (défaut: <dir>/watched.jsonl), relus par
-#                              `banbot.py watched` ; élagués au-delà de 30 jours au démarrage
+#                              `fobots.py watched` ; élagués au-delà de 30 jours au démarrage
 
 # Ban resserré : au lieu de bannir toute l'allocation RDAP, on bannit les groupes d'IP vues
 # dedans ; repli sur l'allocation si le trafic est dispersé ou après plusieurs bans partiels.

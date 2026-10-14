@@ -1,0 +1,61 @@
+# /etc/systemd/system/fobots.service
+#
+# Installation : sudo ./fobots.py install   (crée l'utilisateur, les dossiers, la conf et cette unité,
+# avec le groupe d'accès au log). Manuellement :
+#   useradd --system --no-create-home --shell /usr/sbin/nologin fobots
+#   install -m 0755 fobots.py /opt/fobots/fobots.py
+#   install -D -m 0644 fobots.conf.example /etc/fobots/fobots.conf   # puis l'éditer
+#   systemctl daemon-reload && systemctl enable --now fobots
+#
+# Fichiers : conf et liste welcome dans /etc/fobots/, état dans /var/lib/fobots/ (voir README).
+# Commandes d'administration : en ROOT (sudo), car elles lisent/modifient nft et /etc/fobots.
+# Suivi : journalctl -u fobots -f        Bans actifs : sudo /opt/fobots/fobots.py bans
+# Liste welcome (retire aussi les bans) :
+#   sudo /opt/fobots/fobots.py welcome add 17.0.0.0/8
+# Plages les plus actives : systemctl kill -s USR1 fobots   (puis journalctl)
+
+[Unit]
+Description=fobots - bannissement nftables des plages d'IP trop agressives
+After=network-online.target nftables.service
+Wants=network-online.target
+# Un restart/reload de nftables.service (« flush ruleset ») efface la table inet fobots
+# et tous les bans : on suit ses redémarrages et on recrée la table à son rechargement.
+PartOf=nftables.service
+ReloadPropagatedFrom=nftables.service
+
+[Service]
+Type=simple
+User=fobots
+# Le log doit être lisible par cet utilisateur : adapter le groupe (adm, root, gitlab-www…)
+# ou donner l'accès avec setfacl. Vérifier : sudo -u fobots head -1 /var/log/gitlab/nginx/gitlab_access.log
+SupplementaryGroups=adm
+ConfigurationDirectory=fobots
+StateDirectory=fobots
+
+# `setup` est idempotent : crée la table nft si elle manque, sinon ne fait rien.
+ExecStartPre=/opt/fobots/fobots.py setup -f /etc/fobots/fobots.conf
+ExecStart=/opt/fobots/fobots.py run -f /etc/fobots/fobots.conf
+ExecReload=/opt/fobots/fobots.py setup -f /etc/fobots/fobots.conf
+Restart=on-failure
+RestartSec=5
+
+# nft n'a besoin que de CAP_NET_ADMIN ; pas besoin d'être root.
+AmbientCapabilities=CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN
+NoNewPrivileges=yes
+
+# Durcissement (à assouplir si un cas particulier l'exige).
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target
