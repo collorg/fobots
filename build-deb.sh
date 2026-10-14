@@ -61,8 +61,22 @@ cat > "$DOC/copyright" <<COPYRIGHT
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 
 Files: *
-Copyright: $MAINTAINER
-License: licence non précisée par l'auteur
+Copyright: 2026 Joël Maizi
+License: GPL-3+
+
+License: GPL-3+
+ This program is free software: you can redistribute it and/or modify
+ it under the terms of the GNU General Public License as published by
+ the Free Software Foundation, either version 3 of the License, or
+ (at your option) any later version.
+ .
+ This program is distributed in the hope that it will be useful,
+ but WITHOUT ANY WARRANTY; without even the implied warranty of
+ MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ GNU General Public License for more details.
+ .
+ On Debian systems, the complete text of the GNU General Public
+ License version 3 can be found in /usr/share/common-licenses/GPL-3.
 COPYRIGHT
 # Le programme vit dans /opt/fobots (comme avec `fobots.py install`) : choix assumé.
 install -D -m 0644 /dev/stdin "$BUILD/usr/share/lintian/overrides/$PKG" <<OVERRIDES

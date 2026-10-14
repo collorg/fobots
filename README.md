@@ -375,3 +375,8 @@ Mémoire : au plus 200 000 IP suivies. Les IPv4 et IPv6 sont traitées de la mê
 | `/etc/fobots/welcome.txt` | plages à ne jamais bannir, un CIDR par ligne (créé par `welcome add`) |
 | `/var/lib/fobots/ip_ranges.json` | cache des plages RDAP |
 | `/var/lib/fobots/watched.jsonl` | constats « IP surveillée prise dans un ban » (si `watch_*`) |
+
+## Licence
+
+fobots est un logiciel libre, distribué sous licence GNU GPL version 3 ou ultérieure
+(`GPL-3.0-or-later`). Copyright (C) 2026 Joël Maizi. Voir le fichier `LICENSE`.
