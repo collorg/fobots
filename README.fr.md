@@ -113,6 +113,16 @@ nft), la détection avec et sans `ban_scope = observed`, les niveaux de charge, 
 configuration, la rotation des logs et les commandes (`run --dry-run`, `welcome`, `watched`,
 `install --destdir`). Aucun test n'exige root ni un vrai `nft`.
 
+```
+make integration     # tests/integration.sh : le vrai nft et le vrai noyau, avec des logs fictifs
+```
+Le test d'intégration rejoue des logs générés dans le vrai démon et vérifie le vrai set nft :
+bans d'allocation entière et resserrés, un ban plus large qui en remplace de plus petits (le cas
+que nft 0.9.x refuse en une seule transaction), `welcome add`, IPv6 et l'expiration par le noyau.
+Il s'exécute dans un espace de noms utilisateur+réseau jetable (`unshare -Urn`) : sans root, et
+les règles nft de la machine ne sont jamais touchées. À lancer avec la plus ancienne version de
+nft prise en charge (Ubuntu 20.04 : 0.9.3).
+
 ## Durcissement selon la charge
 
 Désactivé par défaut (`load_signal = none`). Quand il est actif, un thread mesure
@@ -406,6 +416,7 @@ Mémoire : au plus 200 000 IP suivies. Les IPv4 et IPv6 sont traitées de la mê
 | `fobots.service.example` | unité systemd d'exemple |
 | `build-deb.sh`, `Makefile` | paquet Debian, `make test` |
 | `tests/test_fobots.py` | tests unitaires |
+| `tests/integration.sh` | test d'intégration (vrai nft, logs fictifs) |
 | `/etc/fobots/fobots.conf` | configuration |
 | `/etc/fobots/welcome.txt` | plages à ne jamais bannir, un CIDR par ligne (créé par `welcome add`) |
 | `/var/lib/fobots/ip_ranges.json` | cache des plages RDAP |

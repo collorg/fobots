@@ -3,6 +3,7 @@
 #   make VERSION=1.2.0 deb
 #   make test     unit tests (standard library, python3 -m unittest)
 #   make check    syntax + tests
+#   make integration   real nft, fake logs, in a throwaway namespace (no root)
 #   make lint     lintian on the package (if installed)
 #   make clean
 
@@ -12,11 +13,11 @@ VERSION ?= 0.$(COUNT)
 DEB     := dist/fobots_$(VERSION)_all.deb
 SOURCES := fobots.py $(wildcard fobots/*.py) fobots.conf.example fobots.service.example README.md README.fr.md build-deb.sh
 
-.PHONY: deb test check lint clean help
+.PHONY: deb test check integration lint clean help
 .DEFAULT_GOAL := deb
 
 help:
-	@sed -n '2,8p' Makefile
+	@sed -n '2,9p' Makefile
 
 deb: $(DEB)
 
@@ -31,6 +32,9 @@ check: test
 	sh -n build-deb.sh
 	python3 fobots.py --help >/dev/null
 	@rm -rf __pycache__
+
+integration:
+	bash tests/integration.sh
 
 lint: $(DEB)
 	lintian $(DEB)

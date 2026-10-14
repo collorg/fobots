@@ -108,6 +108,15 @@ and without `ban_scope = observed`, load levels, configuration errors, log rotat
 commands (`run --dry-run`, `welcome`, `watched`, `install --destdir`). None of it needs root or
 a real `nft`.
 
+```
+make integration     # tests/integration.sh: the real nft and kernel, with fake logs
+```
+The integration test replays generated logs through the real daemon and checks the real nft
+set: whole-allocation and tight bans, a wider ban replacing smaller ones (the case nft 0.9.x
+refuses in a single transaction), `welcome add`, IPv6 and the kernel expiry. It runs in a
+throwaway user+network namespace (`unshare -Urn`): no root, and the machine's own nft rules
+are never touched. Run it on the oldest nft you support (Ubuntu 20.04: 0.9.3).
+
 ## Load-based hardening
 
 Disabled by default (`load_signal = none`). When enabled, a thread measures the load every
@@ -392,6 +401,7 @@ Memory: at most 200,000 IPs tracked. IPv4 and IPv6 are handled the same way.
 | `fobots.service.example` | example systemd unit |
 | `build-deb.sh`, `Makefile` | Debian package, `make test` |
 | `tests/test_fobots.py` | unit tests |
+| `tests/integration.sh` | integration test (real nft, fake logs) |
 | `/etc/fobots/fobots.conf` | configuration |
 | `/etc/fobots/welcome.txt` | ranges never to ban, one CIDR per line (created by `welcome add`) |
 | `/var/lib/fobots/ip_ranges.json` | RDAP range cache |
