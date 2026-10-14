@@ -3,19 +3,20 @@
 # Installation: sudo ./fobots.py install   (creates the user, the directories, the configuration
 # and this unit, with the log access group). Manually:
 #   useradd --system --no-create-home --shell /usr/sbin/nologin fobots
-#   install -d /opt/fobots && cp -r fobots.py fobots /opt/fobots/   # launcher + package
+#   install -D -m 0755 fobots.py /usr/local/sbin/fobots   # the command
+#   install -d /opt/fobots && cp -r fobots /opt/fobots/    # the package
 #   install -D -m 0644 fobots.conf.example /etc/fobots/fobots.conf   # then edit it
 #   systemctl daemon-reload && systemctl enable --now fobots
 #
 # Files: configuration and welcome list in /etc/fobots/, state in /var/lib/fobots/ (see README).
 # Administration commands: as ROOT (sudo), since they read/modify nft and /etc/fobots.
-# Follow: journalctl -u fobots -f        Active bans: sudo /opt/fobots/fobots.py bans
+# Follow: journalctl -u fobots -f        Active bans: sudo fobots bans
 # Welcome list (also removes the bans):
-#   sudo /opt/fobots/fobots.py welcome add 17.0.0.0/8
+#   sudo fobots welcome add 17.0.0.0/8
 # Most active ranges: systemctl kill -s USR1 fobots   (then journalctl)
 
 [Unit]
-Description=fobots - bannissement nftables des plages d'IP trop agressives
+Description=fobots - nftables bans of overly aggressive IP ranges
 After=network-online.target nftables.service
 Wants=network-online.target
 # A restart/reload of nftables.service ("flush ruleset") erases the inet fobots table
@@ -33,9 +34,9 @@ ConfigurationDirectory=fobots
 StateDirectory=fobots
 
 # `setup` is idempotent: creates the nft table if missing, otherwise does nothing.
-ExecStartPre=/opt/fobots/fobots.py setup -f /etc/fobots/fobots.conf
-ExecStart=/opt/fobots/fobots.py run -f /etc/fobots/fobots.conf
-ExecReload=/opt/fobots/fobots.py setup -f /etc/fobots/fobots.conf
+ExecStartPre=/usr/local/sbin/fobots setup -f /etc/fobots/fobots.conf
+ExecStart=/usr/local/sbin/fobots run -f /etc/fobots/fobots.conf
+ExecReload=/usr/local/sbin/fobots setup -f /etc/fobots/fobots.conf
 Restart=on-failure
 RestartSec=5
 

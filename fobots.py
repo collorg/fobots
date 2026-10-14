@@ -6,10 +6,18 @@
 # the GNU General Public License as published by the Free Software Foundation, either
 # version 3 of the License, or (at your option) any later version. It is distributed WITHOUT
 # ANY WARRANTY; see the file LICENSE or <https://www.gnu.org/licenses/>.
-"""Launcher: the code lives in the fobots/ package next to this file."""
+"""Launcher. In a clone it is run as ./fobots.py; installed, it is the command `fobots`
+(/usr/local/sbin or /usr/sbin) and the code is in the fobots/ package, found next to it
+or in /opt/fobots."""
+import os
 import sys
 
-from fobots.cli import main
+for _dir in (os.path.dirname(os.path.realpath(__file__)), "/opt/fobots"):
+    if os.path.isdir(os.path.join(_dir, "fobots")):
+        sys.path.insert(0, _dir)
+        break
+
+from fobots.cli import main  # noqa: E402
 
 if __name__ == "__main__":
     sys.exit(main())

@@ -1,12 +1,12 @@
-# Paquet Debian de fobots.
-#   make          construit dist/fobots_VERSION_all.deb
+# Debian package of fobots.
+#   make          builds dist/fobots_VERSION_all.deb
 #   make VERSION=1.2.0 deb
-#   make test     tests unitaires (bibliothèque standard, python3 -m unittest)
-#   make check    syntaxe + tests
-#   make lint     lintian sur le paquet (si installé)
+#   make test     unit tests (standard library, python3 -m unittest)
+#   make check    syntax + tests
+#   make lint     lintian on the package (if installed)
 #   make clean
 
-# Version : 0.N où N = nombre de commits (monte à chaque commit) ; surchargeable.
+# Version: 0.N where N = number of commits (goes up with each commit); can be overridden.
 COUNT   := $(shell git rev-list --count HEAD 2>/dev/null || echo 0)
 VERSION ?= 0.$(COUNT)
 DEB     := dist/fobots_$(VERSION)_all.deb

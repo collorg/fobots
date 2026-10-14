@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 Joël Maizi
-"""Installation on Debian/Ubuntu (fobots.py install)."""
+"""Installation on Debian/Ubuntu (fobots install)."""
 import os
 import re
 import shutil
 import subprocess
 import sys
 
-from .constants import CONF_DIR, INSTALL_DIR, SERVICE_USER, SRC_DIR, STATE_DIR, UNIT_PATH
+from .constants import BIN_PATH, CONF_DIR, INSTALL_DIR, SERVICE_USER, SRC_DIR, STATE_DIR, UNIT_PATH
 from .nft import Nft
 
 
@@ -166,21 +166,25 @@ class Installer:
 
     @staticmethod
     def program_files():
-        """[(path relative to SRC_DIR, mode)]: the launcher and the modules of the package."""
-        files = [("fobots.py", 0o755)]
+        """[(source relative to SRC_DIR, destination, mode)]: the launcher, installed as the
+        command `fobots`, and the modules of the package."""
+        files = [("fobots.py", BIN_PATH, 0o755)]
         pkg = os.path.join(SRC_DIR, "fobots")
-        files += [(os.path.join("fobots", n), 0o644) for n in sorted(os.listdir(pkg)) if n.endswith(".py")]
+        files += [(os.path.join("fobots", n), os.path.join(INSTALL_DIR, "fobots", n), 0o644)
+                  for n in sorted(os.listdir(pkg)) if n.endswith(".py")]
         return files
 
     def install_files(self):
         self.ensure_dir(INSTALL_DIR, 0o755)
+        self.ensure_dir(os.path.join(INSTALL_DIR, "fobots"), 0o755)
+        self.ensure_dir(os.path.dirname(BIN_PATH), 0o755)
         if os.path.abspath(SRC_DIR) == os.path.abspath(self.path(INSTALL_DIR)):
             self.say("ok", f"program already in place: {INSTALL_DIR}")
         else:
-            for rel, mode in self.program_files():
-                with open(os.path.join(SRC_DIR, rel)) as f:
-                    self.write(os.path.join(INSTALL_DIR, rel), f.read(), mode)
-            self.say("ok", f"program: {INSTALL_DIR}/fobots.py and {INSTALL_DIR}/fobots/")
+            for src, dst, mode in self.program_files():
+                with open(os.path.join(SRC_DIR, src)) as f:
+                    self.write(dst, f.read(), mode)
+            self.say("ok", f"program: {BIN_PATH} and {INSTALL_DIR}/fobots/")
 
         self.ensure_dir(CONF_DIR, 0o755)
         conf = os.path.join(CONF_DIR, "fobots.conf")
@@ -197,7 +201,7 @@ class Installer:
         wl = os.path.join(CONF_DIR, "welcome.txt")
         if self.read(wl) is None:
             self.write(wl, "# Ranges never to ban, one CIDR per line.\n"
-                       "# Add with: fobots.py welcome add CIDR (also removes the bans concerned)\n", 0o644)
+                       "# Add with: fobots welcome add CIDR (also removes the bans concerned)\n", 0o644)
             self.say("ok", f"welcome list: {wl}")
 
         self.ensure_dir(STATE_DIR, 0o750, (SERVICE_USER, SERVICE_USER))
@@ -255,5 +259,5 @@ class Installer:
 Next steps:
   1. check / adapt {CONF_DIR}/fobots.conf (log, thresholds)
   2. add your networks to {CONF_DIR}/welcome.txt (administrators, CI, monitoring)
-  3. trial without banning anything: {INSTALL_DIR}/fobots.py run --dry-run
+  3. trial without banning anything: fobots run --dry-run
   4. start: systemctl enable --now fobots      follow: journalctl -u fobots -f""")

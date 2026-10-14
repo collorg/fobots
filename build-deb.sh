@@ -1,11 +1,12 @@
 #!/bin/sh
-# Construit le paquet Debian de fobots : dist/fobots_VERSION_all.deb
+# Builds the Debian package of fobots: dist/fobots_VERSION_all.deb
 #
-#   ./build-deb.sh [VERSION]       (ou `make deb`, qui calcule la version)
+#   ./build-deb.sh [VERSION]       (or `make deb`, which computes the version)
 #
-# Variables : MAINTAINER ("Nom <adresse>", défaut : git config), OUT (dossier de sortie).
-# Le paquet installe les mêmes fichiers que `fobots.py install` (programme dans /opt/fobots,
-# conf et liste welcome dans /etc/fobots, unité systemd), sans démarrer le service.
+# Variables: MAINTAINER ("Name <address>", default: git config), OUT (output directory).
+# The package installs the same files as `fobots install` (command /usr/sbin/fobots, modules in
+# /opt/fobots/fobots/, configuration and welcome list in /etc/fobots, systemd unit), without
+# starting the service.
 set -eu
 
 cd "$(dirname "$0")"
@@ -16,9 +17,9 @@ PKG=fobots
 
 case $VERSION in
     [0-9]*) ;;
-    *) echo "version invalide : $VERSION (doit commencer par un chiffre)" >&2; exit 1 ;;
+    *) echo "invalid version: $VERSION (must start with a digit)" >&2; exit 1 ;;
 esac
-command -v dpkg-deb >/dev/null || { echo "dpkg-deb introuvable (apt install dpkg-dev)" >&2; exit 1; }
+command -v dpkg-deb >/dev/null || { echo "dpkg-deb not found (apt install dpkg-dev)" >&2; exit 1; }
 
 if [ -z "${MAINTAINER:-}" ]; then
     name=$(git config user.name 2>/dev/null || true)
@@ -31,7 +32,9 @@ find fobots -name __pycache__ -prune -exec rm -rf {} +
 rm -rf "$BUILD" build/__pycache__
 mkdir -p "$BUILD/DEBIAN" "$OUT"
 
-install -D -m 0755 fobots.py          "$BUILD/opt/fobots/fobots.py"
+# The command: the launcher without .py, with the system interpreter (no "env").
+install -D -m 0755 fobots.py          "$BUILD/usr/sbin/fobots"
+sed -i '1s|.*|#!/usr/bin/python3|' "$BUILD/usr/sbin/fobots"
 for module in fobots/*.py; do
     install -D -m 0644 "$module"       "$BUILD/opt/fobots/$module"
 done
@@ -39,18 +42,18 @@ install -D -m 0644 fobots.conf.example "$BUILD/etc/fobots/fobots.conf"
 install -D -m 0644 README.md          "$BUILD/usr/share/doc/$PKG/README.md"
 install -D -m 0644 README.fr.md       "$BUILD/usr/share/doc/$PKG/README.fr.md"
 {
-    echo "# Plages à ne jamais bannir, un CIDR par ligne."
-    echo "# Ajouter avec : /opt/fobots/fobots.py welcome add CIDR (retire aussi les bans concernés)"
+    echo "# Ranges never to ban, one CIDR per line."
+    echo "# Add with: fobots welcome add CIDR (also removes the bans concerned)"
 } > "$BUILD/etc/fobots/welcome.txt"
 chmod 0644 "$BUILD/etc/fobots/welcome.txt"
 
-# L'unité : l'exemple sans son en-tête d'installation manuelle (le paquet s'en charge).
+# The unit: the example without its manual installation header (the package does that).
 mkdir -p "$BUILD/usr/lib/systemd/system"
 {
-    echo "# Installée par le paquet fobots. Pour la modifier : systemctl edit fobots"
-    echo "# (ex. SupplementaryGroups= : groupe qui donne accès à votre log)."
+    echo "# Installed by the fobots package. To modify it: systemctl edit fobots"
+    echo "# (e.g. SupplementaryGroups=: the group that gives access to your log)."
     echo
-    sed -n '/^\[Unit\]/,$p' fobots.service.example
+    sed -n '/^\[Unit\]/,$p' fobots.service.example | sed 's|/usr/local/sbin/fobots|/usr/sbin/fobots|'
 } > "$BUILD/usr/lib/systemd/system/fobots.service"
 chmod 0644 "$BUILD/usr/lib/systemd/system/fobots.service"
 
@@ -58,7 +61,7 @@ DOC="$BUILD/usr/share/doc/$PKG"
 {
     echo "$PKG ($VERSION) unstable; urgency=low"
     echo
-    echo "  * Paquet construit depuis $(git rev-parse --short HEAD 2>/dev/null || echo "?")."
+    echo "  * Package built from $(git rev-parse --short HEAD 2>/dev/null || echo "?")."
     echo
     echo " -- $MAINTAINER  $(date -R)"
 } | gzip -9n > "$DOC/changelog.gz"
@@ -83,7 +86,7 @@ License: GPL-3+
  On Debian systems, the complete text of the GNU General Public
  License version 3 can be found in /usr/share/common-licenses/GPL-3.
 COPYRIGHT
-# Le programme vit dans /opt/fobots (comme avec `fobots.py install`) : choix assumé.
+# The modules live in /opt/fobots (as with `fobots install`): a deliberate choice.
 install -D -m 0644 /dev/stdin "$BUILD/usr/share/lintian/overrides/$PKG" <<OVERRIDES
 $PKG: dir-or-file-in-opt
 OVERRIDES
@@ -99,12 +102,12 @@ Maintainer: $MAINTAINER
 Depends: python3 (>= 3.7), nftables
 Section: net
 Priority: optional
-Description: bannissement nftables des plages d'IP trop agressives
- Lit un access log (nginx, Apache, GitLab), compte les requêtes par plage d'IP
- et ajoute au set nftables les plages qui dépassent le seuil. Les bans expirent
- seuls. Le service n'est ni activé ni démarré par l'installation : adapter
- /etc/fobots/fobots.conf, remplir /etc/fobots/welcome.txt, puis
- systemctl enable --now fobots.
+Description: nftables bans of overly aggressive IP ranges
+ Reads an access log (nginx, Apache, GitLab), counts requests per IP range
+ and adds the ranges that exceed the threshold to an nftables set. Bans
+ expire by themselves. The service is neither enabled nor started by the
+ installation: adapt /etc/fobots/fobots.conf, fill in /etc/fobots/welcome.txt,
+ then systemctl enable --now fobots.
 CONTROL
 
 printf '%s\n' /etc/fobots/fobots.conf /etc/fobots/welcome.txt > "$BUILD/DEBIAN/conffiles"
@@ -118,14 +121,14 @@ if [ "$1" = configure ]; then
     fi
     if [ -d /run/systemd/system ]; then
         systemctl daemon-reload || true
-        # mise à jour : on relance seulement un service déjà démarré
+        # upgrade: only restart a service that is already running
         systemctl try-restart fobots.service || true
     fi
     if [ -z "$2" ]; then
-        echo "fobots installé, non démarré. Étapes suivantes :"
-        echo "  1. adapter /etc/fobots/fobots.conf (log, seuils)"
-        echo "  2. ajouter vos réseaux à /etc/fobots/welcome.txt"
-        echo "  3. essai : /opt/fobots/fobots.py run --dry-run"
+        echo "fobots installed, not started. Next steps:"
+        echo "  1. adapt /etc/fobots/fobots.conf (log, thresholds)"
+        echo "  2. add your networks to /etc/fobots/welcome.txt"
+        echo "  3. trial: fobots run --dry-run"
         echo "  4. systemctl enable --now fobots"
     fi
 fi
@@ -153,8 +156,8 @@ if [ "$1" = purge ]; then
     if getent passwd fobots >/dev/null; then
         userdel fobots 2>/dev/null || true
     fi
-    # La table nft « fobots » n'est pas supprimée ici : les bans expirent seuls
-    # (nft delete table inet fobots pour les retirer tout de suite).
+    # The nft table "fobots" is not removed here: the bans expire by themselves
+    # (nft delete table inet fobots to remove them right away).
 fi
 exit 0
 SCRIPT
@@ -162,5 +165,5 @@ chmod 0755 "$BUILD/DEBIAN/postinst" "$BUILD/DEBIAN/prerm" "$BUILD/DEBIAN/postrm"
 
 FILE="$OUT/${PKG}_${VERSION}_all.deb"
 dpkg-deb --root-owner-group --build "$BUILD" "$FILE" >/dev/null
-echo "paquet : $FILE"
+echo "package: $FILE"
 dpkg-deb --info "$FILE" | sed -n 's/^ \(Package\|Version\|Installed-Size\|Depends\):/  \1:/p'

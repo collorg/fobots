@@ -61,7 +61,8 @@ l'unité) et ne touche jamais une conf ou une liste welcome existantes. Elle :
    lisible (s'arrête avec un message sinon) ; signale si cette version n'indique pas le
    temps restant des bans ;
 3. crée l'utilisateur système `fobots` s'il manque ;
-4. installe le programme dans `/opt/fobots/`, la conf dans `/etc/fobots/fobots.conf` (avec
+4. installe la commande `/usr/local/sbin/fobots` (le lanceur, sans `.py`) et ses modules dans
+   `/opt/fobots/fobots/`, la conf dans `/etc/fobots/fobots.conf` (avec
    `--log` s'il est donné), une liste welcome vide `/etc/fobots/welcome.txt`, le dossier
    d'état `/var/lib/fobots` (0750, propriété de `fobots`) ;
 5. installe l'unité systemd, avec le groupe qui donne accès au log (détecté, sinon `adm` ;
@@ -69,7 +70,7 @@ l'unité) et ne touche jamais une conf ou une liste welcome existantes. Elle :
 6. vérifie que l'utilisateur `fobots` peut lire le log, et dit quoi faire sinon.
 
 Le service n'est **ni activé ni démarré** par défaut : adapter la conf, remplir la liste
-welcome, essayer `/opt/fobots/fobots.py run --dry-run`, puis `systemctl enable --now fobots`
+welcome, essayer `fobots run --dry-run`, puis `systemctl enable --now fobots`
 (ou relancer `install` avec `--enable` / `--start`). `--destdir DIR` écrit les fichiers sous
 un préfixe sans toucher au système (tests, empaquetage).
 
@@ -97,7 +98,7 @@ make check           # vérification de syntaxe
 make lint            # lintian
 sudo apt install ./dist/fobots_*_all.deb
 ```
-Le paquet installe les mêmes fichiers que `install` (programme dans `/opt/fobots`, conf et
+Le paquet installe les mêmes fichiers que `install` (commande `/usr/sbin/fobots`, modules dans `/opt/fobots/fobots/`, conf et
 `welcome.txt` dans `/etc/fobots` en conffiles, unité systemd) et ne démarre pas le service.
 Une mise à jour relance seulement un service déjà démarré ; `purge` supprime
 `/var/lib/fobots` et l'utilisateur `fobots`.
@@ -210,9 +211,9 @@ le journal (ligne `WATCH`) **et** dans `<dir>/watched.jsonl` (un constat par ban
 journalctl, et l'associe à l'état actuel des bans dans nft :
 
 ```
-fobots.py watched                 # 7 derniers jours (--since 12h, 3d…)
-fobots.py watched --active        # seulement celles dont le ban est actif
-fobots.py watched --cmd           # n'affiche que la commande welcome add
+fobots watched                 # 7 derniers jours (--since 12h, 3d…)
+fobots watched --active        # seulement celles dont le ban est actif
+fobots watched --cmd           # n'affiche que la commande welcome add
 ```
 ```
 IP          BANS  REQ  LAST BAN          RANGE        STATE          ROUTE
@@ -220,7 +221,7 @@ IP          BANS  REQ  LAST BAN          RANGE        STATE          ROUTE
 20.1.1.1       2    6  2026-10-10 13:40  20.0.0.0/12  expired        /api/v4/jobs/request
 
 To protect them all:
-  fobots.py welcome add 40.2.2.2/32 20.1.1.1/32
+  fobots welcome add 40.2.2.2/32 20.1.1.1/32
 ```
 Les IP sont agrégées sur la période : *BANS* = nombre de bans où elles ont été prises
 (une IP prise plusieurs fois est un suspect sérieux). Les bans expirant vite, c'est
@@ -244,7 +245,8 @@ lance une commande, et le démon, `welcome`, `bans` et `watched` voient les mêm
 | Configuration, liste welcome | `/etc/fobots/` | décidées par l'administrateur ; le démon ne fait que les lire |
 | Cache RDAP, constats surveillés | `/var/lib/fobots/` | état écrit par le démon (créé s'il manque, mode 0750) |
 | Journaux | journald (`journalctl -u fobots`) | aucun fichier |
-| Programme | `/opt/fobots/` (lanceur `fobots.py` + paquet `fobots/`) | installation locale |
+| Commande | `/usr/local/sbin/fobots` (paquet : `/usr/sbin/fobots`) | le lanceur, installé sans `.py` |
+| Modules | `/opt/fobots/fobots/` | le paquet `fobots/`, trouvé par la commande |
 
 **Droits :** le démon peut tourner sous un utilisateur dédié avec la seule capacité
 `CAP_NET_ADMIN` (voir `fobots.service.example`). Les commandes d'administration
@@ -281,7 +283,7 @@ conf.** Voir `fobots.conf.example` pour toutes les clés :
 | `from_start` | non | lire d'abord le contenu existant du log |
 
 Sans `log` ni section `[site:…]`, le démon **refuse de démarrer** (erreur claire), sauf si
-stdin est un tube ou un fichier (`tail -F fichier | fobots.py run`) ou si `-` est passé
+stdin est un tube ou un fichier (`tail -F fichier | fobots run`) ou si `-` est passé
 explicitement. Des fichiers passés en argument sont lus une fois (`-` = stdin), ce qui sert
 à rejouer un log.
 
@@ -294,13 +296,13 @@ indique aussi le nombre de lignes illisibles (format de log inattendu, par ex. l
 ## Commandes
 
 ```
-fobots.py run [-t SEUIL] [-p SEUIL_PREFIXE] [--log FICHIER] [fichiers…]   (sans argument : suit les logs de la conf)
-fobots.py install [--dry-run] [--log F] installe nftables, l'utilisateur, la conf, l'unité systemd
-fobots.py setup                      crée la table, les sets et les règles nft
-fobots.py bans                       bans actifs et temps restant
-fobots.py welcome add CIDR…        liste welcome + retrait des bans concernés
-fobots.py welcome list
-fobots.py watched [--active] [--cmd]  IP surveillées (watch_*) prises dans un ban
+fobots run [-t SEUIL] [-p SEUIL_PREFIXE] [--log FICHIER] [fichiers…]   (sans argument : suit les logs de la conf)
+fobots install [--dry-run] [--log F] installe nftables, l'utilisateur, la conf, l'unité systemd
+fobots setup                      crée la table, les sets et les règles nft
+fobots bans                       bans actifs et temps restant
+fobots welcome add CIDR…        liste welcome + retrait des bans concernés
+fobots welcome list
+fobots watched [--active] [--cmd]  IP surveillées (watch_*) prises dans un ban
 ```
 Options communes : `-f CONF`, `--dir`, `-c`, `-w`, `--ban-time`, `--nft-bin`,
 `--dry-run`, `-v`. `--dry-run` n'appelle pas nft : il affiche les commandes et
@@ -309,7 +311,7 @@ simule les sets en mémoire.
 ## Liste welcome
 
 ```
-fobots.py welcome add 17.0.0.0/8 -f /etc/fobots/fobots.conf
+fobots welcome add 17.0.0.0/8 -f /etc/fobots/fobots.conf
 ```
 La plage est ajoutée à `welcome.txt` (le démon cesse aussitôt de la bannir : il
 relit le fichier avant chaque ban), puis les bans qui la touchent sont retirés.
@@ -367,7 +369,7 @@ on bannit les IP vues pendant la fenêtre `window`, regroupées ainsi :
 
 Le journal indique pour chaque ban le nombre d'IP, de groupes et la part des requêtes
 couverte. Pour comparer sans risque : `run --dry-run --ban-scope observed` sur un même log
-rejoué (`fobots.py run --dry-run --ban-scope allocation LOG`, puis `observed`).
+rejoué (`fobots run --dry-run --ban-scope allocation LOG`, puis `observed`).
 Quand un ban en remplace d'autres (un `/16` qui englobe des `/32`), le démon retire les
 anciens éléments puis ajoute le nouveau en **deux transactions** nft : nft 0.9.x refuse de
 le faire en une seule (« interval overlaps with an existing one »). Si l'ajout échoue, les
@@ -398,7 +400,7 @@ Mémoire : au plus 200 000 IP suivies. Les IPv4 et IPv6 sont traitées de la mê
 
 | Fichier | Rôle |
 |---|---|
-| `fobots.py` | lanceur (le code est dans le paquet `fobots/`) |
+| `fobots.py` | lanceur : `./fobots.py` dans un clone, installé comme la commande `fobots` |
 | `fobots/` | le paquet : `cli` (commandes), `detector`, `nft`, `welcome` (bans), `rdap`, `grouping`, `follow` (logs), `load`, `sites`, `events`, `config`, `install`, `util`, `constants` |
 | `fobots.conf.example` | configuration d'exemple |
 | `fobots.service.example` | unité systemd d'exemple |

@@ -55,7 +55,8 @@ touches an existing configuration or welcome list. It:
    (stops with a message otherwise); reports if this version does not show the remaining
    time of bans;
 3. creates the `fobots` system user if missing;
-4. installs the program in `/opt/fobots/`, the configuration in `/etc/fobots/fobots.conf`
+4. installs the command `/usr/local/sbin/fobots` (the launcher, without `.py`) and its modules in
+   `/opt/fobots/fobots/`, the configuration in `/etc/fobots/fobots.conf`
    (with `--log` if given), an empty welcome list `/etc/fobots/welcome.txt`, and the state
    directory `/var/lib/fobots` (0750, owned by `fobots`);
 5. installs the systemd unit, with the group that gives access to the log (detected,
@@ -63,7 +64,7 @@ touches an existing configuration or welcome list. It:
 6. checks that the `fobots` user can read the log, and says what to do if not.
 
 The service is **neither enabled nor started** by default: adapt the configuration, fill in
-the welcome list, try `/opt/fobots/fobots.py run --dry-run`, then
+the welcome list, try `fobots run --dry-run`, then
 `systemctl enable --now fobots` (or run `install` again with `--enable` / `--start`).
 `--destdir DIR` writes the files under a prefix without touching the system (tests,
 packaging).
@@ -92,7 +93,7 @@ make check           # syntax check
 make lint            # lintian
 sudo apt install ./dist/fobots_*_all.deb
 ```
-The package installs the same files as `install` (program in `/opt/fobots`, configuration and
+The package installs the same files as `install` (command `/usr/sbin/fobots`, modules in `/opt/fobots/fobots/`, configuration and
 `welcome.txt` in `/etc/fobots` as conffiles, systemd unit) and does not start the service.
 An upgrade only restarts a service that is already running; `purge` removes
 `/var/lib/fobots` and the `fobots` user.
@@ -202,9 +203,9 @@ command rereads this file, without journalctl, and combines it with the current 
 bans in nft:
 
 ```
-fobots.py watched                 # last 7 days (--since 12h, 3d…)
-fobots.py watched --active        # only those whose ban is active
-fobots.py watched --cmd           # only prints the welcome add command
+fobots watched                 # last 7 days (--since 12h, 3d…)
+fobots watched --active        # only those whose ban is active
+fobots watched --cmd           # only prints the welcome add command
 ```
 ```
 IP          BANS  REQ  LAST BAN          RANGE        STATE          ROUTE
@@ -212,7 +213,7 @@ IP          BANS  REQ  LAST BAN          RANGE        STATE          ROUTE
 20.1.1.1       2    6  2026-10-10 13:40  20.0.0.0/12  expired        /api/v4/jobs/request
 
 To protect them all:
-  fobots.py welcome add 40.2.2.2/32 20.1.1.1/32
+  fobots welcome add 40.2.2.2/32 20.1.1.1/32
 ```
 IPs are aggregated over the period: *BANS* = number of bans they were caught in (an IP caught
 several times is a serious suspect). Since bans expire quickly, it is the file's history that
@@ -234,7 +235,8 @@ from, and the daemon, `welcome`, `bans` and `watched` see the same files.
 | Configuration, welcome list | `/etc/fobots/` | decided by the administrator; the daemon only reads them |
 | RDAP cache, monitoring findings | `/var/lib/fobots/` | state written by the daemon (created if missing, mode 0750) |
 | Logs | journald (`journalctl -u fobots`) | no file |
-| Program | `/opt/fobots/` (`fobots.py` launcher + `fobots/` package) | local installation |
+| Command | `/usr/local/sbin/fobots` (package: `/usr/sbin/fobots`) | the launcher, installed without `.py` |
+| Modules | `/opt/fobots/fobots/` | the `fobots/` package, found by the command |
 
 **Permissions:** the daemon can run as a dedicated user with only the `CAP_NET_ADMIN`
 capability (see `fobots.service.example`). The administration commands (`setup`, `bans`,
@@ -271,7 +273,7 @@ the configuration file. **The command line overrides the configuration.** See
 | `from_start` | no | first read the existing content of the log |
 
 Without `log` or a `[site:…]` section, the daemon **refuses to start** (clear error), unless
-stdin is a pipe or a file (`tail -F file | fobots.py run`) or `-` is given explicitly. Files
+stdin is a pipe or a file (`tail -F file | fobots run`) or `-` is given explicitly. Files
 passed as arguments are read once (`-` = stdin), which is useful to replay a log.
 
 If the daemon follows nothing although the configuration looks right, check that it reads the
@@ -283,13 +285,13 @@ the Apache `vhost_combined` format, which is not supported).
 ## Commands
 
 ```
-fobots.py run [-t THRESHOLD] [-p PREFIX_THRESHOLD] [--log FILE] [files…]   (no argument: follows the logs of the configuration)
-fobots.py install [--dry-run] [--log F] installs nftables, the user, the configuration, the systemd unit
-fobots.py setup                      creates the nft table, sets and rules
-fobots.py bans                       active bans and remaining time
-fobots.py welcome add CIDR…          welcome list + removal of the bans concerned
-fobots.py welcome list
-fobots.py watched [--active] [--cmd]  monitored IPs (watch_*) caught in a ban
+fobots run [-t THRESHOLD] [-p PREFIX_THRESHOLD] [--log FILE] [files…]   (no argument: follows the logs of the configuration)
+fobots install [--dry-run] [--log F] installs nftables, the user, the configuration, the systemd unit
+fobots setup                      creates the nft table, sets and rules
+fobots bans                       active bans and remaining time
+fobots welcome add CIDR…          welcome list + removal of the bans concerned
+fobots welcome list
+fobots watched [--active] [--cmd]  monitored IPs (watch_*) caught in a ban
 ```
 Common options: `-f CONF`, `--dir`, `-c`, `-w`, `--ban-time`, `--nft-bin`, `--dry-run`,
 `-v`. `--dry-run` does not call nft: it prints the commands and simulates the sets in memory.
@@ -297,7 +299,7 @@ Common options: `-f CONF`, `--dir`, `-c`, `-w`, `--ban-time`, `--nft-bin`, `--dr
 ## Welcome list
 
 ```
-fobots.py welcome add 17.0.0.0/8 -f /etc/fobots/fobots.conf
+fobots welcome add 17.0.0.0/8 -f /etc/fobots/fobots.conf
 ```
 The range is added to `welcome.txt` (the daemon immediately stops banning it: it rereads the
 file before each ban), then the bans that touch it are removed. If the range is inside a wider
@@ -353,7 +355,7 @@ during the `window`, grouped as follows:
 
 For each ban the journal states the number of IPs, of groups and the share of requests
 covered. To compare safely: `run --dry-run --ban-scope observed` on the same replayed log
-(`fobots.py run --dry-run --ban-scope allocation LOG`, then `observed`).
+(`fobots run --dry-run --ban-scope allocation LOG`, then `observed`).
 When a ban replaces others (a `/16` that encloses `/32`s), the daemon removes the old elements
 then adds the new one in **two nft transactions**: nft 0.9.x refuses to do it in a single one
 ("interval overlaps with an existing one"). If the addition fails, the removed elements are
@@ -384,7 +386,7 @@ Memory: at most 200,000 IPs tracked. IPv4 and IPv6 are handled the same way.
 
 | File | Role |
 |---|---|
-| `fobots.py` | launcher (the code is in the `fobots/` package) |
+| `fobots.py` | launcher: `./fobots.py` in a clone, installed as the command `fobots` |
 | `fobots/` | the package: `cli` (commands), `detector`, `nft`, `welcome` (bans), `rdap`, `grouping`, `follow` (logs), `load`, `sites`, `events`, `config`, `install`, `util`, `constants` |
 | `fobots.conf.example` | example configuration |
 | `fobots.service.example` | example systemd unit |

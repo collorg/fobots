@@ -846,7 +846,7 @@ class Commands(TmpDirCase):
         self.assertIn("LAST BAN", out)
         self.assertIn("20.1.1.1/32 40.2.2.2/32", out)
         rc, out, err = self.run_main("watched", "--dry-run", "--dir", self.dir, "--cmd")
-        self.assertEqual(out.strip(), "fobots.py welcome add 20.1.1.1/32 40.2.2.2/32")
+        self.assertEqual(out.strip(), "fobots welcome add 20.1.1.1/32 40.2.2.2/32")
         rc, out, err = self.run_main("watched", "--dry-run", "--dir", self.path("empty"))
         self.assertIn("no finding", out)
 
@@ -857,15 +857,18 @@ class Commands(TmpDirCase):
         conf = self.read("root", "etc/fobots/fobots.conf")
         self.assertIn("log = /var/log/x.log", conf)
         unit = self.read("root", "etc/systemd/system/fobots.service")
-        self.assertIn("ExecStart=/opt/fobots/fobots.py run -f /etc/fobots/fobots.conf", unit)
-        self.assertTrue(os.access(os.path.join(dest, "opt/fobots/fobots.py"), os.X_OK))
+        self.assertIn("ExecStart=/usr/local/sbin/fobots run -f /etc/fobots/fobots.conf", unit)
+        command = os.path.join(dest, "usr/local/sbin/fobots")  # the launcher, installed without .py
+        self.assertTrue(os.access(command, os.X_OK))
+        self.assertFalse(os.path.exists(os.path.join(dest, "opt/fobots/fobots.py")))
         for module in ("cli", "detector", "nft", "welcome", "constants"):
             self.assertTrue(os.path.exists(os.path.join(dest, "opt/fobots/fobots", module + ".py")), module)
-        # the installed copy runs on its own (package found next to the launcher)
-        r = subprocess.run([sys.executable, os.path.join(dest, "opt/fobots/fobots.py"), "--help"],
-                           capture_output=True, text=True)
+        # the installed command runs (the package is looked up in /opt/fobots; here, PYTHONPATH)
+        env = dict(os.environ, PYTHONPATH=os.path.join(dest, "opt/fobots"))
+        r = subprocess.run([sys.executable, command, "--help"], capture_output=True, text=True, env=env)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("daemon that bans", r.stdout)
+        self.assertIn("usage: fobots ", r.stdout)
         self.assertTrue(os.path.exists(os.path.join(dest, "etc/fobots/welcome.txt")))
         # idempotent: an existing configuration is kept
         with open(os.path.join(dest, "etc/fobots/fobots.conf"), "a") as f:

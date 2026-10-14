@@ -6,12 +6,12 @@ Continuously reads an access log in "combined" format (nginx / Apache / GitLab),
 counts requests per IP range and per second, and adds the offending range to the
 nftables set as soon as the threshold is exceeded. Bans expire by themselves (nft timeout).
 
-  fobots.py run                      # follows the log given in fobots.conf
-  tail -F /var/log/gitlab/nginx/gitlab_access.log | fobots.py run -t 5 -
-  fobots.py setup                    # creates nft table, sets and rules (idempotent)
-  fobots.py bans                     # active bans with remaining time
-  fobots.py welcome add 17.0.0.0/8   # welcome list + removal of the bans concerned
-  fobots.py welcome list
+  fobots run                         # follows the log given in fobots.conf
+  tail -F /var/log/gitlab/nginx/gitlab_access.log | fobots run -t 5 -
+  fobots setup                       # creates nft table, sets and rules (idempotent)
+  fobots bans                        # active bans with remaining time
+  fobots welcome add 17.0.0.0/8      # welcome list + removal of the bans concerned
+  fobots welcome list
 
 Ranges come from RDAP (the successor of whois), queried in the background only for a
 /16 prefix (IPv6: /32) that already exceeds --prefix-threshold, with an hourly budget.
@@ -248,7 +248,7 @@ def cmd_watched(args):
     if not rows:
         print("no monitored IP in an active ban")
         return 0
-    cmd = "fobots.py welcome add " + " ".join(str(ipaddress.ip_network(ip)) for ip, _ in rows)
+    cmd = "fobots welcome add " + " ".join(str(ipaddress.ip_network(ip)) for ip, _ in rows)
     if args.config:
         cmd += f" -f {args.config}"
     if args.cmd:
@@ -330,7 +330,7 @@ def main(argv=None):
                         help="does not call nft: prints the commands (simulated sets)")
     common.add_argument("-v", "--verbose", action="store_true")
 
-    ap = argparse.ArgumentParser(description=__doc__,
+    ap = argparse.ArgumentParser(prog="fobots", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
 

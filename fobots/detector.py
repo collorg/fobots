@@ -76,7 +76,7 @@ class Detector:
         self.partial = {}  # range -> seconds of the partial bans
         self.watch = watch  # (agent regex or None, path regex or None); None = disabled
         self.watched = {}   # ip -> [requests, last second seen, example path]
-        self.watch_file = watch_file  # findings written here (reread by `fobots.py watched`)
+        self.watch_file = watch_file  # findings written here (reread by `fobots watched`)
 
     def watch_match(self, m):
         """Path of the request (m: REQ_RE) if it matches the monitored patterns, else None.
@@ -113,7 +113,7 @@ class Detector:
                 "ips": [[ip, n, path] for n, ip, path in hit[:WATCH_EVENT_IPS]]})
         top = hit[:10]
         log.warning("WATCH %s banned: %d monitored IP(s), %d request(s): %s%s; "
-                    "to protect them: fobots.py welcome add %s",
+                    "to protect them: fobots welcome add %s",
                     fmt_range(key), len(hit), sum(n for n, _, _ in hit),
                     ", ".join(f"{ip} ({n} req, {path})" for n, ip, path in top),
                     f" (+{len(hit) - len(top)} others)" if len(hit) > len(top) else "",

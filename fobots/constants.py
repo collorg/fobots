@@ -12,7 +12,9 @@ CONF_DIR = "/etc/fobots"      # configuration and welcome list (decided by the a
 
 STATE_DIR = "/var/lib/fobots"  # RDAP cache and findings (written by the daemon)
 
-INSTALL_DIR = "/opt/fobots"
+INSTALL_DIR = "/opt/fobots"  # the fobots/ package (modules) is installed here
+
+BIN_PATH = "/usr/local/sbin/fobots"  # the command: the launcher, installed without .py
 
 UNIT_PATH = "/etc/systemd/system/fobots.service"
 
