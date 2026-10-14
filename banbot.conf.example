@@ -28,6 +28,23 @@ ban_time = 1h        # durée d'un ban : 30m, 1h, 1d…
 # min_threshold = 1    # plancher du seuil effectif (req/s)
 # min_ban_time = 1m    # plancher de la durée de ban effective
 
+# Un log par hôte virtuel : une section [site:NOM] par cible, avec ses propres règles
+# d'exclusion (en plus de ignore_path ci-dessous). Un hôte à plusieurs noms (CNAME) n'a
+# qu'une section : son log est unique. Le log de [banbot] et ceux des sites doivent différer ;
+# pour n'utiliser que des sections, supprimer la ligne `log =` de [banbot].
+# [site:gitlab]
+# log = /var/log/gitlab/nginx/gitlab_access.log
+# ignore_prefix = /assets/, /favicon.ico, /robots.txt
+# [site:vitrine]
+# log = /var/log/nginx/vitrine.access.log
+# ignore_all = yes
+
+# Pages statiques peu coûteuses à ne pas compter (regex sur le chemin de la requête). Ancrer sur
+# des préfixes de répertoires statiques, PAS sur des extensions (\.js, \.css exempteraient aussi
+# les fichiers du dépôt servis par GitLab, dynamiques et coûteux). N'est pas une autorisation :
+# une plage bannie est rejetée par le pare-feu avant nginx, pages statiques comprises.
+# ignore_path = ^/(assets/|favicon|robots\.txt)
+
 # Surveillance opt-in : ces requêtes sont comptées comme les autres (aucune exemption), mais
 # quand leur plage est bannie, le journal indique (WATCH) quelles IP correspondaient et la
 # commande `whitelist add` pour les protéger. Expressions régulières ; si les deux sont

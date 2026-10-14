@@ -102,6 +102,66 @@ avec `--dry-run -v` et regarde les lignes `charge : psi=…` (toutes les 5 minut
 à chaque changement de niveau) pour choisir `load_tense` / `load_critical`.
 Les faux positifs se corrigent avec `whitelist add`.
 
+## Un log par hôte : règles par cible
+
+Un serveur bien configuré écrit **un log par hôte virtuel**. Chaque log devient une
+*cible*, avec ses propres règles, dans `banbot.conf` :
+
+```ini
+[site:gitlab]
+log = /var/log/gitlab/nginx/gitlab_access.log
+ignore_prefix = /assets/, /favicon.ico, /robots.txt
+
+[site:vitrine]                       # site entièrement statique
+log = /var/log/nginx/vitrine.access.log
+ignore_all = yes
+
+[site:api]                           # aucune règle propre : tout est compté
+log = /var/log/nginx/api.access.log
+```
+- `log` (obligatoire), `ignore_prefix` (préfixes de chemin, séparés par des virgules),
+  `ignore_path` (regex), `ignore_all` (rien n'est compté pour cette cible).
+- Les règles propres **s'ajoutent** à l'`ignore_path` global de `[banbot]`.
+- Les alias CNAME d'un hôte n'ont aucun effet : ils aboutissent dans le même log, donc
+  dans la même cible. Le nom d'hôte n'est jamais lu dans les lignes.
+- Le **comptage reste global par plage d'IP** : les requêtes de toutes les cibles
+  s'additionnent, puisque le pare-feu bannit une plage pour tous les hôtes (ports 80/443).
+- Un thread suit chaque log (rotation gérée) ; les formats peuvent différer d'un log à
+  l'autre (il faut l'IP, l'horodatage et la ligne de requête).
+- Le `log` unique de `[banbot]` fonctionne toujours (cible « défaut » sans règle propre),
+  mais ne peut pas désigner le même fichier qu'une section `[site:…]`.
+- Des fichiers donnés en argument (`run fichier.log`) sont lus une fois, sans suivre les
+  cibles ; seule la règle globale s'applique.
+- `SIGUSR1` affiche, par cible, les lignes lues et exclues : pratique pour vérifier qu'une
+  règle fait ce qu'on attend. `install` donne au service l'accès à tous les logs.
+
+## Pages statiques : ne pas les compter
+
+Opt-in : `ignore_path` (regex sur le chemin de la requête, global ou par cible) retire du
+comptage les requêtes correspondantes. Elles ne comptent ni pour le seuil d'une plage ni pour le déclenchement
+de RDAP, et ne sont pas non plus notées par `watch_*`.
+
+```
+ignore_path = ^/(assets/|favicon|robots\.txt)
+```
+**Pourquoi :** un seul chargement de page GitLab déclenche des dizaines de requêtes
+d'assets dans la même seconde. Compter ces requêtes gonfle le débit des visiteurs
+légitimes et favorise les faux positifs. Une fois les statiques exclues, le seuil
+mesure surtout les requêtes coûteuses, et on peut le baisser. Le chemin lu est celui de
+la ligne de requête (`GET /chemin?…`) : cela marche aussi avec le format *common*.
+
+**Prudence :**
+- N'exclure que ce qui est **peu coûteux à servir**. Ancrer sur des **préfixes** de
+  répertoires statiques (`/assets/`), pas sur des extensions : `\.js$` ou `\.css$`
+  exempteraient aussi les fichiers du dépôt (`/-/raw/…/x.js`, `/-/blob/…`), dynamiques et
+  coûteux, que des scrapers adorent.
+- Un scraper qui ne demande que des chemins exclus n'est jamais banni (ce qui est voulu :
+  c'est peu coûteux), et les lignes dont la requête est illisible sont comptées.
+- **Ce n'est pas une autorisation d'accès.** Une plage bannie est rejetée par le
+  pare-feu *avant* nginx, qui ne voit pas les chemins : elle n'atteint donc pas non plus
+  les pages statiques. Servir quelque chose aux plages bannies demanderait de les rediriger
+  vers un autre serveur plutôt que de les rejeter.
+
 ## Repérer des IP légitimes prises dans un ban (gitlab-runner…)
 
 Opt-in : `watch_agent` (regex sur l'user-agent) et `watch_path` (regex sur la route) ;
@@ -168,7 +228,7 @@ conf.** Voir `banbot.conf.example` pour toutes les clés :
 
 | Clé | Défaut | Rôle |
 |---|---|---|
-| `log` | stdin | log suivi en continu (rotation gérée) |
+| `log` | aucun | log suivi en continu (rotation gérée) ; voir aussi les sections `[site:NOM]` |
 | `dir` | `/var/lib/banbot` | dossier d'état : `ip_ranges.json`, `watched.jsonl` (créé s'il manque) |
 | `cache` | `<dir>/ip_ranges.json` | cache des plages RDAP |
 | `whitelist` | `whitelist.txt` à côté de la conf utilisée, sinon `/etc/banbot/` | plages à ne jamais bannir |
@@ -184,13 +244,21 @@ conf.** Voir `banbot.conf.example` pour toutes les clés :
 | `min_threshold`, `min_ban_time` | 1, 1m | planchers du seuil et de la durée effectifs |
 | `from_start` | non | lire d'abord le contenu existant du log |
 
-Sans `log`, le démon lit stdin (`tail -F fichier | banbot.py run`). Des fichiers
-passés en argument sont lus une fois (`-` = stdin), ce qui sert à rejouer un log.
+Sans `log` ni section `[site:…]`, le démon **refuse de démarrer** (erreur claire), sauf si
+stdin est un tube ou un fichier (`tail -F fichier | banbot.py run`) ou si `-` est passé
+explicitement. Des fichiers passés en argument sont lus une fois (`-` = stdin), ce qui sert
+à rejouer un log.
+
+Si le démon ne suit rien alors que la conf semble correcte, vérifier qu'il lit bien
+la conf attendue (la ligne `configuration : …` au démarrage) et que le script installé
+est à jour : une ancienne copie ignore les sections `[site:…]` sans le dire. `SIGUSR1`
+indique aussi le nombre de lignes illisibles (format de log inattendu, par ex. le préfixe
+`hôte:port` du format Apache `vhost_combined`, non géré).
 
 ## Commandes
 
 ```
-banbot.py run [-t SEUIL] [-p SEUIL_PREFIXE] [--log FICHIER] [fichiers…]
+banbot.py run [-t SEUIL] [-p SEUIL_PREFIXE] [--log FICHIER] [fichiers…]   (sans argument : suit les logs de la conf)
 banbot.py install [--dry-run] [--log F] installe nftables, l'utilisateur, la conf, l'unité systemd
 banbot.py setup                      crée la table, les sets et les règles nft
 banbot.py bans                       bans actifs et temps restant
@@ -230,8 +298,9 @@ Le suivi du log fonctionne comme `tail -F` : renommage (`create`), troncature
 (`copytruncate`) et absence temporaire du fichier sont gérés, sans signal à
 envoyer. Après un renommage, l'ancien fichier est encore lu 2 s (le serveur y
 écrit jusqu'à la réouverture). Avec `copytruncate`, les lignes écrites entre la
-copie et la troncature sont perdues (limite de logrotate). Un seul log est suivi
-en interne ; pour plusieurs : `tail -F a b | banbot.py run`.
+copie et la troncature sont perdues (limite de logrotate). Chaque log
+(sections `[site:…]` ou `log` de `[banbot]`) est suivi indépendamment, donc chacun peut
+avoir sa propre rotation.
 
 ## Signaux et journal
 

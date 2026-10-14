@@ -30,6 +30,7 @@ import queue
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import threading
@@ -45,6 +46,8 @@ log = logging.getLogger("banbot")
 LINE_RE = re.compile(r'^(\S+) \S+ \S+ \[([^\]]+)\]')
 # Fin d'une ligne « combined » : "METHODE /chemin PROTO" statut taille "referer" "user-agent"
 REQ_RE = re.compile(r'"[A-Z]+ (\S+)[^"]*" \d+ \S+ "[^"]*" "([^"]*)"\s*$')
+# Première chaîne entre guillemets : la ligne de requête (format common ou combined)
+PATH_RE = re.compile(r'"[A-Z]+ (\S+)')
 RDAP_URL = "https://rdap.org/ip/{}"  # redirige vers le RIR compétent
 SETS = {4: "banned4", 6: "banned6"}
 # Une réponse RDAP plus large que ça est rejetée (garde-fou contre 0.0.0.0/0).
@@ -575,12 +578,64 @@ class NoLoad:
         return "charge non surveillée"
 
 
+# --- cibles (un log par hôte) -------------------------------------------------
+
+class Site:
+    """Une cible : un log (un par hôte virtuel) et ses règles d'exclusion du comptage.
+    Un hôte joignable sous plusieurs noms (CNAME) n'a qu'un log, donc qu'une cible."""
+
+    def __init__(self, name, log_path, prefixes=(), regex=None, all=False):
+        self.name, self.log, self.all = name, log_path, all
+        self.prefixes = tuple(prefixes)
+        self.regex = re.compile(regex) if regex else None
+        self.lines = self.ignored = 0  # statistiques (SIGUSR1)
+
+    @property
+    def has_path_rules(self):
+        return bool(self.prefixes or self.regex)
+
+    def ignores(self, path):
+        if self.prefixes and path.startswith(self.prefixes):
+            return True
+        return self.regex is not None and self.regex.search(path) is not None
+
+    def describe(self):
+        if self.all:
+            return "tout est exclu"
+        parts = []
+        if self.prefixes:
+            parts.append("préfixes " + ", ".join(self.prefixes))
+        if self.regex:
+            parts.append(f"regex {self.regex.pattern!r}")
+        return "; ".join(parts) or "aucune exclusion propre"
+
+
+def run_sites(det, sites, from_start, queue_size=200_000):
+    """Suit tous les logs (un thread par log) ; un seul fil traite les lignes, donc le
+    comptage par plage reste global et sans verrou. La file bornée limite la mémoire :
+    si le traitement prend du retard, les lecteurs attendent (rien n'est perdu)."""
+    q = queue.Queue(maxsize=queue_size)
+
+    def reader(site):
+        for line in follow(site.log, from_start):
+            q.put((site, line))
+
+    for site in sites:
+        threading.Thread(target=reader, args=(site,), daemon=True, name=f"log-{site.name}").start()
+    while True:
+        try:
+            site, line = q.get(timeout=1)  # timeout : laisse passer les signaux
+        except queue.Empty:
+            continue
+        det.feed_line(line, site)
+
+
 # --- détection ---------------------------------------------------------------
 
 class Detector:
     def __init__(self, threshold, prefix_threshold, sustain, window, store, banner, rdap,
                  load=None, min_threshold=1.0, min_ban_seconds=60, watch=None,
-                 watch_file=None):
+                 watch_file=None, ignore_path=None, sites=()):
         self.base_threshold, self.base_prefix_threshold = threshold, prefix_threshold
         self.load, self.min_threshold, self.min_ban = load or NoLoad(), min_threshold, min_ban_seconds
         self.sustain, self.window = sustain, window
@@ -591,18 +646,17 @@ class Detector:
         self.recent_ban = {}
         self.memo, self.memo_version = {}, store.version
         self.latest = self.last_purge = 0
-        self.skipped = 0
+        self.skipped = self.ignored = 0
+        self.ignore_path = ignore_path  # regex globale : requêtes non comptées (pages statiques)
+        self.sites = tuple(sites)       # cibles (statistiques de SIGUSR1)
         self.watch = watch  # (regex agent ou None, regex chemin ou None) ; None = désactivé
         self.watched = {}   # ip -> [requêtes, dernière seconde vue, chemin exemple]
         self.watch_file = watch_file  # constats écrits ici (relus par `banbot.py watched`)
 
-    def watch_match(self, line):
-        """Chemin de la requête si la ligne correspond aux motifs surveillés, sinon None.
+    def watch_match(self, m):
+        """Chemin de la requête (m : REQ_RE) si elle correspond aux motifs surveillés, sinon None.
         Tous les motifs fournis doivent correspondre. Les lignes sont comptées comme les
         autres : on ne fait que garder une trace."""
-        m = REQ_RE.search(line)
-        if not m:
-            return None
         agent_re, path_re = self.watch
         if (agent_re is None or agent_re.search(m.group(2))) and \
                 (path_re is None or path_re.search(m.group(1))):
@@ -656,12 +710,32 @@ class Detector:
         """Durée effective : raccourcie quand la charge monte (on re-juge plus vite)."""
         return int(self._scaled(self.banner.ban_seconds, self.min_ban))
 
-    def feed_line(self, line):
+    def feed_line(self, line, site=None):
         m = LINE_RE.match(line)
         if not m:
             self.skipped += 1
             return
-        tag = self.watch_match(line) if self.watch else None
+        if site is not None:
+            site.lines += 1
+            if site.all:  # cible entièrement exclue du comptage
+                site.ignored += 1
+                self.ignored += 1
+                return
+        if self.ignore_path is not None or (site is not None and site.has_path_rules):
+            pm = PATH_RE.search(line)  # illisible : la ligne est comptée normalement
+            if pm:
+                path = pm.group(1)
+                if (self.ignore_path is not None and self.ignore_path.search(path)) or \
+                        (site is not None and site.ignores(path)):
+                    self.ignored += 1
+                    if site is not None:
+                        site.ignored += 1
+                    return
+        tag = None
+        if self.watch:
+            rm = REQ_RE.search(line)  # demande aussi l'agent (format combined)
+            if rm:
+                tag = self.watch_match(rm)
         try:
             sec = parse_ts(m.group(2))
         except ValueError:
@@ -738,8 +812,11 @@ class Detector:
             del self.watched[ip]
 
     def dump(self, top=30):
-        log.info("--- %d plages suivies, %d lignes illisibles, %d IP surveillées, %s ---",
-                 len(self.hits), self.skipped, len(self.watched), self.load.describe())
+        log.info("--- %d plages suivies, %d lignes illisibles, %d lignes exclues, "
+                 "%d IP surveillées, %s ---", len(self.hits), self.skipped, self.ignored,
+                 len(self.watched), self.load.describe())
+        for site in self.sites:
+            log.info("site %s : %d lignes lues, %d exclues", site.name, site.lines, site.ignored)
         for key, n in self.hits.most_common(top):
             label = fmt_range(key) if isinstance(key, tuple) else f"(non résolu) {key}"
             log.info("%10d  %s", n, label)
@@ -793,15 +870,21 @@ def follow(path, from_start=False, poll=0.5, grace=2.0):
             time.sleep(poll)
 
 
+def stdin_is_feed():
+    """stdin est-il un flux exploitable (tube ou fichier) ? Ni terminal, ni /dev/null, ni fermé."""
+    try:
+        mode = os.fstat(sys.stdin.fileno()).st_mode
+    except (OSError, ValueError, AttributeError):
+        return False
+    return stat.S_ISFIFO(mode) or stat.S_ISREG(mode)
+
+
 def log_lines(args):
     if args.files:  # fichiers donnés en ligne de commande : lus une fois (- = stdin)
         for path in args.files:
             f = sys.stdin if path == "-" else open(path, errors="replace")
             with f:
                 yield from f
-    elif args.log:
-        log.info("suivi de %s", args.log)
-        yield from follow(args.log, args.from_start)
     else:
         yield from sys.stdin
 
@@ -875,12 +958,37 @@ def cmd_run(args):
             return 1
         log.info("surveillance des requêtes : agent=%r chemin=%r (comptées normalement, "
                  "journalisées si leur plage est bannie)", args.watch_agent, args.watch_path)
+    ignore_path = None
+    if args.ignore_path:
+        try:
+            ignore_path = re.compile(args.ignore_path)
+        except re.error as e:
+            log.error("expression régulière invalide pour ignore_path : %s", e)
+            return 1
+        log.info("requêtes exclues du comptage (chemin) : %r", args.ignore_path)
+    sites = [Site(d["name"], d["log"], d["prefixes"], d["regex"], d["all"])
+             for d in (getattr(args, "sites", None) or [])]
+    if args.log:  # log unique de [banbot] ou --log : une cible sans règle propre
+        if any(x.log == args.log for x in sites):
+            log.error("le log %s est à la fois dans [banbot] et dans une section [site:…]", args.log)
+            return 1
+        sites.insert(0, Site("défaut", args.log))
+    if args.files:
+        sites = []  # fichiers donnés en argument : lecture unique, sans suivi
+    for x in sites:
+        log.info("cible %s : suivi de %s (%s)", x.name, x.log, x.describe())
+    if not sites and not args.files and not stdin_is_feed():
+        log.error("aucun log à suivre : définir `log =` dans [banbot] ou une section [site:NOM] "
+                  "avec `log =` (configuration utilisée : %s), ou passer --log FICHIER ; "
+                  "pour lire stdin explicitement : `run -`", args.config or "aucune")
+        return 1
     watch_file = watch_file_path(args) if watch else None
     if watch_file:
         trim_events(watch_file)
     det = Detector(args.threshold, args.prefix_threshold or args.threshold, args.sustain,
                    args.window, store, Banner(nft, wl, args.ban_seconds), rdap,
-                   load, args.min_threshold, args.min_ban_seconds, watch, watch_file)
+                   load, args.min_threshold, args.min_ban_seconds, watch, watch_file,
+                   ignore_path, sites)
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     signal.signal(signal.SIGUSR1, lambda *_: det.dump())
     if args.config:
@@ -888,10 +996,16 @@ def cmd_run(args):
     log.info("démon prêt : seuil %s req/s, ban %d s, %d plage(s) en cache dans %s",
              args.threshold, args.ban_seconds, len(store.ranges), os.path.abspath(cache))
     try:
-        for line in log_lines(args):
-            det.feed_line(line)
+        if sites:
+            run_sites(det, sites, args.from_start)
+        else:  # fichiers (lus une fois) ou stdin
+            for line in log_lines(args):
+                det.feed_line(line)
     except KeyboardInterrupt:
         pass
+    except OSError as e:  # stdin ou fichier illisible
+        log.error("lecture impossible : %s", e)
+        return 1
     log.info("arrêt")
     return 0
 
@@ -1093,19 +1207,16 @@ class Installer:
                       "--shell", "/usr/sbin/nologin", SERVICE_USER])
             self.said_done(f"utilisateur {SERVICE_USER} créé")
 
-    def log_path(self):
+    def log_paths(self):
         if self.args.log:
-            return self.args.log
+            return [self.args.log]
         text = self.read(os.path.join(CONF_DIR, "banbot.conf")) or self.template("banbot.conf.example")
-        m = re.search(r"(?m)^\s*log\s*=\s*(\S+)", text)
-        return m.group(1) if m else None
+        return re.findall(r"(?m)^\s*log\s*=\s*(\S+)", text)
 
-    def log_group(self):
-        """Groupe donnant accès au log : --log-group, sinon celui du fichier s'il n'est pas public."""
-        if self.args.log_group:
-            return self.args.log_group
+    @staticmethod
+    def group_for(log_file):
+        """Groupe donnant accès à ce log s'il n'est pas public (et pas root), sinon adm."""
         import grp
-        log_file = self.log_path()
         try:
             st = os.stat(log_file)
             name = grp.getgrgid(st.st_gid).gr_name
@@ -1114,6 +1225,17 @@ class Installer:
         except (OSError, KeyError, TypeError):
             pass
         return "adm"
+
+    def log_groups(self):
+        """Groupes d'accès à tous les logs (--log-group impose le sien)."""
+        if self.args.log_group:
+            return [self.args.log_group]
+        groups = []
+        for log_file in self.log_paths():
+            g = self.group_for(log_file)
+            if g not in groups:
+                groups.append(g)
+        return groups or ["adm"]
 
     def install_files(self):
         self.ensure_dir(INSTALL_DIR, 0o755)
@@ -1147,34 +1269,36 @@ class Installer:
         self.ensure_dir(STATE_DIR, 0o750, (SERVICE_USER, SERVICE_USER))
         self.say("ok", f"dossier d'état : {STATE_DIR}")
 
-        unit = re.sub(r"(?m)^SupplementaryGroups=.*$", f"SupplementaryGroups={self.log_group()}",
+        unit = re.sub(r"(?m)^SupplementaryGroups=.*$", f"SupplementaryGroups={' '.join(self.log_groups())}",
                       self.template("banbot.service.example"))
         if self.read(UNIT_PATH) == unit:
             self.say("ok", f"unité systemd à jour : {UNIT_PATH}")
         else:
             self.write(UNIT_PATH, unit, 0o644)
-            self.say("ok", f"unité systemd : {UNIT_PATH} (groupe d'accès au log : {self.log_group()})")
+            self.say("ok", f"unité systemd : {UNIT_PATH} (groupes d'accès aux logs : {' '.join(self.log_groups())})")
             self.run(["systemctl", "daemon-reload"])
 
     def check_log_access(self):
-        log_file = self.log_path()
-        if not log_file:
+        logs = self.log_paths()
+        if not logs:
             self.say("..", "aucun log configuré : le démon lira stdin")
             return
-        if not self.system:
-            self.say("..", f"accès de {SERVICE_USER} à {log_file} : vérifié à l'installation réelle")
-            return
-        if not os.path.exists(log_file):
-            self.say("!!", f"{log_file} n'existe pas encore (le démon l'attendra) : vérifier le chemin")
-            return
-        r = self.run(["runuser", "-u", SERVICE_USER, "-g", self.log_group(), "--",
-                      "test", "-r", log_file], check=False)
-        if r.returncode == 0:
-            self.say("ok", f"{SERVICE_USER} peut lire {log_file}")
-        else:
-            self.say("!!", f"{SERVICE_USER} ne peut pas lire {log_file} : donner l'accès, par ex. "
-                     f"`setfacl -m u:{SERVICE_USER}:r {log_file}` (et x sur les dossiers parents), "
-                     "ou --log-group")
+        for log_file in logs:
+            if not self.system:
+                self.say("..", f"accès de {SERVICE_USER} à {log_file} : vérifié à l'installation réelle")
+                continue
+            if not os.path.exists(log_file):
+                self.say("!!", f"{log_file} n'existe pas encore (le démon l'attendra) : vérifier le chemin")
+                continue
+            group = self.args.log_group or self.group_for(log_file)
+            r = self.run(["runuser", "-u", SERVICE_USER, "-g", group, "--",
+                          "test", "-r", log_file], check=False)
+            if r.returncode == 0:
+                self.say("ok", f"{SERVICE_USER} peut lire {log_file}")
+            else:
+                self.say("!!", f"{SERVICE_USER} ne peut pas lire {log_file} : donner l'accès, par ex. "
+                         f"`setfacl -m u:{SERVICE_USER}:r {log_file}` (et x sur les dossiers parents), "
+                         "ou --log-group")
 
     def run_all(self):
         if self.system and os.geteuid() != 0:
@@ -1249,6 +1373,7 @@ CONF_KEYS = {  # clé du fichier -> (destination argparse, conversion)
     "load_critical": ("load_critical", float), "load_recover": ("load_recover", parse_duration),
     "tense_factor": ("tense_factor", float), "critical_factor": ("critical_factor", float),
     "min_threshold": ("min_threshold", float), "min_ban_time": ("min_ban_seconds", parse_duration),
+    "ignore_path": ("ignore_path", str),
     "watch_agent": ("watch_agent", str), "watch_path": ("watch_path", str),
     "watch_file": ("watch_file", str),
     "from_start": ("from_start", lambda v: v.lower() in ("1", "true", "yes", "oui", "on")),
@@ -1258,8 +1383,12 @@ PATH_KEYS = {"dir", "cache", "whitelist", "log", "watch_file"}
 CONF_SEARCH = (os.path.join(CONF_DIR, "banbot.conf"), "banbot.conf")
 
 
+SITE_KEYS = ("log", "ignore_prefix", "ignore_path", "ignore_all")
+TRUE_VALUES = ("1", "true", "yes", "oui", "on")
+
+
 def load_config(path):
-    """Lit la section [banbot] ; les chemins relatifs le sont par rapport au fichier."""
+    """Lit [banbot] et les sections [site:NOM] ; les chemins relatifs le sont par rapport au fichier."""
     cp = configparser.ConfigParser(interpolation=None, inline_comment_prefixes=("#", ";"))
     try:
         with open(path) as f:
@@ -1268,6 +1397,12 @@ def load_config(path):
         sys.exit(f"configuration {path} illisible : {e}")
     if not cp.has_section("banbot"):
         sys.exit(f"{path} : section [banbot] absente")
+    base = os.path.dirname(os.path.abspath(path))
+
+    def fix_path(v):
+        v = os.path.expanduser(v.strip())
+        return v if os.path.isabs(v) else os.path.join(base, v)
+
     out = {}
     for key, val in cp["banbot"].items():
         if key not in CONF_KEYS:
@@ -1276,13 +1411,46 @@ def load_config(path):
             continue
         dest, conv = CONF_KEYS[key]
         if key in PATH_KEYS:
-            val = os.path.expanduser(val.strip())
-            if not os.path.isabs(val):
-                val = os.path.join(os.path.dirname(os.path.abspath(path)), val)
+            val = fix_path(val)
         try:
             out[dest] = conv(val.strip())
         except (ValueError, argparse.ArgumentTypeError) as e:
             sys.exit(f"{path} : valeur invalide pour {key} ({val!r}) : {e}")
+
+    sites, seen = [], {}
+    for section in cp.sections():
+        if section == "banbot":
+            continue
+        name = section[5:].strip() if section.startswith("site:") else ""
+        if not name:
+            sys.exit(f"{path} : section [{section}] inconnue (attendu : [banbot] ou [site:NOM])")
+        opts = cp[section]
+        for key in opts:
+            if key not in SITE_KEYS:
+                sys.exit(f"{path} : [{section}] option inconnue {key!r} "
+                         f"(connues : {', '.join(SITE_KEYS)})")
+        if not opts.get("log", "").strip():
+            sys.exit(f"{path} : [{section}] : `log` est obligatoire")
+        log_file = fix_path(opts["log"])
+        if log_file in seen:
+            sys.exit(f"{path} : [{section}] et [site:{seen[log_file]}] suivent le même log {log_file}")
+        seen[log_file] = name
+        prefixes = [x for x in re.split(r"[,\s]+", opts.get("ignore_prefix", "").strip()) if x]
+        for x in prefixes:
+            if not x.startswith("/"):
+                sys.exit(f"{path} : [{section}] ignore_prefix {x!r} doit commencer par /")
+        regex = opts.get("ignore_path", "").strip() or None
+        if regex:
+            try:
+                re.compile(regex)
+            except re.error as e:
+                sys.exit(f"{path} : [{section}] ignore_path invalide : {e}")
+        sites.append({"name": name, "log": log_file, "prefixes": prefixes, "regex": regex,
+                      "all": opts.get("ignore_all", "").strip().lower() in TRUE_VALUES})
+    if out.get("log") in seen:
+        sys.exit(f"{path} : le log {out['log']} est à la fois dans [banbot] et dans [site:{seen[out['log']]}]")
+    if sites:
+        out["sites"] = sites
     return out
 
 
@@ -1349,6 +1517,9 @@ def main(argv=None):
                    help="plancher du seuil effectif en req/s (défaut: 1)")
     r.add_argument("--min-ban-time", dest="min_ban_seconds", type=parse_duration, default=60,
                    help="plancher de la durée de ban effective (défaut: 1m)")
+    r.add_argument("--ignore-path", metavar="REGEX",
+                   help="opt-in : ne compte pas les requêtes dont le chemin correspond "
+                        "(pages statiques peu coûteuses, ex. ^/(assets|uploads)/)")
     r.add_argument("--watch-agent", metavar="REGEX",
                    help="opt-in : journalise (WATCH) les IP dont l'user-agent correspond quand "
                         "leur plage est bannie (ex. ^gitlab-runner) ; ne change pas le comptage")
