@@ -97,6 +97,16 @@ The package installs the same files as `install` (program in `/opt/fobots`, conf
 An upgrade only restarts a service that is already running; `purge` removes
 `/var/lib/fobots` and the `fobots` user.
 
+### Tests
+
+```
+make test            # python3 -m unittest discover -s tests  (standard library only, about 1 s)
+```
+The suite covers range grouping, bans (including the nft overlap workaround), detection with
+and without `ban_scope = observed`, load levels, configuration errors, log rotation and the
+commands (`run --dry-run`, `welcome`, `watched`, `install --destdir`). None of it needs root or
+a real `nft`.
+
 ## Load-based hardening
 
 Disabled by default (`load_signal = none`). When enabled, a thread measures the load every
@@ -377,7 +387,8 @@ Memory: at most 200,000 IPs tracked. IPv4 and IPv6 are handled the same way.
 | `fobots.py` | the daemon and its commands |
 | `fobots.conf.example` | example configuration |
 | `fobots.service.example` | example systemd unit |
-| `build-deb.sh`, `Makefile` | Debian package |
+| `build-deb.sh`, `Makefile` | Debian package, `make test` |
+| `tests/test_fobots.py` | unit tests |
 | `/etc/fobots/fobots.conf` | configuration |
 | `/etc/fobots/welcome.txt` | ranges never to ban, one CIDR per line (created by `welcome add`) |
 | `/var/lib/fobots/ip_ranges.json` | RDAP range cache |

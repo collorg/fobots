@@ -1,7 +1,8 @@
 # Paquet Debian de fobots.
 #   make          construit dist/fobots_VERSION_all.deb
 #   make VERSION=1.2.0 deb
-#   make check    vérifie la syntaxe et rejoue un petit log en --dry-run
+#   make test     tests unitaires (bibliothèque standard, python3 -m unittest)
+#   make check    syntaxe + tests
 #   make lint     lintian sur le paquet (si installé)
 #   make clean
 
@@ -11,18 +12,21 @@ VERSION ?= 0.$(COUNT)
 DEB     := dist/fobots_$(VERSION)_all.deb
 SOURCES := fobots.py fobots.conf.example fobots.service.example README.md README.fr.md build-deb.sh
 
-.PHONY: deb check lint clean help
+.PHONY: deb test check lint clean help
 .DEFAULT_GOAL := deb
 
 help:
-	@sed -n '2,6p' Makefile
+	@sed -n '2,8p' Makefile
 
 deb: $(DEB)
 
 $(DEB): $(SOURCES)
 	./build-deb.sh $(VERSION)
 
-check:
+test:
+	python3 -m unittest discover -s tests
+
+check: test
 	python3 -m py_compile fobots.py
 	sh -n build-deb.sh
 	python3 fobots.py --help >/dev/null

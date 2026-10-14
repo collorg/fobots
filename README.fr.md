@@ -102,6 +102,16 @@ Le paquet installe les mêmes fichiers que `install` (programme dans `/opt/fobot
 Une mise à jour relance seulement un service déjà démarré ; `purge` supprime
 `/var/lib/fobots` et l'utilisateur `fobots`.
 
+### Tests
+
+```
+make test            # python3 -m unittest discover -s tests  (bibliothèque standard, environ 1 s)
+```
+La suite couvre le regroupement des plages, les bans (dont le contournement du chevauchement
+nft), la détection avec et sans `ban_scope = observed`, les niveaux de charge, les erreurs de
+configuration, la rotation des logs et les commandes (`run --dry-run`, `welcome`, `watched`,
+`install --destdir`). Aucun test n'exige root ni un vrai `nft`.
+
 ## Durcissement selon la charge
 
 Désactivé par défaut (`load_signal = none`). Quand il est actif, un thread mesure
@@ -391,7 +401,8 @@ Mémoire : au plus 200 000 IP suivies. Les IPv4 et IPv6 sont traitées de la mê
 | `fobots.py` | le démon et ses commandes |
 | `fobots.conf.example` | configuration d'exemple |
 | `fobots.service.example` | unité systemd d'exemple |
-| `build-deb.sh`, `Makefile` | paquet Debian |
+| `build-deb.sh`, `Makefile` | paquet Debian, `make test` |
+| `tests/test_fobots.py` | tests unitaires |
 | `/etc/fobots/fobots.conf` | configuration |
 | `/etc/fobots/welcome.txt` | plages à ne jamais bannir, un CIDR par ligne (créé par `welcome add`) |
 | `/var/lib/fobots/ip_ranges.json` | cache des plages RDAP |
