@@ -25,3 +25,5 @@ ip_ranges.json.tmp
 welcome.txt
 watched.jsonl
 watched.jsonl.tmp
+build/
+dist/
