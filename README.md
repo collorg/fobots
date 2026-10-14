@@ -47,7 +47,7 @@ sudo ./banbot.py install --dry-run            # le plan, sans rien modifier
 sudo ./banbot.py install --log /var/log/gitlab/nginx/gitlab_access.log
 ```
 La commande est **idempotente** (on peut la relancer pour mettre à jour le programme et
-l'unité) et ne touche jamais une conf ou une liste blanche existantes. Elle :
+l'unité) et ne touche jamais une conf ou une liste welcome existantes. Elle :
 
 1. vérifie Python (3.7+) et installe `nftables` avec apt-get si `nft` manque (demande
    confirmation, ou `--yes`) ;
@@ -56,14 +56,14 @@ l'unité) et ne touche jamais une conf ou une liste blanche existantes. Elle :
    temps restant des bans ;
 3. crée l'utilisateur système `banbot` s'il manque ;
 4. installe le programme dans `/opt/banbot/`, la conf dans `/etc/banbot/banbot.conf` (avec
-   `--log` s'il est donné), une liste blanche vide `/etc/banbot/whitelist.txt`, le dossier
+   `--log` s'il est donné), une liste welcome vide `/etc/banbot/welcome.txt`, le dossier
    d'état `/var/lib/banbot` (0750, propriété de `banbot`) ;
 5. installe l'unité systemd, avec le groupe qui donne accès au log (détecté, sinon `adm` ;
    `--log-group` pour l'imposer), puis `systemctl daemon-reload` ;
 6. vérifie que l'utilisateur `banbot` peut lire le log, et dit quoi faire sinon.
 
 Le service n'est **ni activé ni démarré** par défaut : adapter la conf, remplir la liste
-blanche, essayer `/opt/banbot/banbot.py run --dry-run`, puis `systemctl enable --now banbot`
+welcome, essayer `/opt/banbot/banbot.py run --dry-run`, puis `systemctl enable --now banbot`
 (ou relancer `install` avec `--enable` / `--start`). `--destdir DIR` écrit les fichiers sous
 un préfixe sans toucher au système (tests, empaquetage).
 
@@ -102,7 +102,7 @@ tendu = 5 req/s pendant 30 min, critique = 2,5 req/s pendant 15 min.
 Les paliers par défaut ne sont **pas calibrés** sur ton serveur : lance d'abord
 avec `--dry-run -v` et regarde les lignes `charge : psi=…` (toutes les 5 minutes et
 à chaque changement de niveau) pour choisir `load_tense` / `load_critical`.
-Les faux positifs se corrigent avec `whitelist add`.
+Les faux positifs se corrigent avec `welcome add`.
 
 ## Un log par hôte : règles par cible
 
@@ -182,7 +182,7 @@ journalctl, et l'associe à l'état actuel des bans dans nft :
 ```
 banbot.py watched                 # 7 derniers jours (--since 12h, 3d…)
 banbot.py watched --active        # seulement celles dont le ban est actif
-banbot.py watched --cmd           # n'affiche que la commande whitelist add
+banbot.py watched --cmd           # n'affiche que la commande welcome add
 ```
 ```
 IP          BANS  REQ  DERNIER BAN       PLAGE        ÉTAT           ROUTE
@@ -190,13 +190,13 @@ IP          BANS  REQ  DERNIER BAN       PLAGE        ÉTAT           ROUTE
 20.1.1.1       2    6  2026-10-10 13:40  20.0.0.0/12  expiré         /api/v4/jobs/request
 
 Pour toutes les protéger :
-  banbot.py whitelist add 40.2.2.2/32 20.1.1.1/32
+  banbot.py welcome add 40.2.2.2/32 20.1.1.1/32
 ```
 Les IP sont agrégées sur la période : *BANS* = nombre de bans où elles ont été prises
 (une IP prise plusieurs fois est un suspect sérieux). Les bans expirant vite, c'est
 l'historique du fichier qui permet de les voir au retour d'une absence. L'état
 « actif/expiré » demande l'accès à nft (sinon `?`). Rien n'est ajouté automatiquement
-à la liste blanche.
+à la liste welcome.
 
 Limites : seules les requêtes vues dans l'heure avant le ban sont notées (5 000 IP
 gardées au plus, 200 par constat) ; les IP privées ne sont jamais comptées ; les lignes
@@ -207,19 +207,19 @@ dont l'agent ne se lit pas (autre format de log) ne sont pas surveillées. Les
 ## Emplacements des fichiers
 
 Les chemins par défaut sont absolus : le résultat ne dépend jamais du dossier d'où l'on
-lance une commande, et le démon, `whitelist`, `bans` et `watched` voient les mêmes fichiers.
+lance une commande, et le démon, `welcome`, `bans` et `watched` voient les mêmes fichiers.
 
 | Quoi | Où | Pourquoi |
 |---|---|---|
-| Configuration, liste blanche | `/etc/banbot/` | décidées par l'administrateur ; le démon ne fait que les lire |
+| Configuration, liste welcome | `/etc/banbot/` | décidées par l'administrateur ; le démon ne fait que les lire |
 | Cache RDAP, constats surveillés | `/var/lib/banbot/` | état écrit par le démon (créé s'il manque, mode 0750) |
 | Journaux | journald (`journalctl -u banbot`) | aucun fichier |
 | Programme | `/opt/banbot/` ou `/usr/local/sbin/` | installation locale |
 
 **Droits :** le démon peut tourner sous un utilisateur dédié avec la seule capacité
 `CAP_NET_ADMIN` (voir `banbot.service.example`). Les commandes d'administration
-(`setup`, `bans`, `watched`, `whitelist add`) doivent s'exécuter **en root (`sudo`)** :
-elles lisent ou modifient nft, et `whitelist add` écrit dans `/etc/banbot/`.
+(`setup`, `bans`, `watched`, `welcome add`) doivent s'exécuter **en root (`sudo`)** :
+elles lisent ou modifient nft, et `welcome add` écrit dans `/etc/banbot/`.
 
 ## Configuration
 
@@ -233,7 +233,7 @@ conf.** Voir `banbot.conf.example` pour toutes les clés :
 | `log` | aucun | log suivi en continu (rotation gérée) ; voir aussi les sections `[site:NOM]` |
 | `dir` | `/var/lib/banbot` | dossier d'état : `ip_ranges.json`, `watched.jsonl` (créé s'il manque) |
 | `cache` | `<dir>/ip_ranges.json` | cache des plages RDAP |
-| `whitelist` | `whitelist.txt` à côté de la conf utilisée, sinon `/etc/banbot/` | plages à ne jamais bannir |
+| `welcome` | `welcome.txt` à côté de la conf utilisée, sinon `/etc/banbot/` | plages à ne jamais bannir |
 | `threshold` | 5 | req/s d'une plage au-delà desquelles on bannit |
 | `prefix_threshold` | = `threshold` | req/s d'un `/16` non résolu qui autorisent RDAP |
 | `sustain`, `window` | 1, 60 | secondes au-dessus du seuil exigées, dans la fenêtre |
@@ -268,24 +268,24 @@ banbot.py run [-t SEUIL] [-p SEUIL_PREFIXE] [--log FICHIER] [fichiers…]   (san
 banbot.py install [--dry-run] [--log F] installe nftables, l'utilisateur, la conf, l'unité systemd
 banbot.py setup                      crée la table, les sets et les règles nft
 banbot.py bans                       bans actifs et temps restant
-banbot.py whitelist add CIDR…        liste blanche + retrait des bans concernés
-banbot.py whitelist list
+banbot.py welcome add CIDR…        liste welcome + retrait des bans concernés
+banbot.py welcome list
 banbot.py watched [--active] [--cmd]  IP surveillées (watch_*) prises dans un ban
 ```
 Options communes : `-f CONF`, `--dir`, `-c`, `-w`, `--ban-time`, `--nft-bin`,
 `--dry-run`, `-v`. `--dry-run` n'appelle pas nft : il affiche les commandes et
 simule les sets en mémoire.
 
-## Liste blanche
+## Liste welcome
 
 ```
-banbot.py whitelist add 17.0.0.0/8 -f /etc/banbot/banbot.conf
+banbot.py welcome add 17.0.0.0/8 -f /etc/banbot/banbot.conf
 ```
-La plage est ajoutée à `whitelist.txt` (le démon cesse aussitôt de la bannir : il
+La plage est ajoutée à `welcome.txt` (le démon cesse aussitôt de la bannir : il
 relit le fichier avant chaque ban), puis les bans qui la touchent sont retirés.
 Si la plage est incluse dans un ban plus large, le reste est remis avec son temps
 restant (`17.1.0.0/16` dans `17.0.0.0/8` donne 8 morceaux autour du `/16`).
-Une plage bannie qui recoupe la liste blanche l'est sans la partie protégée.
+Une plage bannie qui recoupe la liste welcome l'est sans la partie protégée.
 
 ## Remise à zéro
 
@@ -348,7 +348,7 @@ Mémoire : au plus 200 000 IP suivies. Les IPv4 et IPv6 sont traitées de la mê
 
 - **Plage = allocation RIR** par défaut (voir `ban_scope = observed` pour resserrer), souvent très large (`17.0.0.0/8`, `43.0.0.0/9`,
   `36.128.0.0/10`). Un ban frappe toute l'allocation, y compris des visiteurs
-  légitimes. Garde-fou : le ban expire, la liste blanche corrige. Les réponses
+  légitimes. Garde-fou : le ban expire, la liste welcome corrige. Les réponses
   RDAP plus larges que `/8` (IPv4) ou `/16` (IPv6) sont rejetées.
 - **Détection sur le log**, donc *après* la requête : nginx n'écrit une ligne
   qu'une fois la réponse terminée. Un serveur déjà saturé écrit ses logs en
@@ -357,7 +357,7 @@ Mémoire : au plus 200 000 IP suivies. Les IPv4 et IPv6 sont traitées de la mê
 - **Pas d'escalade** : un scraper banni revient à l'expiration avec la même durée.
   Pas de réponse HTTP 429 préalable, pas de durée croissante.
 - **Pas de disjoncteur** : aucun plafond sur le nombre ou la taille des bans (choix
-  assumé : la liste blanche sert de rattrapage). Avec le durcissement par la charge,
+  assumé : la liste welcome sert de rattrapage). Avec le durcissement par la charge,
   les seuils peuvent descendre jusqu'à `min_threshold` : surveiller les premiers jours.
 - Les plages RDAP non résolues (budget épuisé, échec réseau) ne sont jamais
   bannies ; l'échec est journalisé et retenté plus tard.
@@ -372,6 +372,6 @@ Mémoire : au plus 200 000 IP suivies. Les IPv4 et IPv6 sont traitées de la mê
 | `banbot.conf.example` | configuration d'exemple |
 | `banbot.service.example` | unité systemd d'exemple |
 | `/etc/banbot/banbot.conf` | configuration |
-| `/etc/banbot/whitelist.txt` | plages à ne jamais bannir, un CIDR par ligne (créé par `whitelist add`) |
+| `/etc/banbot/welcome.txt` | plages à ne jamais bannir, un CIDR par ligne (créé par `welcome add`) |
 | `/var/lib/banbot/ip_ranges.json` | cache des plages RDAP |
 | `/var/lib/banbot/watched.jsonl` | constats « IP surveillée prise dans un ban » (si `watch_*`) |

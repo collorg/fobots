@@ -7,11 +7,11 @@
 #   install -D -m 0644 banbot.conf.example /etc/banbot/banbot.conf   # puis l'éditer
 #   systemctl daemon-reload && systemctl enable --now banbot
 #
-# Fichiers : conf et liste blanche dans /etc/banbot/, état dans /var/lib/banbot/ (voir README).
+# Fichiers : conf et liste welcome dans /etc/banbot/, état dans /var/lib/banbot/ (voir README).
 # Commandes d'administration : en ROOT (sudo), car elles lisent/modifient nft et /etc/banbot.
 # Suivi : journalctl -u banbot -f        Bans actifs : sudo /opt/banbot/banbot.py bans
-# Liste blanche (retire aussi les bans) :
-#   sudo /opt/banbot/banbot.py whitelist add 17.0.0.0/8
+# Liste welcome (retire aussi les bans) :
+#   sudo /opt/banbot/banbot.py welcome add 17.0.0.0/8
 # Plages les plus actives : systemctl kill -s USR1 banbot   (puis journalctl)
 
 [Unit]

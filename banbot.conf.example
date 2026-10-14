@@ -6,9 +6,9 @@ log = /var/log/gitlab/nginx/gitlab_access.log
 # Dossier d'état (créé s'il manque) : cache RDAP et constats surveillés.
 # dir = /var/lib/banbot
 # cache = ip_ranges.json        # plages RDAP trouvées (défaut: <dir>/ip_ranges.json)
-# La liste blanche est whitelist.txt à côté de ce fichier (donc /etc/banbot/whitelist.txt) ;
+# La liste welcome est welcome.txt à côté de ce fichier (donc /etc/banbot/welcome.txt) ;
 # pour la changer :
-# whitelist = /etc/banbot/whitelist.txt
+# welcome = /etc/banbot/welcome.txt
 
 threshold = 5        # req/s d'une plage au-delà desquelles on bannit
 # prefix_threshold = 5 # req/s d'un /16 non résolu qui déclenchent une requête RDAP
@@ -47,7 +47,7 @@ ban_time = 1h        # durée d'un ban : 30m, 1h, 1d…
 
 # Surveillance opt-in : ces requêtes sont comptées comme les autres (aucune exemption), mais
 # quand leur plage est bannie, le journal indique (WATCH) quelles IP correspondaient et la
-# commande `whitelist add` pour les protéger. Expressions régulières ; si les deux sont
+# commande `welcome add` pour les protéger. Expressions régulières ; si les deux sont
 # données, les deux doivent correspondre.
 # watch_agent = ^gitlab-runner
 # watch_path = ^/api/v4/

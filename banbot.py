@@ -9,8 +9,8 @@ set nftables dès que le seuil est dépassé. Les bans expirent seuls (timeout n
   tail -F /var/log/gitlab/nginx/gitlab_access.log | banbot.py run -t 5 -
   banbot.py setup                    # crée table, sets et règles nft (idempotent)
   banbot.py bans                     # bans actifs avec temps restant
-  banbot.py whitelist add 17.0.0.0/8 # liste blanche + retrait des bans concernés
-  banbot.py whitelist list
+  banbot.py welcome add 17.0.0.0/8 # liste welcome + retrait des bans concernés
+  banbot.py welcome list
 
 Les plages viennent de RDAP (successeur de whois), interrogé en tâche de fond
 seulement pour un préfixe /16 (IPv6 : /32) qui dépasse déjà --prefix-threshold,
@@ -52,7 +52,7 @@ RDAP_URL = "https://rdap.org/ip/{}"  # redirige vers le RIR compétent
 SETS = {4: "banned4", 6: "banned6"}
 # Une réponse RDAP plus large que ça est rejetée (garde-fou contre 0.0.0.0/0).
 MIN_PREFIX = {4: 8, 6: 16}
-CONF_DIR = "/etc/banbot"      # configuration et liste blanche (décidées par l'administrateur)
+CONF_DIR = "/etc/banbot"      # configuration et liste welcome (décidées par l'administrateur)
 STATE_DIR = "/var/lib/banbot"  # cache RDAP et constats (écrits par le démon)
 INSTALL_DIR = "/opt/banbot"
 UNIT_PATH = "/etc/systemd/system/banbot.service"
@@ -159,15 +159,15 @@ def wide_blocks(ips, lo, hi, shift, coverage):
     return sorted(out)
 
 
-def subtract(net, whitelist):
-    """Morceaux de `net` qui ne touchent pas la liste blanche (CIDR : inclus ou disjoint)."""
-    for w in whitelist:
+def subtract(net, welcome):
+    """Morceaux de `net` qui ne touchent pas la liste welcome (CIDR : inclus ou disjoint)."""
+    for w in welcome:
         if w.version == net.version and net.overlaps(w):
             if net.subnet_of(w):
                 return []
             pieces = []
             for piece in net.address_exclude(w):
-                pieces += subtract(piece, whitelist)
+                pieces += subtract(piece, welcome)
             return pieces
     return [net]
 
@@ -426,9 +426,9 @@ class Nft:
             self.sim[ver] += [(n, t) for n, t in adds]
 
 
-# --- liste blanche et bans ---------------------------------------------------
+# --- liste welcome et bans ---------------------------------------------------
 
-class Whitelist:
+class Welcome:
     """Liste de CIDR relue automatiquement quand le fichier change."""
 
     def __init__(self, path):
@@ -452,9 +452,9 @@ class Whitelist:
                     try:
                         nets.append(ipaddress.ip_network(line, strict=False))
                     except ValueError:
-                        log.warning("liste blanche : ligne ignorée %r", line)
+                        log.warning("liste welcome : ligne ignorée %r", line)
         self.nets = nets
-        log.info("liste blanche : %d plage(s) dans %s%s", len(nets), os.path.abspath(self.path),
+        log.info("liste welcome : %d plage(s) dans %s%s", len(nets), os.path.abspath(self.path),
                  "" if mtime is not None else " (fichier absent)")
 
     @staticmethod
@@ -465,20 +465,20 @@ class Whitelist:
 
 
 class Banner:
-    def __init__(self, nft, whitelist, ban_seconds):
-        self.nft, self.whitelist, self.ban_seconds = nft, whitelist, ban_seconds
+    def __init__(self, nft, welcome, ban_seconds):
+        self.nft, self.welcome, self.ban_seconds = nft, welcome, ban_seconds
 
     def ban(self, rng, reason, seconds=None):
-        """Bannit la plage (hors liste blanche, sans doublon ni conflit nft)."""
+        """Bannit la plage (hors liste welcome, sans doublon ni conflit nft)."""
         seconds = seconds or self.ban_seconds
-        self.whitelist.reload()
+        self.welcome.reload()
         ver = rng[0]
         pieces = []
         for n in range_nets(rng):
-            pieces += subtract(n, self.whitelist.nets)
+            pieces += subtract(n, self.welcome.nets)
         pieces = list(ipaddress.collapse_addresses(pieces))
         if not pieces:
-            log.info("%s : entièrement en liste blanche, pas de ban", fmt_range(rng))
+            log.info("%s : entièrement dans la liste welcome, pas de ban", fmt_range(rng))
             return False
         for attempt in (1, 2):
             elems = self.nft.elements(ver)
@@ -507,7 +507,7 @@ class Banner:
         return True
 
 
-def whitelist_add(nft, net, ban_seconds):
+def welcome_add(nft, net, ban_seconds):
     """Retire des sets les bans qui touchent `net` ; garde le reste des plus larges."""
     ver = net.version
     existing = nft.elements(ver)
@@ -768,7 +768,7 @@ class Detector:
                 "ips": [[ip, n, path] for n, ip, path in hit[:WATCH_EVENT_IPS]]})
         top = hit[:10]
         log.warning("WATCH %s banni : %d IP surveillée(s), %d requête(s) : %s%s ; "
-                    "pour les protéger : banbot.py whitelist add %s",
+                    "pour les protéger : banbot.py welcome add %s",
                     fmt_range(key), len(hit), sum(n for n, _, _ in hit),
                     ", ".join(f"{ip} ({n} req, {path})" for n, ip, path in top),
                     f" (+{len(hit) - len(top)} autres)" if len(hit) > len(top) else "",
@@ -1022,11 +1022,11 @@ def log_lines(args):
 # --- commandes ---------------------------------------------------------------
 
 def paths(args):
-    """(cache RDAP, liste blanche). La liste blanche se trouve à côté de la conf utilisée,
+    """(cache RDAP, liste welcome). La liste welcome se trouve à côté de la conf utilisée,
     sinon dans CONF_DIR : jamais relative au dossier courant."""
     wl_base = os.path.dirname(os.path.abspath(args.config)) if args.config else CONF_DIR
     return (args.cache or os.path.join(args.dir, "ip_ranges.json"),
-            args.whitelist or os.path.join(wl_base, "whitelist.txt"))
+            args.welcome or os.path.join(wl_base, "welcome.txt"))
 
 
 def ensure_dir(path):
@@ -1046,7 +1046,7 @@ def cmd_run(args):
     cache, wl_path = paths(args)
     ensure_dir(os.path.dirname(os.path.abspath(cache)))
     ensure_dir(os.path.dirname(os.path.abspath(watch_file_path(args))))
-    store, wl = RangeStore(cache), Whitelist(wl_path)
+    store, wl = RangeStore(cache), Welcome(wl_path)
     nft = Nft(args.nft_bin, args.dry_run)
     try:
         for ver in (4, 6):
@@ -1216,7 +1216,7 @@ def cmd_watched(args):
     if not rows:
         print("aucune IP surveillée dans un ban actif")
         return 0
-    cmd = "banbot.py whitelist add " + " ".join(str(ipaddress.ip_network(ip)) for ip, _ in rows)
+    cmd = "banbot.py welcome add " + " ".join(str(ipaddress.ip_network(ip)) for ip, _ in rows)
     if args.config:
         cmd += f" -f {args.config}"
     if args.cmd:
@@ -1407,11 +1407,11 @@ class Installer:
                 text = re.sub(r"(?m)^log\s*=.*$", lambda m: f"log = {self.args.log}", text)
             self.write(conf, text, 0o644)
             self.say("ok", f"configuration : {conf}")
-        wl = os.path.join(CONF_DIR, "whitelist.txt")
+        wl = os.path.join(CONF_DIR, "welcome.txt")
         if self.read(wl) is None:
             self.write(wl, "# Plages à ne jamais bannir, un CIDR par ligne.\n"
-                       "# Ajouter avec : banbot.py whitelist add CIDR (retire aussi les bans concernés)\n", 0o644)
-            self.say("ok", f"liste blanche : {wl}")
+                       "# Ajouter avec : banbot.py welcome add CIDR (retire aussi les bans concernés)\n", 0o644)
+            self.say("ok", f"liste welcome : {wl}")
 
         self.ensure_dir(STATE_DIR, 0o750, (SERVICE_USER, SERVICE_USER))
         self.say("ok", f"dossier d'état : {STATE_DIR}")
@@ -1467,7 +1467,7 @@ class Installer:
         print(f"""
 Étapes suivantes :
   1. vérifier / adapter {CONF_DIR}/banbot.conf (log, seuils)
-  2. ajouter vos réseaux à {CONF_DIR}/whitelist.txt (administrateurs, CI, supervision)
+  2. ajouter vos réseaux à {CONF_DIR}/welcome.txt (administrateurs, CI, supervision)
   3. essai sans rien bannir : {INSTALL_DIR}/banbot.py run --dry-run
   4. démarrer : systemctl enable --now banbot      suivre : journalctl -u banbot -f""")
 
@@ -1477,10 +1477,10 @@ def cmd_install(args):
     return 0
 
 
-def cmd_whitelist(args):
+def cmd_welcome(args):
     _, wl_path = paths(args)
     if args.action == "list":
-        for n in Whitelist(wl_path).nets:
+        for n in Welcome(wl_path).nets:
             print(n)
         return 0
     nets = []
@@ -1492,7 +1492,7 @@ def cmd_whitelist(args):
             return 2
     try:
         os.makedirs(os.path.dirname(os.path.abspath(wl_path)), exist_ok=True)
-        Whitelist.append(wl_path, nets)  # d'abord : le démon cesse de bannir
+        Welcome.append(wl_path, nets)  # d'abord : le démon cesse de bannir
     except OSError as e:
         print(f"écriture de {wl_path} impossible : {e} (droits ? lancer avec sudo)",
               file=sys.stderr)
@@ -1500,17 +1500,17 @@ def cmd_whitelist(args):
     nft = Nft(args.nft_bin, args.dry_run)
     for net in nets:
         try:
-            deletes, adds = whitelist_add(nft, net, args.ban_seconds)
+            deletes, adds = welcome_add(nft, net, args.ban_seconds)
         except NftError as e:
             print(f"{net} ajoutée à {wl_path}, mais nft a échoué : {e}", file=sys.stderr)
             return 1
-        print(f"{net} : liste blanche ; {len(deletes)} ban(s) retiré(s)"
+        print(f"{net} : liste welcome ; {len(deletes)} ban(s) retiré(s)"
               + (f", {len(adds)} morceau(x) du reste conservé(s)" if adds else ""))
     return 0
 
 
 CONF_KEYS = {  # clé du fichier -> (destination argparse, conversion)
-    "dir": ("dir", str), "cache": ("cache", str), "whitelist": ("whitelist", str),
+    "dir": ("dir", str), "cache": ("cache", str), "welcome": ("welcome", str),
     "log": ("log", str), "nft_bin": ("nft_bin", str),
     "ban_time": ("ban_seconds", parse_duration),
     "threshold": ("threshold", float), "prefix_threshold": ("prefix_threshold", float),
@@ -1528,7 +1528,7 @@ CONF_KEYS = {  # clé du fichier -> (destination argparse, conversion)
     "watch_file": ("watch_file", str),
     "from_start": ("from_start", lambda v: v.lower() in ("1", "true", "yes", "oui", "on")),
 }
-PATH_KEYS = {"dir", "cache", "whitelist", "log", "watch_file"}
+PATH_KEYS = {"dir", "cache", "welcome", "log", "watch_file"}
 # /etc d'abord : le résultat ne dépend pas du dossier courant (./banbot.conf sert au développement)
 CONF_SEARCH = (os.path.join(CONF_DIR, "banbot.conf"), "banbot.conf")
 
@@ -1620,8 +1620,8 @@ def main(argv=None):
     common.add_argument("--dir", default=STATE_DIR,
                         help=f"dossier d'état : ip_ranges.json, watched.jsonl (défaut: {STATE_DIR})")
     common.add_argument("-c", "--cache", help="fichier des plages RDAP (défaut: DIR/ip_ranges.json)")
-    common.add_argument("-w", "--whitelist", help="liste blanche (défaut: whitelist.txt à côté de la conf, "
-                        f"sinon {CONF_DIR}/whitelist.txt)")
+    common.add_argument("-w", "--welcome", help="liste welcome (défaut: welcome.txt à côté de la conf, "
+                        f"sinon {CONF_DIR}/welcome.txt)")
     common.add_argument("--watch-file",
                         help="fichier des constats surveillés (défaut: DIR/watched.jsonl)")
     common.add_argument("--ban-time", dest="ban_seconds", type=parse_duration, default=3600,
@@ -1715,13 +1715,13 @@ def main(argv=None):
                     help="période à considérer : 12h, 3d… (défaut: 7d)")
     wd.add_argument("--active", action="store_true", help="seulement celles dont le ban est actif")
     wd.add_argument("--cmd", action="store_true",
-                    help="n'affiche que la commande `whitelist add` correspondante")
+                    help="n'affiche que la commande `welcome add` correspondante")
     wd.set_defaults(fn=cmd_watched)
 
-    w = sub.add_parser("whitelist", parents=[common], help="gère la liste blanche")
+    w = sub.add_parser("welcome", parents=[common], help="gère la liste welcome")
     w.add_argument("action", choices=["add", "list"])
     w.add_argument("nets", nargs="*", help="CIDR à ajouter (add)")
-    w.set_defaults(fn=cmd_whitelist)
+    w.set_defaults(fn=cmd_welcome)
 
     for p in sub.choices.values():
         p.set_defaults(config=conf_path, **conf)  # ligne de commande > conf > défauts
@@ -1730,8 +1730,8 @@ def main(argv=None):
         for name in ("tense_factor", "critical_factor"):
             if not 0 < getattr(args, name) <= 1:
                 ap.error(f"--{name.replace('_', '-')} doit être dans ]0, 1]")
-    if args.cmd == "whitelist" and args.action == "add" and not args.nets:
-        ap.error("whitelist add : indiquer au moins une plage")
+    if args.cmd == "welcome" and args.action == "add" and not args.nets:
+        ap.error("welcome add : indiquer au moins une plage")
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="%(asctime)s %(levelname)s %(message)s", stream=sys.stderr)
     try:
