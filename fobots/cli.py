@@ -345,10 +345,10 @@ def main(argv=None):
     r.add_argument("-p", "--prefix-threshold", type=float,
                    help="req/s of an unresolved /16 prefix that trigger an RDAP request "
                         "(default: = --threshold)")
-    r.add_argument("--sustain", type=int, default=1,
-                   help="number of seconds above the threshold required (default: 1)")
+    r.add_argument("--sustain", type=int, default=5,
+                   help="consecutive seconds above the threshold required (default: 5)")
     r.add_argument("--window", type=int, default=60,
-                   help="window in seconds for --sustain (default: 60)")
+                   help="window in seconds over which IPs are tracked (default: 60)")
     r.add_argument("--load-signal", choices=["none", "psi", "loadavg"], default="none",
                    help="hardens the rules according to the load: psi (reactive), loadavg "
                         "(load/cores) or none (default)")

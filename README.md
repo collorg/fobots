@@ -26,7 +26,7 @@ kernel 5.4): `apt install nftables` (version 0.9.3).
    the RIR allocation that contains it (obtained through RDAP, the successor of whois).
    The owner's details are not kept: only the range matters.
 2. Requests are counted per range and per second. When a range exceeds `threshold` req/s
-   (for `sustain` seconds), it is banned for `ban_time`.
+   (for `sustain` consecutive seconds, 5 by default: a page load is a short burst), it is banned for `ban_time`.
 3. Unknown ranges are not looked up at random: RDAP is only called (in the background) for a
    `/16` prefix (`/32` in IPv6) that already exceeds `prefix_threshold` req/s, with an hourly
    budget, a delay between requests and a pause on HTTP 429. The ranges found are saved on
@@ -267,7 +267,7 @@ the configuration file. **The command line overrides the configuration.** See
 | `welcome` | `welcome.txt` next to the configuration used, otherwise `/etc/fobots/` | ranges never to ban |
 | `threshold` | 5 | req/s of a range above which it is banned |
 | `prefix_threshold` | = `threshold` | req/s of an unresolved `/16` that allow RDAP |
-| `sustain`, `window` | 1, 60 | seconds above the threshold required, within the window |
+| `sustain`, `window` | 5, 60 | consecutive seconds above the threshold required; tracking window (s) |
 | `ban_time` | 1h | duration of a ban (`30m`, `1h`, `1d`) |
 | `ban_scope` | `allocation` | `allocation`: ban the whole RDAP range; `observed`: only the groups of IPs seen inside it |
 | `observed_prefix` | 20 | `observed`: maximum extent of a group of IPs (IPv4 prefix; IPv6: `/48`) |

@@ -199,8 +199,10 @@ class Detector:
             if n > self.threshold:
                 over = self.over[key]
                 over.add(sec)
-                over.intersection_update(range(sec - self.window + 1, sec + 1))
-                if len(over) >= self.sustain:
+                over.intersection_update(range(sec - max(self.window, self.sustain) + 1, sec + 1))
+                # the excess must last `sustain` consecutive seconds (a legitimate burst,
+                # e.g. a page loading, is short)
+                if all(s in over for s in range(sec - self.sustain + 1, sec + 1)):
                     self.trigger(key, sec, n, ip)
         elif n > self.prefix_threshold:
             self.rdap.request(addr or ipaddress.ip_address(ip), key)

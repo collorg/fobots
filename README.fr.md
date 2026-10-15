@@ -30,7 +30,7 @@ noyau 5.4) : `apt install nftables` (version 0.9.3).
    le successeur de whois). Le détail du propriétaire n'est pas conservé : seule
    la plage compte.
 2. Les requêtes sont comptées par plage et par seconde. Quand une plage dépasse
-   `threshold` req/s (pendant `sustain` secondes), elle est bannie pour
+   `threshold` req/s (pendant `sustain` secondes consécutives, 5 par défaut : le chargement d'une page est une courte salve), elle est bannie pour
    `ban_time`.
 3. Les plages inconnues ne sont pas interrogées au hasard : RDAP n'est appelé
    (en tâche de fond) que pour un préfixe `/16` (`/32` en IPv6) qui dépasse déjà
@@ -278,7 +278,7 @@ conf.** Voir `fobots.conf.example` pour toutes les clés :
 | `welcome` | `welcome.txt` à côté de la conf utilisée, sinon `/etc/fobots/` | plages à ne jamais bannir |
 | `threshold` | 5 | req/s d'une plage au-delà desquelles on bannit |
 | `prefix_threshold` | = `threshold` | req/s d'un `/16` non résolu qui autorisent RDAP |
-| `sustain`, `window` | 1, 60 | secondes au-dessus du seuil exigées, dans la fenêtre |
+| `sustain`, `window` | 5, 60 | secondes consécutives au-dessus du seuil exigées ; fenêtre de suivi (s) |
 | `ban_time` | 1h | durée d'un ban (`30m`, `1h`, `1d`) |
 | `ban_scope` | `allocation` | `allocation` : on bannit la plage RDAP entière ; `observed` : seulement les groupes d'IP vues dedans |
 | `observed_prefix` | 20 | `observed` : étendue maximale d'un groupe d'IP (préfixe IPv4 ; IPv6 : `/48`) |

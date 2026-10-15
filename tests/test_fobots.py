@@ -404,7 +404,16 @@ class DetectorAllocation(DetectorBase):
             self.feed(["43.1.1.1"] * 3, 2)
         self.assertEqual(self.nft.banned(), ["43.0.0.0/9"])
 
-    def test_sustain_window_forgets_old_seconds(self):
+    def test_sustain_requires_consecutive_seconds(self):
+        self.detector([self.ALLOC], threshold=2, sustain=3)
+        for sec in (0, 1, 3, 4):  # second 2 is quiet: the excess is interrupted
+            self.feed(["43.1.1.1"] * 3, sec)
+        self.assertEqual(self.nft.banned(), [])
+        with self.assertLogs("fobots", "INFO"):
+            self.feed(["43.1.1.1"] * 3, 5)
+        self.assertEqual(self.nft.banned(), ["43.0.0.0/9"])
+
+    def test_sustain_forgets_old_seconds(self):
         self.detector([self.ALLOC], threshold=2, sustain=2, window=5)
         self.feed(["43.1.1.1"] * 3, 0)
         self.feed(["43.1.1.1"] * 3, 30)
@@ -794,7 +803,7 @@ class Commands(TmpDirCase):
         log_path = self.write("access.log", "".join(line(f"43.1.1.{i}", 0) for i in range(8)))
         rc_file = self.write("ranges.json", json.dumps([[4, ip("43.0.0.0"), ip("43.127.255.255")]]))
         rc, out, err = self.run_main("run", "--dry-run", "--dir", self.dir, "-c", rc_file,
-                                     "-w", self.path("w.txt"), "-t", "5", log_path)
+                                     "-w", self.path("w.txt"), "-t", "5", "--sustain", "1", log_path)
         self.assertEqual(rc, 0)
         self.assertIn("add element inet fobots banned4 { 43.0.0.0/9 timeout 3600s }", out)
         self.assertIn("BAN 43.0.0.0/9 for 3600 s", err)
@@ -803,7 +812,7 @@ class Commands(TmpDirCase):
         log_path = self.write("access.log", "".join(line(f"43.1.1.{i}", 0) for i in range(8)))
         rc_file = self.write("ranges.json", json.dumps([[4, ip("43.0.0.0"), ip("43.127.255.255")]]))
         rc, out, err = self.run_main("run", "--dry-run", "--dir", self.dir, "-c", rc_file,
-                                     "-w", self.path("w.txt"), "-t", "5", "--ban-scope", "observed", log_path)
+                                     "-w", self.path("w.txt"), "-t", "5", "--sustain", "1", "--ban-scope", "observed", log_path)
         self.assertEqual(rc, 0)
         self.assertNotIn("43.0.0.0/9", out)
         self.assertIn("43.1.1.", out)

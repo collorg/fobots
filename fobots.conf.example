@@ -12,8 +12,8 @@ log = /var/log/gitlab/nginx/gitlab_access.log
 
 threshold = 5        # req/s of a range above which it is banned
 # prefix_threshold = 5 # req/s of an unresolved /16 that trigger an RDAP request
-sustain = 1          # seconds above the threshold required
-window = 60          # window (s) for sustain
+sustain = 5          # consecutive seconds above the threshold required (a page load is a short burst)
+window = 60          # window (s) over which the IPs seen are tracked
 ban_time = 1h        # duration of a ban: 30m, 1h, 1d…
 
 # Load-based hardening (disabled by default).

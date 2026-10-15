@@ -95,7 +95,7 @@ json.dump([[ipaddress.ip_address(s).version, int(ipaddress.ip_address(s)), int(i
            for s, e in ranges], open(sys.argv[1], "w"))
 PY
 : > "$W/welcome.txt"
-run() { fobots run --dir "$W" --cache "$W/ranges.json" -w "$W/welcome.txt" "$@" 2>"$W/err"; }
+run() { fobots run --dir "$W" --cache "$W/ranges.json" -w "$W/welcome.txt" --sustain 1 "$@" 2>"$W/err"; }  # one burst is enough here
 reset() { "$NFT" flush set inet fobots banned4; "$NFT" flush set inet fobots banned6; }
 
 echo "nft: $("$NFT" --version)   kernel: $(uname -r)"
@@ -120,6 +120,12 @@ equal "exit status" $? 0
 has "the allocation 43.0.0.0/9 is banned" 43.0.0.0/9
 out=$(fobots bans --dir "$W" 2>&1)
 case $out in *43.0.0.0/9*) ok "fobots bans lists it" ;; *) bad "fobots bans lists it ($out)" ;; esac
+
+section "a short burst is not banned (sustain)"
+reset
+mklog "$W/log" $(seq_ips 43.1.1. 1 8)
+run -t 5 --sustain 5 "$W/log"
+equal "a one-second burst is tolerated" "$(covered 4)" 0
 
 section "tight ban (ban_scope = observed)"
 reset
