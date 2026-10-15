@@ -454,6 +454,7 @@ def cmd_record(args):
         return 1
     interval = 5.0 if args.interval is None else args.interval
     rec = Recorder(probe, args.record, tense, critical, interval, logs=args.record_logs)
+    rec.start(" ".join(f"{h}@{u}" if h else u for h, u in targets), args.load_probe_timeout)
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     log.info("recording to %s: one measure every %g s, readings written from %g s "
              "(Ctrl-C to stop; `fobots probe --report %s` to read)",

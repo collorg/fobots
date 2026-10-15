@@ -170,6 +170,17 @@ for memory), memory available ≤ 15 %, swap ≥ 100 pages/s, accept queue ≥ 1
 points, not recommendations: the point is to see, on **your** machine, which signal deserves
 to be used. Let it run until a few slowdowns have happened.
 
+At the end, `--report` writes a **suggested configuration** from what was recorded: `load_probe_url`
+(kept in a header line of the file), `load_tense` (above the normal jitter, and above the short
+excursions of 20 s or less that are not slowdowns) and `load_critical` (under the median peak of the real
+slowdowns), each line with its justification, and a **replay** of the daemon's rules over the recording
+("with 1 s / 3 s you would have been tense 38 % of the time; with 1.5 s / 4 s, 12 %"). If a reading the
+daemon can use (`psi`, `loadavg`) moved before the page in at least two thirds of the slowdowns, with at
+least 20 s of advance and under 5 % of false alarms, it is offered as an alternative (the daemon takes one
+signal); the other readings are only reported as observations. Nothing is suggested without enough data:
+500 normal measures over 2 hours for the levels, 3 slowdowns to compare the signals. The values are a
+starting point: review them after the first real incident.
+
 Add `--log /var/log/nginx/access.log` (repeatable) to couple the recording with the access logs: each
 measure then also stores the requests/s, the share of 5xx answers (a saturated backend) and the number
 of distinct IPs that arrived since the previous one, and the report adds two rows: *requests/s ≥ 2×

@@ -11,6 +11,7 @@ import collections
 import http.client
 import json
 import logging
+import math
 import os
 import re
 import socket
@@ -28,6 +29,15 @@ GAP_FACTOR = 3           # a measure later than this x the interval is recorded 
 MAX_BYTES = 20 << 20     # the file is renamed FILE.1 above this size
 WEB_PORTS = (80, 443)
 TOP_PROCS = 8
+MIN_MEASURES = 500       # normal measures needed before suggesting levels
+MIN_SPAN = 7200          # seconds recorded needed before suggesting levels
+MIN_EPISODES = 3         # slowdowns needed before comparing the other signals
+MIN_KNOWN = 10           # normal readings needed to judge the false alarms of a reading
+SHORT_EPISODE = 20       # seconds: a slowdown this short or less is an excursion, not an incident
+MAX_FALSE = 0.05         # false alarms accepted of a reading proposed as a signal
+LEAD_SHARE = 2 / 3       # share of the slowdowns it must precede
+MIN_LEAD = 20            # seconds of median advance
+SIM_MAX_STEP = 30        # seconds counted for one sample in the replay
 EPISODE_GAP = 120        # seconds without snapshot: the next slowdown is another episode
 
 LOG_RE = re.compile(r'^(\S+) .*?"[A-Z]+ [^"]*" (\d{3}) ')
@@ -243,6 +253,12 @@ class Recorder:
         self.logs = LogTail(logs) if logs else None
         self.rts = []  # response times of the normal measures since the last reading of normal times
 
+    def start(self, url, timeout):
+        """Header of a recording: what the report needs to write a configuration."""
+        self.write({"t": round(time.time(), 1), "kind": "start", "url": url, "interval": self.interval,
+                    "tense": self.tense, "critical": self.critical, "timeout": timeout,
+                    "logs": list(self.logs.files) if self.logs else []})
+
     def measure(self):
         """(worst response time, error text or None); a timeout counts as the timeout."""
         worst, err = 0.0, None
@@ -355,6 +371,170 @@ def episodes(records):
 
 
 
+def lead_stats(eps, normal, fn):
+    """How a reading (fn: system readings -> bool or None) behaves around the slowdowns:
+    (before, same, late, never, leads, false alarm share or None)."""
+    before = same = late = never = 0
+    leads = []
+    for e in eps:
+        t0 = e["snaps"][0]["t"]
+        hits = [r["t"] for r in e["pre"] + e["snaps"] if fn(r["sys"])]
+        if not hits:
+            never += 1
+        elif min(hits) < t0:
+            before += 1
+            leads.append(t0 - min(hits))
+        elif min(hits) == t0:
+            same += 1
+        else:
+            late += 1
+    known = [fn(s) for s in normal if fn(s) is not None]
+    return before, same, late, never, leads, (sum(known) / len(known) if len(known) >= MIN_KNOWN else None)
+
+
+
+def ceil_half(x):
+    return math.ceil(x * 2 - 1e-9) / 2
+
+
+
+def quantile(values, q):
+    v = sorted(values)
+    return v[min(len(v) - 1, int(q * len(v)))]
+
+
+
+def series(records, interval):
+    """[(time, response time)] of everything recorded, in order. The measures of normal times
+    are only stored by batch in each reading: spread them back at the measure interval."""
+    out = []
+    for r in records:
+        kind = r.get("kind")
+        if kind == "base":
+            rts = r.get("rts") or [r.get("rt")]
+            out += [(r["t"] - (len(rts) - 1 - i) * interval, v) for i, v in enumerate(rts) if v is not None]
+        elif kind in ("pre", "snap", "end") and r.get("rt") is not None:
+            out.append((r["t"], 99.0 if r.get("err") else r["rt"]))
+    return sorted(out)
+
+
+
+def simulate(points, tense, critical, recover, interval):
+    """Replays what LoadMonitor would have done: ([seconds at normal, tense, critical], level-ups)."""
+    level, below, spent, ups = 0, None, [0.0, 0.0, 0.0], 0
+    for i, (t, v) in enumerate(points):
+        target = (v >= tense) + (v >= critical)
+        if target >= level:
+            below = None
+            if target > level:
+                ups += level == 0
+                level = target
+        elif below is None:
+            below = t
+        elif t - below >= recover:
+            level, below = level - 1, None
+        nxt = points[i + 1][0] - t if i + 1 < len(points) else interval
+        spent[level] += min(nxt, SIM_MAX_STEP)
+    return spent, ups
+
+
+
+def suggest(records, base, eps, times, normal, out, recover=300):
+    """The configuration the recording supports. Says so when it does not support one."""
+    start = next((r for r in reversed(records) if r.get("kind") == "start"), {})
+    interval = start.get("interval") or 5.0
+    span = records[-1]["t"] - records[0]["t"]
+    out("\nSuggested configuration")
+    if len(times) < MIN_MEASURES or span < MIN_SPAN:
+        out(f"  Not enough normal data yet ({len(times)} measures over {span / 3600:.1f} h: "
+            f"need {MIN_MEASURES} over {MIN_SPAN // 3600} h). Let the recorder run.")
+        return
+    p99 = quantile(times, 0.99)
+    floor = max(start.get("tense") or 1.0, 1.0, ceil_half(2 * p99))
+    why_t = f"twice the p99 of {len(times)} normal measures ({p99:.2f} s)"
+    tense = floor
+    longs = [e for e in eps if e["snaps"][-1]["t"] - e["snaps"][0]["t"] > SHORT_EPISODE]
+    shorts = [e for e in eps if e not in longs]
+    peak = lambda e: max(r["rt"] if not r.get("err") else 99.0 for r in e["snaps"])
+    note = ""
+    if shorts:
+        sp = max(peak(e) for e in shorts)
+        cand = max(floor, ceil_half(sp * 1.05))
+        if cand > floor:
+            if not longs or cand <= 0.8 * min(peak(e) for e in longs):
+                tense, why_t = cand, (f"above the {len(shorts)} short excursion(s) of {SHORT_EPISODE} s or "
+                                      f"less (up to {sp:.1f} s), which are not slowdowns")
+            else:
+                note = (f"  Warning: short excursions up to {sp:.1f} s cannot be told from the start of the "
+                        "real slowdowns: they will raise the tense level.")
+    if longs:
+        peaks = [peak(e) for e in longs]
+        critical = min(max(peaks), max(2 * tense, ceil_half(0.8 * statistics.median(peaks))))
+        why_c = f"under the median peak of the {len(longs)} slowdown(s) lasting more than {SHORT_EPISODE} s " \
+                f"({', '.join(f'{x:.1f}' for x in sorted(peaks))} s)"
+    else:
+        critical, why_c = 3 * tense, "default ratio (no slowdown lasting more than "f"{SHORT_EPISODE} s recorded yet)"
+    out("  [fobots]")
+    out("  load_signal = probe")
+    out(f"  load_probe_url = {start.get('url') or '<the URL given to --url>'}")
+    out(f"  load_tense = {tense:g}       # {why_t}")
+    out(f"  load_critical = {critical:g}    # {why_c}")
+    if note:
+        out(note)
+    pts = series(records, interval)
+    for label, (ts, cs) in (("defaults 1 s / 3 s", (1.0, 3.0)), (f"suggested {tense:g} s / {critical:g} s", (tense, critical))):
+        spent, ups = simulate(pts, ts, cs, recover, interval)
+        tot = sum(spent) or 1.0
+        out(f"  replay, {label}: tense or critical {100 * (spent[1] + spent[2]) / tot:.1f} % of the time "
+            f"({ups} rise(s), critical {100 * spent[2] / tot:.1f} %), load_recover = {recover // 60} min")
+    if len(eps) < MIN_EPISODES:
+        out(f"  Other signals: {len(eps)} slowdown(s) recorded, {MIN_EPISODES} needed to compare them.")
+        return
+    usable = {"psi": ("pressure cpu or io >= 20 %, as the daemon computes it", "load_tense = 20, load_critical = 50",
+                      lambda s: _either(alarm("pressure cpu", s), alarm("pressure io", s))),
+              "loadavg": ("load average per core >= 1", "load_tense = 1, load_critical = 2",
+                          lambda s: alarm("load average / core", s))}
+    for name, (what, values, fn) in usable.items():
+        res = lead_stats(eps, normal, fn)
+        if good_lead(res, len(eps)):
+            out(f"  Alternative: `load_signal = {name}` ({what}) moved {lead_text(res, len(eps))}; "
+                f"{values}.")
+            out("    The daemon takes one signal: keep `probe` to measure what the users see, "
+                "or switch if earlier matters more.")
+    for name in ALARMS:
+        if name in ("pressure cpu", "pressure io", "load average / core"):
+            continue
+        res = lead_stats(eps, normal, lambda s, n=name: alarm(n, s, _limits(base)))
+        if good_lead(res, len(eps)):
+            out(f"  Observed: {name} moved {lead_text(res, len(eps))}. The daemon cannot use it as a signal yet.")
+
+
+
+def _either(a, b):
+    return None if a is None and b is None else bool(a) or bool(b)
+
+
+
+def _limits(base):
+    req = [r["sys"]["req_s"] for r in base if r["sys"].get("req_s") is not None]
+    return {"requests/s (log)": max(1.0, 2 * statistics.median(req))} if req else {}
+
+
+
+def good_lead(res, n):
+    before, _, _, _, leads, false = res
+    return (false is not None and false < MAX_FALSE and before >= LEAD_SHARE * n
+            and statistics.median(leads) >= MIN_LEAD)
+
+
+
+def lead_text(res, n):
+    before, _, _, _, leads, false = res
+    return (f"before the page in {before} of {n} slowdowns (median {statistics.median(leads):.0f} s ahead, "
+            f"{100 * false:.0f} % false alarms)")
+
+
+
 def report(path, out=print):
     records = read_records(path)
     if not records:
@@ -368,16 +548,16 @@ def report(path, out=print):
         f"{len(base)} reading(s) of normal times, {len(eps)} slowdown(s)"
         + (f", {len(gaps)} gap(s) in the measures (the machine or the recorder stalled)" if gaps else ""))
     times = [t for r in base for t in (r.get("rts") or [r.get("rt")]) if t is not None]
+    normal = [r["sys"] for r in base]
     if times:
         med, p95, mx = summarize(times)
-        tense = max(1.0, float(-(-2 * p95 // 1)))
-        out(f"\nNormal times ({len(times)} measures): median {med:.2f} s, p95 {p95:.2f} s, max {mx:.2f} s -> "
-            f"load_tense = {tense:g}, load_critical = {3 * tense:g} would stay quiet.")
+        out(f"\nNormal times ({len(times)} measures): median {med:.2f} s, p95 {p95:.2f} s, max {mx:.2f} s")
     if not eps:
         out("\nNo slowdown recorded yet: let the recorder run until one happens.")
+        suggest(records, base, eps, times, normal, out)
         return 0
+    limits = _limits(base)
     req = [r["sys"]["req_s"] for r in base if r["sys"].get("req_s") is not None]
-    limits = {"requests/s (log)": max(1.0, 2 * statistics.median(req))} if req else {}
     out("\nSlowdowns:")
     for i, e in enumerate(eps, 1):
         peak = max(e["snaps"], key=lambda r: (r["rt"], r["level"]))
@@ -396,29 +576,17 @@ def report(path, out=print):
                 + ("" if g["cpu_s"] is None else f", {g['cpu_s']:g} s of CPU"))
     out("\nWhich reading moved first (reference values, not recommendations)?")
     out(f"  {'reading':<34}{'before':>8}{'same':>6}{'late':>6}{'never':>7}{'lead':>9}{'false alarms':>14}")
-    normal = [r["sys"] for r in base]
     for name, (_, limit, op) in ALARMS.items():
-        before, same, late, never, leads = 0, 0, 0, 0, []
-        for e in eps:
-            t0 = e["snaps"][0]["t"]
-            hits = [r["t"] for r in e["pre"] + e["snaps"] if alarm(name, r["sys"], limits)]
-            if not hits:
-                never += 1
-            elif min(hits) < t0:
-                before += 1
-                leads.append(t0 - min(hits))
-            elif min(hits) == t0:
-                same += 1
-            else:
-                late += 1
-        known = [alarm(name, s, limits) for s in normal if alarm(name, s, limits) is not None]
         if not any(ALARMS[name][0](r["sys"]) is not None for r in records if "sys" in r):
             out(f"  {name:<34}not available" + (" (give --log)" if "(log)" in name else " on this machine"))
             continue
-        false = f"{100 * sum(known) / len(known):.0f} %" if known else "?"
+        before, same, late, never, leads, false = lead_stats(
+            eps, normal, lambda s, n=name: alarm(n, s, limits))
+        false = "?" if false is None else f"{100 * false:.0f} %"
         lead = f"{statistics.median(leads):.0f} s" if leads else "-"
         label = f"{name} {op} " + ("2x normal" if limit is None else str(limit))
         out(f"  {label:<34}{before:>8}{same:>6}{late:>6}{never:>7}{lead:>9}{false:>14}")
     out("\nbefore = crossed before the response time did; lead = median advance; "
         "false alarms = share of normal readings already beyond the value.")
+    suggest(records, base, eps, times, normal, out)
     return 0

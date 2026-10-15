@@ -1039,6 +1039,69 @@ class RecordTests(TmpDirCase):
         record_report(rec.path, lines.append)
         self.assertIn("(give --log)", "\n".join(lines))
 
+    def synthetic(self, long_peaks=(4.0, 5.0, 6.0, 5.0), short_peaks=(1.3, 1.2), hours=3):
+        """A recording: normal times (0.2 s), slowdowns preceded by memory and CPU pressure."""
+        ok = {"load": 0.1, "avail_pct": 40.0, "psi": {"cpu": 0.0, "io": 0.0, "memory": 0.0}, "lq": 0}
+        bad = {**ok, "avail_pct": 9.0, "psi": {"cpu": 30.0, "io": 0.0, "memory": 6.0}}
+        recs = [{"t": 0.0, "kind": "start", "url": "a.org@http://127.0.0.1/p", "interval": 5.0,
+                 "tense": 1.0, "critical": 3.0}]
+        for i in range(hours * 12):
+            recs.append({"t": 300.0 * (i + 1), "kind": "base", "rt": 0.2, "level": 0, "sys": ok,
+                         "rts": [0.2] * 60})
+        starts = [1000.0 + 1500 * i for i in range(len(long_peaks) + len(short_peaks))]
+        for t0, peak in zip(starts, list(long_peaks) + list(short_peaks)):
+            long = peak in long_peaks
+            for k in range(3):  # two minutes before: memory and CPU, the page still fine
+                recs.append({"t": t0 - 60 + 20 * k, "kind": "pre", "rt": 0.2, "level": 0,
+                             "sys": bad if long else ok})
+            for k in range(7 if long else 1):
+                recs.append({"t": t0 + 10 * k, "kind": "snap", "rt": peak, "level": 2 if peak >= 3 else 1,
+                             "sys": bad if long else ok, "procs": []})
+            recs.append({"t": t0 + (70 if long else 5), "kind": "end", "rt": 0.2, "level": 0, "sys": ok})
+        recs.sort(key=lambda r: r["t"])
+        return self.write("rec.jsonl", "".join(json.dumps(r) + "\n" for r in recs))
+
+    def test_report_suggests_a_configuration(self):
+        lines = []
+        record_report(self.synthetic(), lines.append)
+        text = "\n".join(lines)
+        self.assertIn("load_signal = probe", text)
+        self.assertIn("load_probe_url = a.org@http://127.0.0.1/p", text)
+        self.assertRegex(text, r"load_tense = 1\.5 ")      # above the short excursions (1.3 s)
+        self.assertRegex(text, r"load_critical = 4 ")       # under the median peak (5 s) x 0.8
+        self.assertIn("replay, defaults 1 s / 3 s", text)
+        self.assertIn("replay, suggested 1.5 s / 4 s", text)
+        self.assertIn("Alternative: `load_signal = psi`", text)
+        self.assertIn("Observed: memory available %", text)
+
+    def test_replay_counts_less_tense_time_with_the_suggested_levels(self):
+        lines = []
+        record_report(self.synthetic(long_peaks=(4.0, 5.0, 6.0), short_peaks=(1.3,) * 6), lines.append)
+        rep = [x for x in lines if "replay," in x]
+        share = lambda x: float(x.split("time (")[0].split()[-2]) if False else float(x.split(": tense or critical ")[1].split(" %")[0])
+        self.assertGreater(share(rep[0]), share(rep[1]))
+
+    def test_report_gives_no_levels_without_enough_data(self):
+        lines = []
+        record_report(self.synthetic(hours=1, long_peaks=(), short_peaks=()), lines.append)
+        text = "\n".join(lines)
+        self.assertIn("Not enough normal data yet", text)
+        self.assertNotIn("load_tense", text)
+
+    def test_report_does_not_compare_signals_with_few_slowdowns(self):
+        lines = []
+        record_report(self.synthetic(long_peaks=(4.0, 5.0), short_peaks=()), lines.append)
+        text = "\n".join(lines)
+        self.assertIn("load_tense", text)
+        self.assertIn("3 needed to compare them", text)
+        self.assertNotIn("Alternative", text)
+
+    def test_start_header_is_written(self):
+        rec, _ = self.recorder([0.1])
+        rec.start("a.org@http://127.0.0.1/p", 10.0)
+        first = read_records(rec.path)[0]
+        self.assertEqual((first["kind"], first["url"], first["interval"]), ("start", "a.org@http://127.0.0.1/p", 5.0))
+
     def test_gap_is_recorded(self):
         rec, _ = self.recorder([0.1, 0.1])
         rec.step(0, 1000.0)

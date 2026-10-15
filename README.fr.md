@@ -180,6 +180,17 @@ pages/s, file d'accept ≥ 1) sont des repères, pas des recommandations : il s'
 sur **ta** machine, quel signal mérite d'être utilisé. Laisse-le tourner jusqu'à quelques
 ralentissements.
 
+À la fin, `--report` écrit une **configuration suggérée** d'après ce qui a été enregistré :
+`load_probe_url` (conservée dans une ligne d'en-tête du fichier), `load_tense` (au-dessus de la gigue
+normale et des excursions de 20 s ou moins qui ne sont pas des ralentissements) et `load_critical` (sous
+le pic médian des vrais ralentissements), chaque ligne avec sa justification, et un **rejeu** des règles
+du démon sur l'enregistrement (« avec 1 s / 3 s tu aurais été tendu 38 % du temps ; avec 1,5 s / 4 s,
+12 % »). Si un relevé que le démon sait lire (`psi`, `loadavg`) a bougé avant la page dans au moins deux
+tiers des ralentissements, avec au moins 20 s d'avance et moins de 5 % de fausses alertes, il est proposé
+en alternative (le démon prend un seul signal) ; les autres relevés sont seulement signalés. Rien n'est
+suggéré sans assez de données : 500 mesures normales sur 2 heures pour les paliers, 3 ralentissements
+pour comparer les signaux. Les valeurs sont un point de départ : à revoir après le premier vrai incident.
+
 Ajoute `--log /var/log/nginx/access.log` (répétable) pour coupler l'enregistrement aux logs d'accès :
 chaque mesure stocke alors aussi les requêtes/s, la part de réponses 5xx (un backend saturé) et le
 nombre d'IP distinctes arrivées depuis la précédente, et le rapport ajoute deux lignes : *requêtes/s ≥
