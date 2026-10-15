@@ -1,5 +1,5 @@
 # Debian package of fobots.
-#   make          builds dist/fobots_VERSION_all.deb
+#   make          cleans, then builds dist/fobots_VERSION_all.deb
 #   make VERSION=1.2.0 deb
 #   make test     unit tests (standard library, python3 -m unittest)
 #   make check    syntax + tests
@@ -11,7 +11,6 @@
 COUNT   := $(shell git rev-list --count HEAD 2>/dev/null || echo 0)
 VERSION ?= 0.$(COUNT)
 DEB     := dist/fobots_$(VERSION)_all.deb
-SOURCES := fobots.py $(wildcard fobots/*.py) fobots.conf.example fobots.service.example README.md README.fr.md build-deb.sh
 
 .PHONY: deb test check integration lint clean help
 .DEFAULT_GOAL := deb
@@ -19,9 +18,9 @@ SOURCES := fobots.py $(wildcard fobots/*.py) fobots.conf.example fobots.service.
 help:
 	@sed -n '2,9p' Makefile
 
-deb: $(DEB)
-
-$(DEB): $(SOURCES)
+# Always starts from a clean tree: no stale build/ nor old package left in dist/.
+deb:
+	$(MAKE) --no-print-directory clean
 	./build-deb.sh $(VERSION)
 
 test:
@@ -36,7 +35,7 @@ check: test
 integration:
 	bash tests/integration.sh
 
-lint: $(DEB)
+lint: deb
 	lintian $(DEB)
 
 clean:
