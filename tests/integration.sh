@@ -31,6 +31,7 @@ fi
 NFT=$(command -v nft || ls /usr/sbin/nft /sbin/nft 2>/dev/null | head -1 || true)
 [ -n "$NFT" ] || { echo "nft not found (apt install nftables)" >&2; exit 1; }
 W=$(mktemp -d)
+echo "[fobots]" > "$W/fobots.conf"
 trap 'rm -rf "$W"' EXIT
 
 pass=0
@@ -39,7 +40,9 @@ ok()  { pass=$((pass + 1)); echo "  ok   $1"; }
 bad() { fail=$((fail + 1)); echo "  FAIL $1"; }
 section() { echo; echo "== $1"; }
 
-fobots() { "$ROOT/fobots.py" "$@" --nft-bin "$NFT"; }
+# -f: a minimal configuration file, so that neither /etc/fobots/fobots.conf nor ./fobots.conf
+# (e.g. ban_scope = observed) changes the scenarios.
+fobots() { "$ROOT/fobots.py" "$@" -f "$W/fobots.conf" --nft-bin "$NFT"; }
 
 # Elements of the real set, as CIDRs, one per line (read with the program's own parser).
 elems() {
