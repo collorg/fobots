@@ -78,11 +78,11 @@ class Detector:
         self.watched = {}   # ip -> [requests, last second seen, example path]
         self.watch_file = watch_file  # findings written here (reread by `fobots watched`)
 
-    def watch_match(self, m):
-        """Path of the request (m: REQ_RE) if it matches the monitored patterns, else None.
-        All the patterns given must match. The lines are counted like the others:
+    def watch_match(self, m, watch):
+        """Path of the request (m: REQ_RE) if it matches the monitored patterns (watch), else
+        None. All the patterns given must match. The lines are counted like the others:
         we only keep a trace."""
-        agent_re, path_re = self.watch
+        agent_re, path_re = watch
         if (agent_re is None or agent_re.search(m.group(2))) and \
                 (path_re is None or path_re.search(m.group(1))):
             return m.group(1)
@@ -157,10 +157,11 @@ class Detector:
                         site.ignored += 1
                     return
         tag = None
-        if self.watch:
+        watch = site.watch if site is not None and site.watch else self.watch  # the target's own wins
+        if watch:
             rm = REQ_RE.search(line)  # also needs the agent (combined format)
             if rm:
-                tag = self.watch_match(rm)
+                tag = self.watch_match(rm, watch)
         try:
             sec = parse_ts(m.group(2))
         except ValueError:

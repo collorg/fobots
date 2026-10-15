@@ -36,7 +36,7 @@ PATH_KEYS = {"dir", "cache", "welcome", "log", "watch_file"}
 # /etc first: the result does not depend on the current directory (./fobots.conf is for development)
 CONF_SEARCH = (os.path.join(CONF_DIR, "fobots.conf"), "fobots.conf")
 
-SITE_KEYS = ("log", "ignore_prefix", "ignore_path", "ignore_all")
+SITE_KEYS = ("log", "ignore_prefix", "ignore_path", "ignore_all", "watch_agent", "watch_path")
 
 TRUE_VALUES = ("1", "true", "yes", "oui", "on")
 
@@ -100,7 +100,16 @@ def load_config(path):
                 re.compile(regex)
             except re.error as e:
                 sys.exit(f"{path}: [{section}] invalid ignore_path: {e}")
+        watch = {}
+        for key in ("watch_agent", "watch_path"):
+            watch[key] = opts.get(key, "").strip() or None
+            if watch[key]:
+                try:
+                    re.compile(watch[key])
+                except re.error as e:
+                    sys.exit(f"{path}: [{section}] invalid {key}: {e}")
         sites.append({"name": name, "log": log_file, "prefixes": prefixes, "regex": regex,
+                      "watch": (watch["watch_agent"], watch["watch_path"]),
                       "all": opts.get("ignore_all", "").strip().lower() in TRUE_VALUES})
     if out.get("log") in seen:
         sys.exit(f"{path}: the log {out['log']} is both in [fobots] and in [site:{seen[out['log']]}]")

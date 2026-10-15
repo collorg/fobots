@@ -155,7 +155,8 @@ ignore_all = yes
 log = /var/log/nginx/api.access.log
 ```
 - `log` (required), `ignore_prefix` (path prefixes, comma-separated), `ignore_path` (regex),
-  `ignore_all` (nothing is counted for this target).
+  `ignore_all` (nothing is counted for this target), `watch_agent` / `watch_path` (monitoring,
+  see below; they replace the `[fobots]` ones for this target).
 - Its own rules **add to** the global `ignore_path` of `[fobots]`.
 - CNAME aliases of a host have no effect: they end up in the same log, hence in the same
   target. The host name is never read from the lines.
@@ -199,9 +200,13 @@ the *common* format.
 ## Spotting legitimate IPs caught in a ban (gitlab-runner…)
 
 Opt-in: `watch_agent` (regex on the user agent) and `watch_path` (regex on the route); if
-both are given, both must match. Example for runners:
+both are given, both must match. The route belongs to a host, so it goes in the
+`[site:NAME]` section of that host (a `[fobots]` value applies to the targets that have none
+of their own). Example for runners:
 
 ```
+[site:gitlab]
+log = /var/log/gitlab/nginx/gitlab_access.log
 watch_agent = ^gitlab-runner
 watch_path  = ^/api/v4/
 ```

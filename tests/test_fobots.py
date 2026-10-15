@@ -489,6 +489,26 @@ class DetectorAllocation(DetectorBase):
         self.assertEqual(events[0]["ips"][0][0], "43.1.1.1")
         self.assertEqual(events[0]["range"], "43.0.0.0/9")
 
+    def test_site_watch_overrides_the_global_one(self):
+        wf = self.path("watched.jsonl")
+        site = Site("gitlab", "/x.log", watch=("^runner", "^/api/v4/"))
+        self.detector([self.ALLOC], threshold=2, watch_file=wf)  # no global watch
+        with self.assertLogs("fobots", "WARNING") as cm:
+            for _ in range(3):
+                self.det.feed_line(line("43.1.1.1", 0, "/api/v4/jobs", agent="runner/1"), site)
+        self.assertTrue(any("WATCH 43.0.0.0/9 banned" in m for m in cm.output))
+        self.assertEqual(read_events(wf, 0)[0]["ips"][0][0], "43.1.1.1")
+
+    def test_site_watch_requires_its_own_path(self):
+        wf = self.path("watched.jsonl")
+        site = Site("gitlab", "/x.log", watch=("^runner", "^/api/v4/"))
+        self.detector([self.ALLOC], threshold=2, watch_file=wf)
+        with self.assertLogs("fobots", "INFO") as cm:
+            for _ in range(3):
+                self.det.feed_line(line("43.1.1.1", 0, "/other", agent="runner/1"), site)
+        self.assertFalse(any("WATCH" in m for m in cm.output))
+        self.assertEqual(read_events(wf, 0), [])
+
     def test_load_lowers_threshold_and_duration(self):
         class Load:
             level, factor = 1, 0.5
@@ -651,8 +671,15 @@ class ConfigTests(TmpDirCase):
         self.assertEqual((g["name"], g["prefixes"], g["regex"], g["all"]), ("gitlab", ["/assets/", "/favicon.ico"], "^/x", False))
         self.assertEqual((s["name"], s["log"], s["all"]), ("static", self.path("s.log"), True))
 
+    def test_site_watch_options(self):
+        c = self.conf("[fobots]\n[site:gitlab]\nlog = g.log\nwatch_agent = ^runner\nwatch_path = ^/api/\n"
+                      "[site:other]\nlog = o.log\n")
+        self.assertEqual(c["sites"][0]["watch"], ("^runner", "^/api/"))
+        self.assertEqual(c["sites"][1]["watch"], (None, None))
+
     def test_errors(self):
         bad = {
+            "[fobots]\n[site:a]\nlog = x\nwatch_path = (\n": "invalid watch_path",
             "": "section [fobots] missing",
             "[fobots]\nfoo = 1\n": "unknown option 'foo'",
             "[fobots]\nthreshold = abc\n": "invalid value for threshold",

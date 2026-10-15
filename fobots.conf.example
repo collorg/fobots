@@ -48,6 +48,11 @@ ban_time = 1h        # duration of a ban: 30m, 1h, 1d…
 # Opt-in monitoring: these requests are counted like the others (no exemption), but when their
 # range is banned, the journal says (WATCH) which IPs matched and gives the `welcome add`
 # command to protect them. Regular expressions; if both are given, both must match.
+# The route belongs to a host: put them in its [site:NAME] section (they replace these
+# global values for that target):
+#   [site:gitlab]
+#   watch_agent = ^gitlab-runner
+#   watch_path = ^/api/v4/
 # watch_agent = ^gitlab-runner
 # watch_path = ^/api/v4/
 # watch_file = watched.jsonl   # findings recorded (default: <dir>/watched.jsonl), reread by
