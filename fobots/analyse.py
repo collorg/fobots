@@ -234,12 +234,13 @@ def report(an, threshold, top=10):
         add(f"  {r:>5.2f}  {an.range_hits[k]:>9}  {n_ips if n_ips < MAX_RANGE_IPS else str(MAX_RANGE_IPS) + '+':>5}  {label(k)}")
     add("")
     # --- paths
-    add("Busiest directories:" + ("  (mean time per request)" if an.timed else ""))
+    add("Busiest directories (\"excluded\" = share of the requests your ignore rules skip):")
+    add("   requests  share  static files  excluded" + ("  mean time" if an.timed else "") + "  directory")
     for key, (hits, static, ignored, ms, timed, size) in sorted(
             an.dirs.items(), key=lambda e: -e[1][0])[:top]:
-        extra = f"  {ms / timed:7.0f} ms" if timed else ""
-        add(f"  {hits:>9} {hits / an.lines:>6.1%}  static {static / hits:>4.0%}  "
-            f"excluded {ignored / hits:>4.0%}{extra}  {key}")
+        extra = f"  {ms / timed:6.0f} ms" if timed else ""
+        add(f"  {hits:>9} {hits / an.lines:>6.1%}  {static / hits:>11.0%}  "
+            f"{ignored / hits:>8.0%}{extra}  {key}")
     if an.timed:
         add("")
         add("Most time-consuming directories (total time):")
