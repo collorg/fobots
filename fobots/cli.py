@@ -469,6 +469,8 @@ def cmd_record(args):
                 time.sleep(interval)
     except KeyboardInterrupt:
         pass
+    finally:
+        rec.finish()
     return 0
 
 

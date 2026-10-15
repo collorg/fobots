@@ -177,7 +177,12 @@ slowdowns), each line with its justification, and a **replay** of the daemon's r
 ("with 1 s / 3 s you would have been tense 38 % of the time; with 1.5 s / 4 s, 12 %"). If a reading the
 daemon can use (`psi`, `loadavg`) moved before the page in at least two thirds of the slowdowns, with at
 least 20 s of advance and under 5 % of false alarms, it is offered as an alternative (the daemon takes one
-signal); the other readings are only reported as observations. Nothing is suggested without enough data:
+signal); the other readings are only reported as observations. A clean stop (Ctrl-C, SIGTERM) is written to the file and is a pause, not counted in the duration. A silence that
+was not asked for is the machine in trouble: a stall of the recorder itself (it comes back by itself) or a run cut
+without a stop (killed, machine restarted) are listed as *unexpected interruptions*, stay in the duration, and count
+as severe slowdowns when they last 5 s or more.
+
+Nothing is suggested without enough data:
 500 normal measures over 2 hours for the levels, or 3 slowdowns of 5 s or more (a machine under attack
 will not give hours of normal times), and 3 slowdowns to compare the signals. The values are a
 starting point: review them after the first real incident.

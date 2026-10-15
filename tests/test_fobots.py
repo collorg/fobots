@@ -28,7 +28,7 @@ from fobots.grouping import cluster_ips, pick_groups, wide_blocks  # noqa: E402
 from fobots.load import LoadMonitor, Probe, parse_probe_urls, read_psi, summarize  # noqa: E402
 from fobots.nft import Nft, NftError, parse_elems, val_nets  # noqa: E402
 from fobots.rdap import RangeStore  # noqa: E402
-from fobots.record import LogTail, Recorder, episodes, read_records, read_sys, scan_procs  # noqa: E402
+from fobots.record import LogTail, Recorder, episodes, read_records, read_sys, recorded_span, scan_procs  # noqa: E402
 from fobots.record import report as record_report  # noqa: E402
 from fobots.sites import Site  # noqa: E402
 from fobots.util import fmt_range, parse_duration, parse_ts, prefix_of, range_nets, subtract  # noqa: E402
@@ -1112,6 +1112,39 @@ class RecordTests(TmpDirCase):
         rec.start("a.org@http://127.0.0.1/p", 10.0)
         first = read_records(rec.path)[0]
         self.assertEqual((first["kind"], first["url"], first["interval"]), ("start", "a.org@http://127.0.0.1/p", 5.0))
+
+    def test_clean_stop_is_a_pause_but_a_cut_run_is_an_incident(self):
+        rec, _ = self.recorder([0.1])
+        rec.start("http://127.0.0.1/p", 10.0)
+        rec.finish()
+        rec.start("http://127.0.0.1/p", 10.0)  # after a clean stop
+        rec.start("http://127.0.0.1/p", 10.0)  # the previous run left no stop: cut
+        starts = [r for r in read_records(rec.path) if r["kind"] == "start"]
+        self.assertEqual([bool(r.get("unclean")) for r in starts], [False, False, True])
+        self.assertEqual(starts[2]["last_t"], starts[1]["t"])
+
+    def test_report_lists_interruptions_and_does_not_count_clean_pauses(self):
+        recs = [{"t": 0.0, "kind": "start", "interval": 5.0}, {"t": 100.0, "kind": "stop"},
+                {"t": 40100.0, "kind": "start", "interval": 5.0},          # clean pause of 11 h
+                {"t": 40200.0, "kind": "base", "rt": 0.1, "level": 0, "sys": {}, "rts": [0.1]},
+                {"t": 40500.0, "kind": "gap", "seconds": 240.0},           # stall
+                {"t": 50000.0, "kind": "start", "interval": 5.0, "unclean": True, "last_t": 40500.0}]
+        path = self.write("rec.jsonl", "".join(json.dumps(r) + "\n" for r in recs))
+        self.assertAlmostEqual(recorded_span(read_records(path)), 50000.0 - 40000.0)
+        lines = []
+        record_report(path, lines.append)
+        text = "\n".join(lines)
+        self.assertIn("2 unexpected interruption(s)", text)
+        self.assertIn("the recorder stalled", text)
+        self.assertIn("the recorder was cut", text)
+
+    def test_interruptions_count_as_severe_when_judging_a_short_recording(self):
+        recs = [{"t": 0.0, "kind": "start", "interval": 5.0, "tense": 1.0}]
+        recs += [{"t": 100.0 * i, "kind": "gap", "seconds": 60.0} for i in range(1, 4)]
+        path = self.write("rec.jsonl", "".join(json.dumps(r) + "\n" for r in recs))
+        lines = []
+        record_report(path, lines.append)
+        self.assertIn("Short recording", "\n".join(lines))
 
     def test_gap_is_recorded(self):
         rec, _ = self.recorder([0.1, 0.1])

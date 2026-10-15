@@ -257,10 +257,17 @@ class Recorder:
         self.rts = []  # response times of the normal measures since the last reading of normal times
 
     def start(self, url, timeout):
-        """Header of a recording: what the report needs to write a configuration."""
+        """Header of a recording: what the report needs to write a configuration. If the file
+        does not end with a clean stop, the previous run was cut (killed, machine restarted)."""
+        prev = last_record(self.path)
+        cut = {"unclean": True, "last_t": prev["t"]} if prev and prev.get("kind") != "stop" else {}
         self.write({"t": round(time.time(), 1), "kind": "start", "url": url, "interval": self.interval,
                     "tense": self.tense, "critical": self.critical, "timeout": timeout,
-                    "logs": list(self.logs.files) if self.logs else []})
+                    "logs": list(self.logs.files) if self.logs else [], **cut})
+
+    def finish(self):
+        """Clean stop (Ctrl-C, SIGTERM): the following silence is not an incident."""
+        self.write({"t": round(time.time(), 1), "kind": "stop"})
 
     def measure(self):
         """(worst response time, error text or None); a timeout counts as the timeout."""
@@ -334,6 +341,25 @@ class Recorder:
 
 
 
+def last_record(path):
+    """The last line of the file (or of its rotation if it is empty), None if there is none."""
+    for p in (path, path + ".1"):
+        try:
+            with open(p, "rb") as f:
+                f.seek(0, os.SEEK_END)
+                f.seek(max(0, f.tell() - 65536))
+                lines = f.read().decode("utf-8", "replace").splitlines()
+        except OSError:
+            continue
+        for line in reversed(lines):
+            try:
+                return json.loads(line)
+            except ValueError:
+                continue
+    return None
+
+
+
 # report -----------------------------------------------------------------------------------
 
 def read_records(path):
@@ -371,6 +397,30 @@ def episodes(records):
         elif kind == "base":
             pre = []
     return eps
+
+
+
+def recorded_span(records):
+    """Seconds covered by the recording. A clean stop followed by a start is a pause, not
+    recording; a stall or a cut run (the machine in trouble?) stays inside."""
+    span = records[-1]["t"] - records[0]["t"]
+    for a, b in zip(records, records[1:]):
+        if a.get("kind") == "stop" and b.get("kind") == "start":
+            span -= b["t"] - a["t"]
+    return span
+
+
+
+def interruptions(records):
+    """[(start, seconds, text)] of the silences that were not asked for: the recorder stalled
+    (it came back by itself), or the run was cut (killed, machine restarted)."""
+    out = []
+    for r in records:
+        if r.get("kind") == "gap":
+            out.append((r["t"] - r["seconds"], r["seconds"], "the recorder stalled (machine unresponsive?)"))
+        elif r.get("kind") == "start" and r.get("unclean"):
+            out.append((r["last_t"], r["t"] - r["last_t"], "the recorder was cut (killed, machine restarted?)"))
+    return out
 
 
 
@@ -446,9 +496,10 @@ def suggest(records, base, eps, times, normal, out, recover=300):
     """The configuration the recording supports. Says so when it does not support one."""
     start = next((r for r in reversed(records) if r.get("kind") == "start"), {})
     interval = start.get("interval") or 5.0
-    span = records[-1]["t"] - records[0]["t"]
+    span = recorded_span(records)
     out("\nSuggested configuration")
     severe = sum(max(r["rt"] if not r.get("err") else 99.0 for r in e["snaps"]) >= SEVERE for e in eps)
+    severe += sum(sec >= SEVERE for _, sec, _ in interruptions(records))  # a machine that no longer records
     enough = len(times) >= MIN_MEASURES and span >= MIN_SPAN
     if not enough and severe < SEVERE_EPISODES:
         out(f"  Not enough data yet ({len(times)} normal measures over {span / 3600:.1f} h: need "
@@ -555,11 +606,14 @@ def report(path, out=print):
         return 1
     base = [r for r in records if r.get("kind") == "base"]
     eps = episodes(records)
-    gaps = [r for r in records if r.get("kind") == "gap"]
-    span = records[-1]["t"] - records[0]["t"]
+    span = recorded_span(records)
+    cuts = interruptions(records)
     out(f"{path}: {len(records)} records over {span / 3600:.1f} h, "
         f"{len(base)} reading(s) of normal times, {len(eps)} slowdown(s)"
-        + (f", {len(gaps)} gap(s) in the measures (the machine or the recorder stalled)" if gaps else ""))
+        + (f", {len(cuts)} unexpected interruption(s)" if cuts else ""))
+    for t, sec, text in cuts:
+        out(f"  interruption at {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(t))}: "
+            f"{text}, silent for {sec:.0f} s")
     times = [t for r in base for t in (r.get("rts") or [r.get("rt")]) if t is not None]
     normal = [r["sys"] for r in base]
     if times:
