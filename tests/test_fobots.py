@@ -396,6 +396,30 @@ class DetectorAllocation(DetectorBase):
             self.feed([f"43.1.1.{i}" for i in range(5)], sec)
         self.assertEqual(self.nft.banned(), [])
 
+    def test_slow_scraper_is_banned_by_average_rate(self):
+        self.detector([self.ALLOC], threshold=2, slow_threshold=0.5, slow_window=100)
+        with self.assertLogs("fobots", "INFO") as cm:
+            for s in range(0, 100):  # one request per second: never above the threshold
+                self.feed([f"43.{s % 7}.1.1"], s)
+        self.assertEqual(self.nft.banned(), ["43.0.0.0/9"])
+        self.assertTrue(any("on average over" in m for m in cm.output))
+
+    def test_slow_criterion_ignores_a_short_burst_and_is_off_by_default(self):
+        self.detector([self.ALLOC], threshold=100, slow_threshold=0.5, slow_window=100)
+        self.feed(["43.1.1.1"] * 40, 0)      # 40 requests in 100 s = 0.4 req/s
+        self.assertEqual(self.nft.banned(), [])
+        self.detector([self.ALLOC], threshold=100)
+        for s in range(200):
+            self.feed(["43.1.1.1"] * 2, s)
+        self.assertEqual(self.nft.banned(), [])
+
+    def test_slow_window_forgets_old_requests(self):
+        self.detector([self.ALLOC], threshold=100, slow_threshold=0.5, slow_window=100)
+        self.feed(["43.1.1.1"] * 45, 0)
+        self.feed(["43.1.1.2"] * 45, 500)    # the first 45 are long gone
+        self.assertEqual(self.nft.banned(), [])
+        self.assertEqual(len(self.det.slow), 1)
+
     def test_sustain_requires_several_seconds(self):
         self.detector([self.ALLOC], threshold=2, sustain=3)
         for sec in (0, 1):

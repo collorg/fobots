@@ -160,7 +160,7 @@ def cmd_run(args):
                    args.window, store, Banner(nft, wl, args.ban_seconds), rdap,
                    load, args.min_threshold, args.min_ban_seconds, watch, watch_file,
                    ignore_path, sites, args.ban_scope, args.observed_prefix, args.observed_escalate,
-                   args.observed_max_prefix)
+                   args.observed_max_prefix, args.slow_threshold, args.slow_window)
     if det.observed:
         log.info("ban_scope observed: groups of IPs of at most /%d (IPv6 /%d), fallback to blocks "
                  "of %s if scattered or after %d partial bans", args.observed_prefix,
@@ -234,6 +234,7 @@ def cmd_analyse(args):
         log.error("no log to analyse: give files, or define `log =` / [site:NAME] in the configuration")
         return 1
     an = Analysis(RangeStore(cache), ignore_path, args.sustain, args.time_unit, args.slow_window)
+    an.slow_threshold = args.slow_threshold
     for path, site in inputs:
         try:
             f = sys.stdin if path == "-" else open(path, errors="replace")
@@ -386,6 +387,11 @@ def main(argv=None):
                         "(default: = --threshold)")
     r.add_argument("--sustain", type=int, default=5,
                    help="consecutive seconds above the threshold required (default: 5)")
+    r.add_argument("--slow-threshold", type=float, default=0, metavar="REQ_PER_S",
+                   help="bans a range whose AVERAGE rate over --slow-window exceeds this "
+                        "(slow scrapers; 0 = disabled, default)")
+    r.add_argument("--slow-window", type=parse_duration, default=600, metavar="DURATION",
+                   help="window of --slow-threshold (default: 10m)")
     r.add_argument("--window", type=int, default=60,
                    help="window in seconds over which IPs are tracked (default: 60)")
     r.add_argument("--load-signal", choices=["none", "psi", "loadavg"], default="none",
@@ -459,6 +465,8 @@ def main(argv=None):
                     help="paths not counted (default: ignore_path of the configuration)")
     an.add_argument("--slow-window", type=parse_duration, default=600, metavar="DURATION",
                     help="window of the average-rate table (slow scrapers), default 10m")
+    an.add_argument("--slow-threshold", type=float, default=0, metavar="REQ_PER_S",
+                    help="average rate to highlight in that table (default: the configuration)")
     an.add_argument("--time-unit", choices=("auto", "us", "ms", "s"), default="auto",
                     help="unit of the duration at the end of the line (auto: decimal = s, "
                          "integer = µs like Apache %%D)")

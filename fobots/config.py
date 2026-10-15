@@ -17,6 +17,7 @@ CONF_KEYS = {  # file key -> (argparse destination, conversion)
     "ban_time": ("ban_seconds", parse_duration),
     "threshold": ("threshold", float), "prefix_threshold": ("prefix_threshold", float),
     "sustain": ("sustain", int), "window": ("window", int),
+    "slow_threshold": ("slow_threshold", float), "slow_window": ("slow_window", parse_duration),
     "rdap_per_hour": ("rdap_per_hour", int), "delay": ("delay", float),
     "load_signal": ("load_signal", str), "load_tense": ("load_tense", float),
     "load_critical": ("load_critical", float), "load_recover": ("load_recover", parse_duration),

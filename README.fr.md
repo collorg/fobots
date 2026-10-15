@@ -317,6 +317,7 @@ conf.** Voir `fobots.conf.example` pour toutes les clés :
 | `threshold` | 5 | req/s d'une plage au-delà desquelles on bannit |
 | `prefix_threshold` | = `threshold` | req/s d'un `/16` non résolu qui autorisent RDAP |
 | `sustain`, `window` | 5, 60 | secondes consécutives au-dessus du seuil exigées ; fenêtre de suivi (s) |
+| `slow_threshold`, `slow_window` | 0, 10m | bannit une plage dont le débit **moyen** sur la fenêtre dépasse cette valeur (req/s) ; `0` = désactivé |
 | `ban_time` | 1h | durée d'un ban (`30m`, `1h`, `1d`) |
 | `ban_scope` | `allocation` | `allocation` : on bannit la plage RDAP entière ; `observed` : seulement les groupes d'IP vues dedans |
 | `observed_prefix` | 20 | `observed` : étendue maximale d'un groupe d'IP (préfixe IPv4 ; IPv6 : `/48`) |
@@ -394,6 +395,20 @@ avoir sa propre rotation.
 Les journaux vont sur stderr (journal systemd sous service). Chaque ban indique
 la plage, le débit, l'IP déclenchante et le total de requêtes. `SIGUSR1` affiche
 les plages les plus actives depuis le démarrage ; `SIGTERM`/`SIGINT` arrêtent.
+
+## Scrapers lents (`slow_threshold`)
+
+Un scraper qui reste à environ une requête par seconde, réparti sur de nombreuses IP d'une
+allocation cloud, ne dépasse jamais un `threshold` par seconde. Avec `slow_threshold = 0.5` et
+`slow_window = 10m`, une plage est bannie quand elle a envoyé plus de 0,5 × 600 = 300 requêtes
+sur les 10 dernières minutes (comptées par tranches de 10 secondes : pas de coût par requête).
+Désactivé par défaut. À mesurer d'abord avec `fobots analyse` (tableau « Slow scrapers ») : il
+montre quelles plages seraient prises et quelle part du trafic elles envoient. Pour le reste la
+règle est la même que celle par seconde (liste `welcome`, `ban_scope`, `ban_time`) ; avec
+`ban_scope = observed`, les IP vues sur toute la fenêtre sont considérées, donc le ban reste
+serré. Attention : un gros réseau légitime (campus derrière un NAT) sur un site très fréquenté
+peut dépasser un débit moyen bas ; vérifie avec `analyse` sur tes propres logs, et corrige les
+faux positifs avec `welcome add`. Il n'est pas modulé par le niveau de charge.
 
 ## Ban resserré (`ban_scope = observed`)
 

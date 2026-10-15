@@ -304,6 +304,7 @@ the configuration file. **The command line overrides the configuration.** See
 | `threshold` | 5 | req/s of a range above which it is banned |
 | `prefix_threshold` | = `threshold` | req/s of an unresolved `/16` that allow RDAP |
 | `sustain`, `window` | 5, 60 | consecutive seconds above the threshold required; tracking window (s) |
+| `slow_threshold`, `slow_window` | 0, 10m | bans a range whose **average** rate over the window exceeds this (req/s); `0` = disabled |
 | `ban_time` | 1h | duration of a ban (`30m`, `1h`, `1d`) |
 | `ban_scope` | `allocation` | `allocation`: ban the whole RDAP range; `observed`: only the groups of IPs seen inside it |
 | `observed_prefix` | 20 | `observed`: maximum extent of a group of IPs (IPv4 prefix; IPv6: `/48`) |
@@ -378,6 +379,20 @@ independently, so each can have its own rotation.
 Logs go to stderr (the systemd journal when run as a service). Each ban states the range, the
 rate, the triggering IP and the total number of requests. `SIGUSR1` prints the most active
 ranges since startup; `SIGTERM`/`SIGINT` stop the daemon.
+
+## Slow scrapers (`slow_threshold`)
+
+A scraper that stays at about one request per second, spread over many IPs of a cloud
+allocation, never exceeds a per-second `threshold`. With `slow_threshold = 0.5` and
+`slow_window = 10m`, a range is banned when it has sent more than 0.5 × 600 = 300 requests
+over the last 10 minutes (counted in 10-second buckets: no cost per request). Disabled by
+default. Measure it first with `fobots analyse` (table "Slow scrapers"): it shows which
+ranges would be caught and how much of the traffic they send. The rule is the same as the
+per-second one for the rest (`welcome` list, `ban_scope`, `ban_time`); with
+`ban_scope = observed`, the IPs seen over the whole window are considered, so the ban stays
+tight. Caution: a large legitimate network (campus behind a NAT) on a busy site can exceed a
+low average rate; check with `analyse` on your own logs, and fix false positives with
+`welcome add`. It is not scaled by the load level.
 
 ## Tight bans (`ban_scope = observed`)
 

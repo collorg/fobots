@@ -71,7 +71,7 @@ def average_rate(per_second, window):
 class Analysis:
     def __init__(self, store, ignore_path=None, sustain=5, time_unit="auto", slow_window=600):
         self.store, self.ignore_path, self.sustain, self.time_unit = store, ignore_path, sustain, time_unit
-        self.slow_window = slow_window
+        self.slow_window, self.slow_threshold = slow_window, 0
         self.agent_ips, self.agent_ranges = defaultdict(set), defaultdict(set)
         self.lines = self.unreadable = self.private = self.ignored = 0
         self.first = self.last = None
@@ -224,9 +224,10 @@ def report(an, threshold, top=10):
     add(f"Slow scrapers: average rate of a range over {window / 60:g} min "
         "(invisible to the per-second threshold):")
     add("  average rate   ranges   share of requests")
-    for t in SLOW_RATES:
+    for t in sorted(set(SLOW_RATES) | ({an.slow_threshold} - {0})):
         hit = [k for r, k in slow if r >= t]
-        add(f"  >= {t:>4g} req/s {len(hit):>8}   {sum(an.range_hits[k] for k in hit) / total:>12.1%}")
+        mark = "   <- current" if t == an.slow_threshold else ""
+        add(f"  >= {t:>4g} req/s {len(hit):>8}   {sum(an.range_hits[k] for k in hit) / total:>12.1%}{mark}")
     add("  rate    requests    IPs  range")
     for r, k in slow[:top]:
         n_ips = len(an.range_ips[k])

@@ -5,7 +5,7 @@ import ipaddress
 import logging
 import re
 import time
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
 
 from .events import append_event
 from .grouping import cluster_ips, pick_groups, wide_blocks
@@ -44,6 +44,8 @@ OBSERVED_PREFIX6 = 48         # maximum width of a group in IPv6 (adjustable in 
 
 OBSERVED_WIDE6 = 32           # maximum width of a fallback ban in IPv6 (adjustable in IPv4)
 
+SLOW_BUCKET = 10               # seconds per bucket of the average-rate window
+
 SCOPES = ("allocation", "observed")
 
 
@@ -52,10 +54,15 @@ class Detector:
     def __init__(self, threshold, prefix_threshold, sustain, window, store, banner, rdap,
                  load=None, min_threshold=1.0, min_ban_seconds=60, watch=None,
                  watch_file=None, ignore_path=None, sites=(), scope="allocation",
-                 observed_prefix=20, escalate=4, wide_prefix=16):
+                 observed_prefix=20, escalate=4, wide_prefix=16, slow_threshold=0,
+                 slow_window=600):
         self.base_threshold, self.base_prefix_threshold = threshold, prefix_threshold
         self.load, self.min_threshold, self.min_ban = load or NoLoad(), min_threshold, min_ban_seconds
         self.sustain, self.window = sustain, window
+        # average rate over a long window (slow scrapers, below any per-second threshold)
+        self.slow_threshold, self.slow_window = slow_threshold, slow_window
+        self.slow = {}  # range -> [deque of (bucket, requests), total over the window]
+        self.track = max(window, slow_window if slow_threshold else 0)  # observed: IPs memory
         self.store, self.banner, self.rdap = store, banner, rdap
         self.counts = defaultdict(dict)  # key -> {second: n}
         self.over = defaultdict(set)     # range -> seconds above the threshold
@@ -197,6 +204,8 @@ class Detector:
         if isinstance(key, tuple):
             if self.observed:
                 self.note_ip(ip, sec, key)
+            if self.slow_threshold:
+                self.note_slow(key, sec, n, ip)
             if n > self.threshold:
                 over = self.over[key]
                 over.add(sec)
@@ -208,12 +217,31 @@ class Detector:
         elif n > self.prefix_threshold:
             self.rdap.request(addr or ipaddress.ip_address(ip), key)
 
+    def note_slow(self, key, sec, n, ip):
+        """Counts the request in the range's window (buckets of SLOW_BUCKET s); bans if the
+        average rate over slow_window exceeds slow_threshold."""
+        b = sec // SLOW_BUCKET
+        e = self.slow.get(key)
+        if e is None:
+            e = self.slow[key] = [deque(), 0]
+        buckets = e[0]
+        if buckets and buckets[-1][0] == b:
+            buckets[-1][1] += 1
+        else:
+            buckets.append([b, 1])
+        e[1] += 1
+        oldest = b - self.slow_window // SLOW_BUCKET
+        while buckets[0][0] <= oldest:
+            e[1] -= buckets.popleft()[1]
+        if e[1] > self.slow_threshold * self.slow_window:
+            self.trigger(key, sec, n, ip, slow=e[1] / self.slow_window)
+
     def note_ip(self, ip, sec, key):
         e = self.ips.get(ip)
         if e is None:
             if len(self.ips) < OBSERVED_MAX_IPS:
                 self.ips[ip] = [1, sec, sec, key]
-        elif sec - e[1] > self.window:  # coarse sliding window: start again from zero
+        elif sec - e[1] > self.track:  # coarse sliding window: start again from zero
             e[:] = [1, sec, sec, key]
         else:
             e[0] += 1
@@ -225,7 +253,7 @@ class Detector:
             return [key], ""
         ver = key[0]
         ips = [(int(ipaddress.ip_address(s)), e[0]) for s, e in self.ips.items()
-               if e[3] == key and e[2] >= sec - self.window]
+               if e[3] == key and e[2] >= sec - self.track]
         recent = [t for t in self.partial.get(key, ()) if sec - t < self.banner.ban_seconds]
         groups = cluster_ips(ips, self.span4 if ver == 4 else self.span6)
         picked = None
@@ -248,12 +276,16 @@ class Detector:
                 f", {len(ips)} IP(s) in {len(groups)} group(s), {len(picked)} banned "
                 f"({covered:.0%} of the requests)")
 
-    def trigger(self, key, sec, n, ip):
+    def trigger(self, key, sec, n, ip, slow=None):
         if sec - self.recent_ban.get(key, -10**12) < RECENT_BAN_SECS:
             return
         self.recent_ban[key] = sec
         thr = self.threshold
-        reason = f"{n} req/s > {thr:g}, seen with {ip}, {self.hits[key]} requests in total"
+        if slow is not None:
+            reason = (f"{slow:.2f} req/s on average over {self.slow_window // 60} min > "
+                      f"{self.slow_threshold:g}, seen with {ip}, {self.hits[key]} requests in total")
+        else:
+            reason = f"{n} req/s > {thr:g}, seen with {ip}, {self.hits[key]} requests in total"
         if self.load.level:
             reason += f", load level {LEVELS[self.load.level]}"
         targets, detail = self.targets(key, sec)
@@ -275,6 +307,9 @@ class Detector:
                 del d[s]
             if not d:
                 del self.counts[key]
+        oldest = self.latest // SLOW_BUCKET - self.slow_window // SLOW_BUCKET
+        for key in [k for k, e in self.slow.items() if not e[0] or e[0][-1][0] <= oldest]:
+            del self.slow[key]
         for key in list(self.over):
             self.over[key] = {s for s in self.over[key] if s >= cutoff}
             if not self.over[key]:
