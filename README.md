@@ -210,10 +210,14 @@ and prints:
 - the **"what if" table**: for several thresholds, how many ranges would have been banned
   (above the threshold for `sustain` consecutive seconds) and which share of the requests they
   sent, then the busiest ranges. Pick the threshold where the table stops growing;
+- the **slow scrapers**: average rate of each range over `--slow-window` (10 min by default).
+  A scraper that stays at about one request per second for hours never exceeds a per-second
+  threshold, yet may weigh half of the traffic; this table shows how many ranges behave so;
 - the busiest **directories**, the share of static files, what your `ignore_path` already
   excludes, and a suggested `ignore_path` (frequent directories that serve almost only static
   files, and fast ones when the log has durations);
-- the most frequent user agents.
+- the most frequent user agents, with the number of IPs and ranges they are spread over: one
+  agent making a large share of the traffic over many ranges is a distributed scraper.
 
 **Request duration.** It is not in the usual formats. To rank the directories by cost and
 avoid excluding something slow, add it as the **last** field: Apache

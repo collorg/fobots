@@ -233,7 +233,7 @@ def cmd_analyse(args):
     if not inputs:
         log.error("no log to analyse: give files, or define `log =` / [site:NAME] in the configuration")
         return 1
-    an = Analysis(RangeStore(cache), ignore_path, args.sustain, args.time_unit)
+    an = Analysis(RangeStore(cache), ignore_path, args.sustain, args.time_unit, args.slow_window)
     for path, site in inputs:
         try:
             f = sys.stdin if path == "-" else open(path, errors="replace")
@@ -457,6 +457,8 @@ def main(argv=None):
                     help="consecutive seconds above the threshold (default: the configuration, else 5)")
     an.add_argument("--ignore-path", metavar="REGEX",
                     help="paths not counted (default: ignore_path of the configuration)")
+    an.add_argument("--slow-window", type=parse_duration, default=600, metavar="DURATION",
+                    help="window of the average-rate table (slow scrapers), default 10m")
     an.add_argument("--time-unit", choices=("auto", "us", "ms", "s"), default="auto",
                     help="unit of the duration at the end of the line (auto: decimal = s, "
                          "integer = µs like Apache %%D)")

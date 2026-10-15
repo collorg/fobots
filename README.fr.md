@@ -218,10 +218,16 @@ cache) et affiche :
   (au-dessus du seuil pendant `sustain` secondes consécutives) et quelle part des requêtes
   elles ont envoyée, puis les plages les plus actives. Choisis le seuil à partir duquel le
   tableau cesse de grossir ;
+- les **scrapers lents** : débit moyen de chaque plage sur `--slow-window` (10 min par défaut).
+  Un scraper qui reste à environ une requête par seconde pendant des heures ne dépasse jamais
+  un seuil par seconde, et peut pourtant peser la moitié du trafic ; ce tableau dit combien de
+  plages se comportent ainsi ;
 - les **répertoires** les plus demandés, la part de fichiers statiques, ce que ton
   `ignore_path` exclut déjà, et un `ignore_path` suggéré (répertoires fréquents qui ne servent
   presque que du statique, et rapides quand le log a les durées) ;
-- les user-agents les plus fréquents.
+- les user-agents les plus fréquents, avec le nombre d'IP et de plages sur lesquelles ils sont
+  répartis : un même agent qui fait une grande part du trafic sur beaucoup de plages est un
+  scraper distribué.
 
 **Durée des requêtes.** Elle n'est pas dans les formats usuels. Pour classer les répertoires
 par coût et éviter d'exclure quelque chose de lent, ajoute-la en **dernier** champ : Apache

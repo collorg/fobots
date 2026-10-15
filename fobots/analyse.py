@@ -18,6 +18,10 @@ STATIC_RE = re.compile(r"\.(js|css|png|jpe?g|gif|svg|ico|webp|avif|woff2?|ttf|eo
 
 THRESHOLDS = (1, 2, 3, 5, 8, 10, 20, 50)  # grid of the "what if" table
 
+SLOW_RATES = (0.1, 0.2, 0.3, 0.5, 1, 2)  # grid of average rates (req/s) of the slow-scraper table
+
+MAX_AGENT_SET = 5000     # IPs / ranges remembered per user agent
+
 MAX_AGENTS = 50_000      # distinct user agents kept
 MAX_RANGE_IPS = 1000     # IPs remembered per range (only used to give an order of magnitude)
 MIN_DIR_SHARE = 0.01     # a directory is suggested for exclusion from this share of the lines
@@ -50,9 +54,25 @@ def sustained_rate(per_second, k):
     return best
 
 
+def average_rate(per_second, window):
+    """Highest average rate (req/s) over `window` consecutive seconds: catches the scraper that
+    stays at about one request per second for hours, below any per-second threshold."""
+    secs = sorted(per_second)
+    best = total = i = 0
+    for j, s in enumerate(secs):
+        total += per_second[s]
+        while s - secs[i] >= window:
+            total -= per_second[secs[i]]
+            i += 1
+        best = max(best, total)
+    return best / window
+
+
 class Analysis:
-    def __init__(self, store, ignore_path=None, sustain=5, time_unit="auto"):
+    def __init__(self, store, ignore_path=None, sustain=5, time_unit="auto", slow_window=600):
         self.store, self.ignore_path, self.sustain, self.time_unit = store, ignore_path, sustain, time_unit
+        self.slow_window = slow_window
+        self.agent_ips, self.agent_ranges = defaultdict(set), defaultdict(set)
         self.lines = self.unreadable = self.private = self.ignored = 0
         self.first = self.last = None
         self.ranges = defaultdict(lambda: defaultdict(int))   # range -> {second: n}
@@ -110,6 +130,11 @@ class Analysis:
         ips = self.range_ips[key]
         if len(ips) < MAX_RANGE_IPS:
             ips.add(ip)
+        if agent is not None and agent[:90] in self.agents:
+            a = agent[:90]
+            if len(self.agent_ips[a]) < MAX_AGENT_SET:
+                self.agent_ips[a].add(ip)
+                self.agent_ranges[a].add(key)
 
     # --- results -------------------------------------------------------------------------
 
@@ -126,6 +151,11 @@ class Analysis:
             hit = [k for r, k in rates if r > t]
             rows.append((t, len(hit), sum(self.range_hits[k] for k in hit) / total))
         return rows
+
+    def slow_rates(self, window):
+        """[(average rate over `window`, range)] decreasing."""
+        return sorted(((average_rate(c, window), k) for k, c in self.ranges.items()),
+                      key=lambda e: -e[0])
 
     def static_dirs(self):
         """Directories to suggest for ignore_path: frequent, almost only static files, cheap,
@@ -182,6 +212,21 @@ def report(an, threshold, top=10):
         n_ips = len(an.range_ips[k])
         add(f"  {r:>4}  {an.range_hits[k]:>9}  {n_ips if n_ips < MAX_RANGE_IPS else str(MAX_RANGE_IPS) + '+':>5}  {label(k)}")
     add("")
+    # --- slow scrapers
+    window = max(1, min(an.slow_window, span))
+    slow = an.slow_rates(window)
+    total = sum(an.range_hits.values()) or 1
+    add(f"Slow scrapers: average rate of a range over {window / 60:g} min "
+        "(invisible to the per-second threshold):")
+    add("  average rate   ranges   share of requests")
+    for t in SLOW_RATES:
+        hit = [k for r, k in slow if r >= t]
+        add(f"  >= {t:>4g} req/s {len(hit):>8}   {sum(an.range_hits[k] for k in hit) / total:>12.1%}")
+    add("  rate    requests    IPs  range")
+    for r, k in slow[:top]:
+        n_ips = len(an.range_ips[k])
+        add(f"  {r:>5.2f}  {an.range_hits[k]:>9}  {n_ips if n_ips < MAX_RANGE_IPS else str(MAX_RANGE_IPS) + '+':>5}  {label(k)}")
+    add("")
     # --- paths
     add("Busiest directories:" + ("  (mean time per request)" if an.timed else ""))
     for key, (hits, static, ignored, ms, timed, size) in sorted(
@@ -203,9 +248,16 @@ def report(an, threshold, top=10):
     add("")
     # --- agents
     if an.agents:
-        add("Most frequent user agents:")
+        add("Most frequent user agents (and over how many IPs / ranges they are spread):")
+        spread = []
         for agent, n in an.agents.most_common(5):
-            add(f"  {n:>9} {n / an.lines:>6.1%}  {agent}")
+            ips, rngs = len(an.agent_ips[agent]), len(an.agent_ranges[agent])
+            add(f"  {n:>9} {n / an.lines:>6.1%}  {ips:>6} IPs {rngs:>5} ranges  {agent}")
+            if n >= 0.1 * an.lines and rngs >= 10:
+                spread.append((agent, n, rngs))
+        for agent, n, rngs in spread:
+            add(f"  -> {n / an.lines:.0%} of the requests come from ONE user agent spread over "
+                f"{rngs}+ ranges: a distributed scraper, to look at ({agent[:40]}…)")
         add("")
     # --- suggestions
     add("Suggestions:")

@@ -18,7 +18,7 @@ import warnings
 from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-from fobots.analyse import Analysis, dir_key, report, sustained_rate  # noqa: E402
+from fobots.analyse import Analysis, average_rate, dir_key, report, sustained_rate  # noqa: E402
 from fobots.cli import main  # noqa: E402
 from fobots.config import CONF_KEYS, SITE_KEYS, load_config  # noqa: E402
 from fobots.detector import Detector  # noqa: E402
@@ -657,6 +657,21 @@ class AnalyseTests(unittest.TestCase):
         self.assertEqual(sustained_rate({0: 3, 1: 5, 2: 4}, 3), 3)
         self.assertEqual(sustained_rate({0: 3, 1: 5, 3: 4}, 3), 0)  # second 2 is missing
         self.assertEqual(sustained_rate({0: 9}, 1), 9)
+
+    def test_average_rate(self):
+        slow = {s: 1 for s in range(0, 100, 2)}          # one request every 2 s
+        self.assertEqual(average_rate(slow, 10), 0.5)
+        self.assertEqual(sustained_rate(slow, 5), 0)     # invisible to the per-second criterion
+        self.assertEqual(average_rate({0: 10, 100: 10}, 10), 1.0)  # a burst, not an average
+
+    def test_slow_distributed_scraper_is_reported(self):
+        an = self.analysis(slow_window=60)
+        for s in range(60):
+            an.feed(line(f"43.{s % 20}.1.1", s, f"/p/{s}", agent="bot/1"))   # 20 prefixes, 1 req/s
+        an.feed(line("82.1.1.1", 0, "/", agent="Mozilla"))
+        text = "\n".join(report(an, 5))
+        self.assertIn("Slow scrapers", text)
+        self.assertIn("ONE user agent spread over 20+ ranges", text)
 
     def test_scraper_and_static_directory(self):
         an = self.analysis(sustain=3)
