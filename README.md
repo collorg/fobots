@@ -198,6 +198,32 @@ the *common* format.
   either. Serving something to banned ranges would mean redirecting them to another server
   rather than dropping them.
 
+## Analysing a log: `fobots analyse`
+
+```
+fobots analyse                      # the logs of fobots.conf
+fobots analyse access.log -t 3      # a given file, highlighting threshold 3
+```
+Reads the logs once (no nft, no daemon, no RDAP query: only the ranges already in the cache)
+and prints:
+
+- the **"what if" table**: for several thresholds, how many ranges would have been banned
+  (above the threshold for `sustain` consecutive seconds) and which share of the requests they
+  sent, then the busiest ranges. Pick the threshold where the table stops growing;
+- the busiest **directories**, the share of static files, what your `ignore_path` already
+  excludes, and a suggested `ignore_path` (frequent directories that serve almost only static
+  files, and fast ones when the log has durations);
+- the most frequent user agents.
+
+**Request duration.** It is not in the usual formats. To rank the directories by cost and
+avoid excluding something slow, add it as the **last** field: Apache
+`LogFormat "%h %l %u %t \"%r\" %>s %b \"%{Referer}i\" \"%{User-Agent}i\" %D" combined`
+(microseconds), nginx `$request_time` (seconds). `--time-unit` forces the unit (auto: a decimal
+number is seconds, an integer is microseconds). The daemon is not affected by this extra field.
+
+These are **suggestions**: nothing is changed, and a suggestion built from one quiet day
+should be checked before use.
+
 ## Spotting legitimate IPs caught in a ban (gitlab-runner…)
 
 Opt-in: `watch_agent` (regex on the user agent) and `watch_path` (regex on the route); if
@@ -307,6 +333,7 @@ fobots bans                       active bans and remaining time
 fobots welcome add CIDR…          welcome list + removal of the bans concerned
 fobots welcome list
 fobots watched [--active] [--cmd]  monitored IPs (watch_*) caught in a ban
+fobots analyse [LOG…]             reads logs once and suggests settings (no nft, no root)
 ```
 Common options: `-f CONF`, `--dir`, `-c`, `-w`, `--ban-time`, `--nft-bin`, `--dry-run`,
 `-v`. `--dry-run` does not call nft: it prints the commands and simulates the sets in memory.

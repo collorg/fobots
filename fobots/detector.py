@@ -18,8 +18,8 @@ log = logging.getLogger("fobots")
 
 LINE_RE = re.compile(r'^(\S+) \S+ \S+ \[([^\]]+)\]')
 
-# End of a "combined" line: "METHOD /path PROTO" status size "referer" "user-agent"
-REQ_RE = re.compile(r'"[A-Z]+ (\S+)[^"]*" \d+ \S+ "[^"]*" "([^"]*)"\s*$')
+# End of a "combined" line: "METHOD /path PROTO" status size "referer" "user-agent" [duration]
+REQ_RE = re.compile(r'"[A-Z]+ (\S+)[^"]*" \d+ \S+ "[^"]*" "([^"]*)"(?:\s+[\d.]+)?\s*$')
 
 # First quoted string: the request line (common or combined format)
 PATH_RE = re.compile(r'"[A-Z]+ (\S+)')

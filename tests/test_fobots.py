@@ -18,6 +18,7 @@ import warnings
 from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+from fobots.analyse import Analysis, dir_key, report, sustained_rate  # noqa: E402
 from fobots.cli import main  # noqa: E402
 from fobots.config import CONF_KEYS, SITE_KEYS, load_config  # noqa: E402
 from fobots.detector import Detector  # noqa: E402
@@ -477,6 +478,11 @@ class DetectorAllocation(DetectorBase):
             self.feed(["43.1.1.1"] * 3, 0)
         self.assertEqual(self.nft.banned(), [])
 
+    def test_watch_reads_the_agent_before_a_trailing_duration(self):
+        from fobots.detector import REQ_RE
+        m = REQ_RE.search(line("43.1.1.1", 0, "/api", agent="runner/1").rstrip("\n") + " 123456\n")
+        self.assertEqual((m.group(1), m.group(2)), ("/api", "runner/1"))
+
     def test_watched_ips_are_reported(self):
         wf = self.path("watched.jsonl")
         import re
@@ -634,6 +640,66 @@ class LoadMonitorTests(unittest.TestCase):
         with mock.patch("builtins.open", mock.mock_open(read_data="full avg10=0.00\n")):
             with self.assertRaises(OSError):
                 read_psi("cpu")
+
+
+class AnalyseTests(unittest.TestCase):
+    def analysis(self, **kw):
+        from fobots.rdap import RangeStore
+        return Analysis(RangeStore(None), **kw)
+
+    def test_dir_key(self):
+        self.assertEqual(dir_key("/collorg/images/a/b.png?x=1"), "/collorg/images/")
+        self.assertEqual(dir_key("/collorg/uuid?q=/x/y"), "/collorg/")
+        self.assertEqual(dir_key("/robots.txt"), "/robots.txt")
+        self.assertEqual(dir_key("/"), "/")
+
+    def test_sustained_rate(self):
+        self.assertEqual(sustained_rate({0: 3, 1: 5, 2: 4}, 3), 3)
+        self.assertEqual(sustained_rate({0: 3, 1: 5, 3: 4}, 3), 0)  # second 2 is missing
+        self.assertEqual(sustained_rate({0: 9}, 1), 9)
+
+    def test_scraper_and_static_directory(self):
+        an = self.analysis(sustain=3)
+        for s in range(10):
+            for i in range(6):
+                an.feed(line(f"43.1.1.{i}", s, f"/app/{s}-{i}"))
+            for _ in range(2):
+                an.feed(line("82.1.1.1", s, "/app/img/x.png"))
+        rates = dict((k, r) for r, k in an.rates())
+        self.assertEqual(rates[prefix_of(ipaddress.ip_address("43.1.1.1"))], 6)
+        table = an.ban_table(an.rates(), [1, 5, 6])
+        self.assertEqual([n for _, n, _ in table], [2, 1, 0])
+        self.assertEqual([d for d, _ in an.static_dirs()], ["/app/img/"])
+        self.assertEqual(an.suggested_regex(an.static_dirs()), "^(/app/img/)")
+
+    def test_ignore_rules_are_applied(self):
+        import re
+        an = self.analysis(ignore_path=re.compile("^/app/"))
+        an.feed(line("43.1.1.1", 0, "/app/x"))
+        self.assertEqual((an.ignored, len(an.ranges)), (1, 0))
+        self.assertEqual(an.static_dirs(), [])
+
+    def test_duration_units_and_slow_directories(self):
+        an = self.analysis()
+        base = '43.1.1.1 - - [14/Oct/2026:10:00:00 +0000] "GET /a/x.js HTTP/1.1" 200 1 "-" "ua" '
+        an.feed(base + "2000\n")      # integer: microseconds (Apache %D) -> 2 ms
+        an.feed(base + "0.002\n")     # decimal: seconds (nginx) -> 2 ms
+        self.assertAlmostEqual(an.dirs["/a/"][3], 4.0)
+        slow = self.analysis(time_unit="ms")
+        for _ in range(3):
+            slow.feed(base.replace("x.js", "y.js") + "900\n")
+        self.assertEqual(slow.static_dirs(), [])  # 900 ms per request: not cheap
+
+    def test_unreadable_lines_and_empty_report(self):
+        an = self.analysis()
+        an.feed("garbage\n")
+        self.assertEqual(an.unreadable, 1)
+        self.assertIn("no readable line", report(an, 5)[0])
+
+    def test_common_format_is_read(self):
+        an = self.analysis()
+        an.feed('43.1.1.1 - - [14/Oct/2026:10:00:00 +0000] "GET /x HTTP/1.1" 200 12\n')
+        self.assertEqual(an.lines, 1)
 
 
 class SiteTests(unittest.TestCase):
@@ -876,6 +942,19 @@ class Commands(TmpDirCase):
         self.assertEqual(rc, 0)
         self.assertIn("add table inet fobots", out)
         self.assertIn("flags interval,timeout", out)
+
+    def test_analyse_command(self):
+        lines = []
+        for s in range(10):
+            lines += [line(f"43.1.1.{i}", s, f"/app/{s}-{i}") for i in range(6)]
+            lines += [line("82.1.1.1", s, "/app/img/x.png")] * 2
+        log_path = self.write("access.log", "".join(lines))
+        rc, out, err = self.run_main("analyse", log_path, "--dir", self.dir, "--sustain", "3")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("Busiest ranges", out)
+        self.assertIn("ignore_path = ^(/app/img/)", out)
+        rc, out, err = self.run_main("analyse", "--dir", self.dir)  # no log in the configuration
+        self.assertEqual(rc, 1)
 
     def test_watched_table_and_cmd(self):
         append_event(self.path("watched.jsonl"), {

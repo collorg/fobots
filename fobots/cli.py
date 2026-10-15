@@ -10,6 +10,7 @@ nftables set as soon as the threshold is exceeded. Bans expire by themselves (nf
   tail -F /var/log/gitlab/nginx/gitlab_access.log | fobots run -t 5 -
   fobots setup                       # creates nft table, sets and rules (idempotent)
   fobots bans                        # active bans with remaining time
+  fobots analyse access.log          # suggests threshold and ignore_path from a log
   fobots welcome add 17.0.0.0/8      # welcome list + removal of the bans concerned
   fobots welcome list
 
@@ -31,6 +32,7 @@ import sys
 import time
 from datetime import datetime
 
+from .analyse import Analysis, report
 from .config import CONF_SEARCH, load_config
 from .constants import CONF_DIR, STATE_DIR
 from .detector import OBSERVED_PREFIX6, OBSERVED_WIDE6, SCOPES, Detector
@@ -205,6 +207,43 @@ def cmd_bans(args):
     for ver in (4, 6):
         for n, exp in sorted(nft.elements(ver), key=lambda e: e[0].network_address):
             print(f"{str(n):<24} {'' if exp is None else f'{exp} s left'}")
+    return 0
+
+
+
+def cmd_analyse(args):
+    """Reads logs once (the files given, otherwise those of the configuration) and suggests."""
+    cache, _ = paths(args)
+    ignore_path = None
+    if args.ignore_path:
+        try:
+            ignore_path = re.compile(args.ignore_path)
+        except re.error as e:
+            log.error("invalid regular expression for ignore_path: %s", e)
+            return 1
+    inputs = []  # (file, target whose rules apply)
+    if args.files:
+        inputs = [(f, None) for f in args.files]
+    else:
+        sites = [Site(d["name"], d["log"], d["regex"], d["all"], d.get("watch"))
+                 for d in (getattr(args, "sites", None) or [])]
+        if getattr(args, "log", None):
+            sites.insert(0, Site("default", args.log))
+        inputs = [(s.log, s) for s in sites]
+    if not inputs:
+        log.error("no log to analyse: give files, or define `log =` / [site:NAME] in the configuration")
+        return 1
+    an = Analysis(RangeStore(cache), ignore_path, args.sustain, args.time_unit)
+    for path, site in inputs:
+        try:
+            f = sys.stdin if path == "-" else open(path, errors="replace")
+            with f:
+                for line in f:
+                    an.feed(line, site)
+        except OSError as e:
+            log.error("%s: %s", path, e)
+            return 1
+    print("\n".join(report(an, args.threshold, args.top)))
     return 0
 
 
@@ -407,6 +446,22 @@ def main(argv=None):
     ins.add_argument("--start", action="store_true", help="enables AND starts the service")
     ins.add_argument("--destdir", help="writes the files under this prefix without touching the system (test)")
     ins.set_defaults(fn=cmd_install)
+
+    an = sub.add_parser("analyse", parents=[common],
+                        help="reads a log once and suggests settings (threshold, ignore_path)")
+    an.add_argument("files", nargs="*", help="logs to read (- = stdin); "
+                    "default: those of the configuration")
+    an.add_argument("-t", "--threshold", type=float, default=5.0,
+                    help="threshold to highlight in the table (default: the configuration, else 5)")
+    an.add_argument("--sustain", type=int, default=5,
+                    help="consecutive seconds above the threshold (default: the configuration, else 5)")
+    an.add_argument("--ignore-path", metavar="REGEX",
+                    help="paths not counted (default: ignore_path of the configuration)")
+    an.add_argument("--time-unit", choices=("auto", "us", "ms", "s"), default="auto",
+                    help="unit of the duration at the end of the line (auto: decimal = s, "
+                         "integer = µs like Apache %%D)")
+    an.add_argument("--top", type=int, default=10, help="rows of the rankings (default: 10)")
+    an.set_defaults(fn=cmd_analyse)
 
     wd = sub.add_parser("watched", parents=[common],
                         help="monitored IPs (watch_*) caught in a ban: possible false positives")

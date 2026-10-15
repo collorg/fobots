@@ -205,6 +205,34 @@ la ligne de requête (`GET /chemin?…`) : cela marche aussi avec le format *com
   les pages statiques. Servir quelque chose aux plages bannies demanderait de les rediriger
   vers un autre serveur plutôt que de les rejeter.
 
+## Analyser un log : `fobots analyse`
+
+```
+fobots analyse                      # les logs de fobots.conf
+fobots analyse access.log -t 3      # un fichier donné, avec le seuil 3 mis en avant
+```
+Lit les logs une fois (ni nft, ni démon, ni requête RDAP : seulement les plages déjà dans le
+cache) et affiche :
+
+- le **tableau « et si »** : pour plusieurs seuils, combien de plages auraient été bannies
+  (au-dessus du seuil pendant `sustain` secondes consécutives) et quelle part des requêtes
+  elles ont envoyée, puis les plages les plus actives. Choisis le seuil à partir duquel le
+  tableau cesse de grossir ;
+- les **répertoires** les plus demandés, la part de fichiers statiques, ce que ton
+  `ignore_path` exclut déjà, et un `ignore_path` suggéré (répertoires fréquents qui ne servent
+  presque que du statique, et rapides quand le log a les durées) ;
+- les user-agents les plus fréquents.
+
+**Durée des requêtes.** Elle n'est pas dans les formats usuels. Pour classer les répertoires
+par coût et éviter d'exclure quelque chose de lent, ajoute-la en **dernier** champ : Apache
+`LogFormat "%h %l %u %t \"%r\" %>s %b \"%{Referer}i\" \"%{User-Agent}i\" %D" combined`
+(microsecondes), nginx `$request_time` (secondes). `--time-unit` force l'unité (auto : un
+nombre décimal est en secondes, un entier en microsecondes). Le démon n'est pas gêné par ce
+champ supplémentaire.
+
+Ce sont des **suggestions** : rien n'est modifié, et une suggestion tirée d'une journée
+calme se vérifie avant usage.
+
 ## Repérer des IP légitimes prises dans un ban (gitlab-runner…)
 
 Opt-in : `watch_agent` (regex sur l'user-agent) et `watch_path` (regex sur la route) ;
@@ -317,6 +345,7 @@ fobots bans                       bans actifs et temps restant
 fobots welcome add CIDR…        liste welcome + retrait des bans concernés
 fobots welcome list
 fobots watched [--active] [--cmd]  IP surveillées (watch_*) prises dans un ban
+fobots analyse [LOG…]           lit des logs une fois et suggère des réglages (sans nft ni root)
 ```
 Options communes : `-f CONF`, `--dir`, `-c`, `-w`, `--ban-time`, `--nft-bin`,
 `--dry-run`, `-v`. `--dry-run` n'appelle pas nft : il affiche les commandes et
