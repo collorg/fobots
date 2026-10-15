@@ -18,7 +18,7 @@ import warnings
 from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-from fobots.analyse import Analysis, average_rate, dir_key, report, sustained_rate  # noqa: E402
+from fobots.analyse import Analysis, average_rate, dir_key, report, short_agent, sustained_rate  # noqa: E402
 from fobots.cli import main  # noqa: E402
 from fobots.config import CONF_KEYS, SITE_KEYS, load_config  # noqa: E402
 from fobots.detector import Detector  # noqa: E402
@@ -657,6 +657,14 @@ class AnalyseTests(unittest.TestCase):
         self.assertEqual(sustained_rate({0: 3, 1: 5, 2: 4}, 3), 3)
         self.assertEqual(sustained_rate({0: 3, 1: 5, 3: 4}, 3), 0)  # second 2 is missing
         self.assertEqual(sustained_rate({0: 9}, 1), 9)
+
+    def test_agents_differing_by_their_end_are_not_merged(self):
+        an = self.analysis()
+        long_ua = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) "
+        an.feed(line("43.1.1.1", 0, agent=long_ua + "Chrome/120.0.0.0 Safari/537.36"))
+        an.feed(line("43.1.1.2", 0, agent=long_ua + "Chrome/153.0.0.0 Safari/537.36"))
+        self.assertEqual(len(an.agents), 2)
+        self.assertTrue(short_agent(long_ua + "Chrome/120.0.0.0 Safari/537.36").endswith("Chrome/120.0.0.0 Safari/537.36"))
 
     def test_average_rate(self):
         slow = {s: 1 for s in range(0, 100, 2)}          # one request every 2 s

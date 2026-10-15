@@ -110,7 +110,7 @@ class Analysis:
             d[4] += 1
             self.timed += 1
         if agent is not None and (agent in self.agents or len(self.agents) < MAX_AGENTS):
-            self.agents[agent[:90]] += 1
+            self.agents[agent[:200]] += 1
         if ignored:
             self.ignored += 1
             return
@@ -130,8 +130,8 @@ class Analysis:
         ips = self.range_ips[key]
         if len(ips) < MAX_RANGE_IPS:
             ips.add(ip)
-        if agent is not None and agent[:90] in self.agents:
-            a = agent[:90]
+        if agent is not None and agent[:200] in self.agents:
+            a = agent[:200]
             if len(self.agent_ips[a]) < MAX_AGENT_SET:
                 self.agent_ips[a].add(ip)
                 self.agent_ranges[a].add(key)
@@ -173,6 +173,11 @@ class Analysis:
 
     def suggested_regex(self, dirs):
         return "^(" + "|".join(re.escape(d) for d, _ in dirs) + ")"
+
+
+def short_agent(agent, width=100):
+    """Long agents keep their beginning and their END (where the browser version is)."""
+    return agent if len(agent) <= width else agent[:40] + "…" + agent[-(width - 41):]
 
 
 def label(key):
@@ -252,12 +257,12 @@ def report(an, threshold, top=10):
         spread = []
         for agent, n in an.agents.most_common(5):
             ips, rngs = len(an.agent_ips[agent]), len(an.agent_ranges[agent])
-            add(f"  {n:>9} {n / an.lines:>6.1%}  {ips:>6} IPs {rngs:>5} ranges  {agent}")
+            add(f"  {n:>9} {n / an.lines:>6.1%}  {ips:>6} IPs {rngs:>5} ranges  {short_agent(agent)}")
             if n >= 0.1 * an.lines and rngs >= 10:
                 spread.append((agent, n, rngs))
         for agent, n, rngs in spread:
             add(f"  -> {n / an.lines:.0%} of the requests come from ONE user agent spread over "
-                f"{rngs}+ ranges: a distributed scraper, to look at ({agent[:40]}…)")
+                f"{rngs}+ ranges: a distributed scraper, to look at ({short_agent(agent, 60)})")
         add("")
     # --- suggestions
     add("Suggestions:")
