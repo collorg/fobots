@@ -90,6 +90,7 @@ a session open (see "Reset").
 make                 # builds dist/fobots_0.N_all.deb  (N = number of commits)
 make VERSION=1.0.0   # imposes the version
 make check           # syntax check
+make upgrade         # tests, build, then sudo dpkg -i (restarts a running service)
 make lint            # lintian
 sudo apt install ./dist/fobots_*_all.deb
 ```

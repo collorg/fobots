@@ -4,6 +4,7 @@
 #   make test     unit tests (standard library, python3 -m unittest)
 #   make check    syntax + tests
 #   make integration   real nft, fake logs, in a throwaway namespace (no root)
+#   make upgrade  tests, builds the package and installs it (sudo); restarts a running service
 #   make lint     lintian on the package (if installed)
 #   make clean
 
@@ -11,17 +12,22 @@
 COUNT   := $(shell git rev-list --count HEAD 2>/dev/null || echo 0)
 VERSION ?= 0.$(COUNT)
 DEB     := dist/fobots_$(VERSION)_all.deb
+SUDO    := $(if $(filter 0,$(shell id -u)),,sudo)
 
-.PHONY: deb test check integration lint clean help
+.PHONY: deb upgrade test check integration lint clean help
 .DEFAULT_GOAL := deb
 
 help:
-	@sed -n '2,9p' Makefile
+	@sed -n '2,10p' Makefile
 
 # Always starts from a clean tree: no stale build/ nor old package left in dist/.
 deb:
 	$(MAKE) --no-print-directory clean
 	./build-deb.sh $(VERSION)
+
+# postinst restarts fobots.service if it is running (try-restart); a stopped one stays stopped.
+upgrade: check deb
+	$(SUDO) dpkg -i $(DEB)
 
 test:
 	python3 -m unittest discover -s tests

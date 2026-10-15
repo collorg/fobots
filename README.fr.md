@@ -95,6 +95,7 @@ Commencer prudemment : `ban_time = 10m`, un seuil qui ne vise que les cas
 make                 # construit dist/fobots_0.N_all.deb  (N = nombre de commits)
 make VERSION=1.0.0   # impose la version
 make check           # vérification de syntaxe
+make upgrade         # tests, construction, puis sudo dpkg -i (redémarre un service actif)
 make lint            # lintian
 sudo apt install ./dist/fobots_*_all.deb
 ```
