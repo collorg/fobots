@@ -170,6 +170,13 @@ for memory), memory available ≤ 15 %, swap ≥ 100 pages/s, accept queue ≥ 1
 points, not recommendations: the point is to see, on **your** machine, which signal deserves
 to be used. Let it run until a few slowdowns have happened.
 
+Add `--log /var/log/nginx/access.log` (repeatable) to couple the recording with the access logs: each
+measure then also stores the requests/s, the share of 5xx answers (a saturated backend) and the number
+of distinct IPs that arrived since the previous one, and the report adds two rows: *requests/s ≥ 2×
+the normal median* tells a traffic peak from an internal cause (backup, cron, slow database), and
+the 5xx share shows when the backend started to fail. The log is only read (from its end), never
+taken from the configuration, and a rotation is followed.
+
 Three levels: *normal*, *tense*, *critical*. It goes up immediately; it goes down one level
 only after `load_recover` continuously below the threshold. At each level, **the threshold
 and the ban duration are multiplied** by the factor (0.5 then 0.25 by default), without going

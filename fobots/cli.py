@@ -444,13 +444,16 @@ def cmd_record(args):
         critical = d_crit if args.load_critical is None else args.load_critical
         probe = Probe(targets, args.load_probe_timeout, critical)
         probe.measure(strict=True)
+        for path in args.record_logs:
+            with open(path, "rb"):
+                pass
         with open(args.record, "a"):
             pass
     except (OSError, ValueError) as e:
         log.error("record: %s", e)
         return 1
     interval = 5.0 if args.interval is None else args.interval
-    rec = Recorder(probe, args.record, tense, critical, interval)
+    rec = Recorder(probe, args.record, tense, critical, interval, logs=args.record_logs)
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     log.info("recording to %s: one measure every %g s, readings written from %g s "
              "(Ctrl-C to stop; `fobots probe --report %s` to read)",
@@ -614,6 +617,10 @@ def main(argv=None):
                     help="runs until stopped and writes to FILE the state of the machine "
                          "(load, memory, swap, pressure, accept queue, processes) when the response "
                          "time reaches --load-tense")
+    pr.add_argument("--log", dest="record_logs", action="append", default=[], metavar="FILE",
+                    help="--record: access log to follow too (repeatable): requests/s, share of 5xx "
+                         "and distinct IPs of each measure, to tell a traffic peak from an "
+                         "internal cause. Not taken from the configuration")
     pr.add_argument("--report", metavar="FILE",
                     help="reads a --record file: slowdowns, and which reading moved first")
     pr.add_argument("--load-tense", type=float,

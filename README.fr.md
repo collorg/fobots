@@ -180,6 +180,13 @@ pages/s, file d'accept ≥ 1) sont des repères, pas des recommandations : il s'
 sur **ta** machine, quel signal mérite d'être utilisé. Laisse-le tourner jusqu'à quelques
 ralentissements.
 
+Ajoute `--log /var/log/nginx/access.log` (répétable) pour coupler l'enregistrement aux logs d'accès :
+chaque mesure stocke alors aussi les requêtes/s, la part de réponses 5xx (un backend saturé) et le
+nombre d'IP distinctes arrivées depuis la précédente, et le rapport ajoute deux lignes : *requêtes/s ≥
+2× la médiane normale* distingue un pic de trafic d'une cause interne (sauvegarde, cron, base lente),
+et la part de 5xx montre quand le backend a commencé à défaillir. Le log est seulement lu (depuis sa
+fin), jamais pris dans la configuration, et une rotation est suivie.
+
 Trois niveaux : *normal*, *tendu*, *critique*. On y monte immédiatement ; on
 redescend d'un niveau seulement après `load_recover` continu sous le palier. À
 chaque niveau, **le seuil et la durée de ban sont multipliés** par le facteur

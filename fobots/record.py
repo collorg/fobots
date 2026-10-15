@@ -12,6 +12,7 @@ import http.client
 import json
 import logging
 import os
+import re
 import socket
 import statistics
 import time
@@ -29,6 +30,9 @@ WEB_PORTS = (80, 443)
 TOP_PROCS = 8
 EPISODE_GAP = 120        # seconds without snapshot: the next slowdown is another episode
 
+LOG_RE = re.compile(r'^(\S+) .*?"[A-Z]+ [^"]*" (\d{3}) ')
+LOG_MAX_READ = 8 << 20   # bytes read from one log per measure (the rest is read next time)
+
 # Reference values to judge when a reading "moved" (not recommendations).
 ALARMS = {
     "load average / core": (lambda s: s.get("load"), 1.0, ">="),
@@ -39,14 +43,17 @@ ALARMS = {
     "swap pages/s": (lambda s: s.get("swap_rate"), 100.0, ">="),
     "accept queue 80/443": (lambda s: s.get("lq"), 1, ">="),
     "listen overflows": (lambda s: s.get("lovf"), 1, ">="),
+    "requests/s (log)": (lambda s: s.get("req_s"), None, ">="),  # 2 x the normal median
+    "5xx share % (log)": (lambda s: s.get("e5"), 5.0, ">="),
 }
 
 
 
-def alarm(name, s):
+def alarm(name, s, limits=None):
     get, limit, op = ALARMS[name]
+    limit = (limits or {}).get(name, limit)
     v = get(s)
-    if v is None:
+    if v is None or limit is None:
         return None
     return v >= limit if op == ">=" else v <= limit
 
@@ -174,13 +181,57 @@ def scan_procs(root="/proc", prev=None):
 
 
 
+class LogTail:
+    """Counts what the logs received since the previous call: requests/s, share of 5xx, IPs.
+    Starts at the end of the files; follows a rotation (new inode or smaller file)."""
+
+    def __init__(self, paths):
+        self.files = {}
+        for p in paths:
+            try:
+                st = os.stat(p)
+                self.files[p] = (st.st_ino, st.st_size)
+            except OSError:
+                self.files[p] = (None, 0)
+        self.t = None
+
+    def read(self, now):
+        count = errors = 0
+        ips = set()
+        for p, (ino, pos) in list(self.files.items()):
+            try:
+                with open(p, "rb") as f:
+                    st = os.fstat(f.fileno())
+                    if ino != st.st_ino or st.st_size < pos:
+                        pos = 0  # rotated
+                    f.seek(pos)
+                    data = f.read(LOG_MAX_READ)
+                    if len(data) == LOG_MAX_READ:  # too much at once: stop at a line end
+                        data = data[:data.rfind(b"\n") + 1]
+                    self.files[p] = (st.st_ino, pos + len(data))
+            except OSError:
+                continue
+            for line in data.decode("utf-8", "replace").splitlines():
+                m = LOG_RE.match(line)
+                if m:
+                    count += 1
+                    errors += m.group(2).startswith("5")
+                    ips.add(m.group(1))
+        dt, self.t = (None if self.t is None else now - self.t), now
+        if not dt or dt <= 0:
+            return {}
+        return {"req_s": round(count / dt, 1), "e5": round(100 * errors / count, 1) if count else None,
+                "ips": len(ips)}
+
+
+
 # recorder ---------------------------------------------------------------------------------
 
 class Recorder:
     """One call to `step()` per measure; writes JSON lines (kinds: base, pre, snap, end, gap)."""
 
     def __init__(self, probe, path, tense=1.0, critical=3.0, interval=5.0, root="/proc",
-                 max_bytes=MAX_BYTES):
+                 max_bytes=MAX_BYTES, logs=()):
         self.probe, self.path, self.tense, self.critical = probe, path, tense, critical
         self.interval, self.root, self.max_bytes = interval, root, max_bytes
         self.ring = collections.deque(maxlen=max(1, int(PRE_SECONDS / interval)))
@@ -188,6 +239,9 @@ class Recorder:
         self.episode, self.written_t = False, 0.0
         self.last_base = self.last_snap = self.snap_level = None
         self.last_step = None
+        self.logs = LogTail(logs) if logs else None
+        if self.logs:
+            self.logs.t = time.time()
 
     def measure(self):
         """(worst response time, error text or None); a timeout counts as the timeout."""
@@ -222,6 +276,8 @@ class Recorder:
         self.last_step = mono
         rt, err = self.measure()
         readings, self.state = read_sys(self.root, self.state, wall)
+        if self.logs:
+            readings.update(self.logs.read(wall))
         entry = {"t": round(wall, 1), "rt": round(rt, 3), "sys": readings}
         if err:
             entry["err"] = err
@@ -317,6 +373,8 @@ def report(path, out=print):
     if not eps:
         out("\nNo slowdown recorded yet: let the recorder run until one happens.")
         return 0
+    req = [r["sys"]["req_s"] for r in base if r["sys"].get("req_s") is not None]
+    limits = {"requests/s (log)": max(1.0, 2 * statistics.median(req))} if req else {}
     out("\nSlowdowns:")
     for i, e in enumerate(eps, 1):
         peak = max(e["snaps"], key=lambda r: (r["rt"], r["level"]))
@@ -324,6 +382,12 @@ def report(path, out=print):
         t0 = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(e["snaps"][0]["t"]))
         out(f"  {i}. {t0}, {max(0, end - e['snaps'][0]['t']):.0f} s, peak {peak['rt']:.1f} s"
             + (f" ({peak['err']})" if peak.get("err") else "") + ("" if e["end"] else ", not ended"))
+        ps = peak["sys"]
+        if ps.get("req_s") is not None:
+            out(f"       at the peak: {ps['req_s']:g} requests/s"
+                + (f" (normal median {statistics.median(req):.1f})" if req else "")
+                + (f", {ps['e5']:g} % of 5xx" if ps.get("e5") is not None else "")
+                + f", {ps.get('ips', 0)} distinct IP(s)")
         for g in (peak.get("procs") or [])[:3]:
             out(f"       at the peak: {g['name']} x{g['n']}, {g['rss_mb']} MB"
                 + ("" if g["cpu_s"] is None else f", {g['cpu_s']:g} s of CPU"))
@@ -334,7 +398,7 @@ def report(path, out=print):
         before, same, late, never, leads = 0, 0, 0, 0, []
         for e in eps:
             t0 = e["snaps"][0]["t"]
-            hits = [r["t"] for r in e["pre"] + e["snaps"] if alarm(name, r["sys"])]
+            hits = [r["t"] for r in e["pre"] + e["snaps"] if alarm(name, r["sys"], limits)]
             if not hits:
                 never += 1
             elif min(hits) < t0:
@@ -344,13 +408,14 @@ def report(path, out=print):
                 same += 1
             else:
                 late += 1
-        known = [alarm(name, s) for s in normal if alarm(name, s) is not None]
+        known = [alarm(name, s, limits) for s in normal if alarm(name, s, limits) is not None]
         if not any(ALARMS[name][0](r["sys"]) is not None for r in records if "sys" in r):
-            out(f"  {name:<34}not available on this machine")
+            out(f"  {name:<34}not available" + (" (give --log)" if "(log)" in name else " on this machine"))
             continue
         false = f"{100 * sum(known) / len(known):.0f} %" if known else "?"
         lead = f"{statistics.median(leads):.0f} s" if leads else "-"
-        out(f"  {name + ' ' + op + ' ' + str(limit):<34}{before:>8}{same:>6}{late:>6}{never:>7}{lead:>9}{false:>14}")
+        label = f"{name} {op} " + ("2x normal" if limit is None else str(limit))
+        out(f"  {label:<34}{before:>8}{same:>6}{late:>6}{never:>7}{lead:>9}{false:>14}")
     out("\nbefore = crossed before the response time did; lead = median advance; "
         "false alarms = share of normal readings already beyond the value.")
     return 0

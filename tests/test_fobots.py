@@ -28,7 +28,7 @@ from fobots.grouping import cluster_ips, pick_groups, wide_blocks  # noqa: E402
 from fobots.load import LoadMonitor, Probe, parse_probe_urls, read_psi, summarize  # noqa: E402
 from fobots.nft import Nft, NftError, parse_elems, val_nets  # noqa: E402
 from fobots.rdap import RangeStore  # noqa: E402
-from fobots.record import Recorder, episodes, read_records, read_sys, scan_procs  # noqa: E402
+from fobots.record import LogTail, Recorder, episodes, read_records, read_sys, scan_procs  # noqa: E402
 from fobots.record import report as record_report  # noqa: E402
 from fobots.sites import Site  # noqa: E402
 from fobots.util import fmt_range, parse_duration, parse_ts, prefix_of, range_nets, subtract  # noqa: E402
@@ -972,6 +972,51 @@ class RecordTests(TmpDirCase):
         self.assertEqual(row.split()[5:9], ["1", "0", "0", "0"])  # before=1
         self.assertIn("10 s", row)
         self.assertIn("php-fpm", text)
+
+    def test_logtail_counts_what_arrived(self):
+        path = self.write("access.log", line("1.1.1.1", 0) * 3)
+        tail = LogTail([path])
+        tail.t = 100.0
+        with open(path, "a") as f:
+            f.write(line("1.1.1.1", 1) + line("2.2.2.2", 1) + line("3.3.3.3", 1).replace(" 200 ", " 502 "))
+            f.write(line("4.4.4.4", 1).replace(" 200 ", " 404 "))
+        self.assertEqual(tail.read(102.0), {"req_s": 2.0, "e5": 25.0, "ips": 4})
+        self.assertEqual(tail.read(104.0), {"req_s": 0.0, "e5": None, "ips": 0})
+
+    def test_logtail_follows_a_rotation(self):
+        path = self.write("access.log", line("1.1.1.1", 0) * 5)
+        tail = LogTail([path])
+        tail.t = 0.0
+        os.replace(path, path + ".1")
+        self.write("access.log", line("9.9.9.9", 0) * 2)
+        self.assertEqual(tail.read(1.0)["req_s"], 2.0)
+
+    def test_report_with_the_log(self):
+        log_path = self.write("access.log", "")
+        rec, root = self.recorder([0.1, 0.1, 0.1, 0.1, 1.5, 3.5, 0.1])
+        rec.logs = LogTail([log_path])
+        rec.logs.t = 999.0
+        for i in range(7):
+            with open(log_path, "a") as f:
+                f.write(line("1.1.1.1", 0) * (5 if i < 3 else 50))  # traffic x10 from step 3
+            rec.step(i * 5, 1000.0 + i * 5)
+        lines = []
+        record_report(rec.path, lines.append)
+        text = "\n".join(lines)
+        self.assertIn("requests/s", text)
+        row = next(x for x in lines if x.strip().startswith("requests/s (log)"))
+        cols = row.split()
+        self.assertEqual(cols[cols.index("normal") + 1:][:4], ["1", "0", "0", "0"])  # before the page slowed
+        self.assertIn("5 s", row)
+        self.assertIn("distinct IP", text)
+
+    def test_report_asks_for_the_log(self):
+        rec, _ = self.recorder([0.1, 3.5, 0.1])
+        for i in range(3):
+            rec.step(i * 5, 1000.0 + i * 5)
+        lines = []
+        record_report(rec.path, lines.append)
+        self.assertIn("(give --log)", "\n".join(lines))
 
     def test_gap_is_recorded(self):
         rec, _ = self.recorder([0.1, 0.1])
