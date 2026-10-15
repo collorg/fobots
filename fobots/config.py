@@ -36,7 +36,7 @@ PATH_KEYS = {"dir", "cache", "welcome", "log", "watch_file"}
 # /etc first: the result does not depend on the current directory (./fobots.conf is for development)
 CONF_SEARCH = (os.path.join(CONF_DIR, "fobots.conf"), "fobots.conf")
 
-SITE_KEYS = ("log", "ignore_prefix", "ignore_path", "ignore_all", "watch_agent", "watch_path")
+SITE_KEYS = ("log", "ignore_path", "ignore_all", "watch_agent", "watch_path")
 
 TRUE_VALUES = ("1", "true", "yes", "oui", "on")
 
@@ -90,10 +90,6 @@ def load_config(path):
         if log_file in seen:
             sys.exit(f"{path}: [{section}] and [site:{seen[log_file]}] follow the same log {log_file}")
         seen[log_file] = name
-        prefixes = [x for x in re.split(r"[,\s]+", opts.get("ignore_prefix", "").strip()) if x]
-        for x in prefixes:
-            if not x.startswith("/"):
-                sys.exit(f"{path}: [{section}] ignore_prefix {x!r} must start with /")
         regex = opts.get("ignore_path", "").strip() or None
         if regex:
             try:
@@ -108,7 +104,7 @@ def load_config(path):
                     re.compile(watch[key])
                 except re.error as e:
                     sys.exit(f"{path}: [{section}] invalid {key}: {e}")
-        sites.append({"name": name, "log": log_file, "prefixes": prefixes, "regex": regex,
+        sites.append({"name": name, "log": log_file, "regex": regex,
                       "watch": (watch["watch_agent"], watch["watch_path"]),
                       "all": opts.get("ignore_all", "").strip().lower() in TRUE_VALUES})
     if out.get("log") in seen:

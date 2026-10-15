@@ -154,7 +154,7 @@ Un serveur bien configuré écrit **un log par hôte virtuel**. Chaque log devie
 ```ini
 [site:gitlab]
 log = /var/log/gitlab/nginx/gitlab_access.log
-ignore_prefix = /assets/, /favicon.ico, /robots.txt
+ignore_path = ^/(assets/|favicon\.ico|robots\.txt)
 
 [site:vitrine]                       # site entièrement statique
 log = /var/log/nginx/vitrine.access.log
@@ -163,8 +163,7 @@ ignore_all = yes
 [site:api]                           # aucune règle propre : tout est compté
 log = /var/log/nginx/api.access.log
 ```
-- `log` (obligatoire), `ignore_prefix` (préfixes de chemin, séparés par des virgules),
-  `ignore_path` (regex), `ignore_all` (rien n'est compté pour cette cible), `watch_agent` / `watch_path` (surveillance, voir plus bas ; remplacent celles de `[fobots]` pour cette cible).
+- `log` (obligatoire), `ignore_path` (regex sur le chemin), `ignore_all` (rien n'est compté pour cette cible), `watch_agent` / `watch_path` (surveillance, voir plus bas ; remplacent celles de `[fobots]` pour cette cible).
 - Les règles propres **s'ajoutent** à l'`ignore_path` global de `[fobots]`.
 - Les alias CNAME d'un hôte n'ont aucun effet : ils aboutissent dans le même log, donc
   dans la même cible. Le nom d'hôte n'est jamais lu dans les lignes.
@@ -196,7 +195,7 @@ la ligne de requête (`GET /chemin?…`) : cela marche aussi avec le format *com
 
 **Prudence :**
 - N'exclure que ce qui est **peu coûteux à servir**. Ancrer sur des **préfixes** de
-  répertoires statiques (`/assets/`), pas sur des extensions : `\.js$` ou `\.css$`
+  répertoires statiques (`^/assets/`), pas sur des extensions : `\.js$` ou `\.css$`
   exempteraient aussi les fichiers du dépôt (`/-/raw/…/x.js`, `/-/blob/…`), dynamiques et
   coûteux, que des scrapers adorent.
 - Un scraper qui ne demande que des chemins exclus n'est jamais banni (ce qui est voulu :

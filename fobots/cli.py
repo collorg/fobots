@@ -125,7 +125,7 @@ def cmd_run(args):
             log.error("invalid regular expression for ignore_path: %s", e)
             return 1
         log.info("requests excluded from the count (path): %r", args.ignore_path)
-    sites = [Site(d["name"], d["log"], d["prefixes"], d["regex"], d["all"], d.get("watch"))
+    sites = [Site(d["name"], d["log"], d["regex"], d["all"], d.get("watch"))
              for d in (getattr(args, "sites", None) or [])]
     if args.log:  # single log of [fobots] or --log: a target without rules of its own
         if any(x.log == args.log for x in sites):

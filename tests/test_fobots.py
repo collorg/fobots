@@ -451,7 +451,7 @@ class DetectorAllocation(DetectorBase):
 
     def test_ignore_path_and_site_rules(self):
         import re
-        site = Site("gitlab", "/x.log", prefixes=["/assets/"])
+        site = Site("gitlab", "/x.log", regex="^/assets/")
         self.detector([self.ALLOC], threshold=2, ignore_path=re.compile(r"^/favicon"), sites=[site])
         for p in ("/assets/a.js", "/assets/b.js", "/favicon.ico", "/favicon.png"):
             for _ in range(3):
@@ -638,7 +638,7 @@ class LoadMonitorTests(unittest.TestCase):
 
 class SiteTests(unittest.TestCase):
     def test_rules(self):
-        s = Site("s", "/l", prefixes=["/assets/", "/favicon.ico"], regex=r"\.png$")
+        s = Site("s", "/l", regex=r"^/(assets/|favicon\.ico)|\.png$")
         self.assertTrue(s.ignores("/assets/x.js"))
         self.assertTrue(s.ignores("/favicon.ico"))
         self.assertTrue(s.ignores("/img/a.png"))
@@ -665,10 +665,10 @@ class ConfigTests(TmpDirCase):
         self.assertEqual(c["welcome"], self.path("w.txt"))
 
     def test_sites(self):
-        c = self.conf("[fobots]\n[site:gitlab]\nlog = /var/log/g.log\nignore_prefix = /assets/, /favicon.ico\n"
-                      "ignore_path = ^/x\n[site:static]\nlog = s.log\nignore_all = yes\n")
+        c = self.conf("[fobots]\n[site:gitlab]\nlog = /var/log/g.log\nignore_path = ^/(assets/|favicon)\n"
+                      "\n[site:static]\nlog = s.log\nignore_all = yes\n")
         g, s = c["sites"]
-        self.assertEqual((g["name"], g["prefixes"], g["regex"], g["all"]), ("gitlab", ["/assets/", "/favicon.ico"], "^/x", False))
+        self.assertEqual((g["name"], g["regex"], g["all"]), ("gitlab", "^/(assets/|favicon)", False))
         self.assertEqual((s["name"], s["log"], s["all"]), ("static", self.path("s.log"), True))
 
     def test_site_watch_options(self):
@@ -689,7 +689,7 @@ class ConfigTests(TmpDirCase):
             "[fobots]\n[site:a]\nlog = x\nfoo = 1\n": "unknown option 'foo'",
             "[fobots]\n[site:a]\nlog = x\n[site:b]\nlog = x\n": "follow the same log",
             "[fobots]\nlog = x\n[site:a]\nlog = x\n": "both in [fobots]",
-            "[fobots]\n[site:a]\nlog = x\nignore_prefix = assets\n": "must start with /",
+            "[fobots]\n[site:a]\nlog = x\nignore_prefix = /assets/\n": "unknown option 'ignore_prefix'",
             "[fobots]\n[site:a]\nlog = x\nignore_path = (\n": "invalid ignore_path",
         }
         for text, expected in bad.items():

@@ -146,7 +146,7 @@ with its own rules, in `fobots.conf`:
 ```ini
 [site:gitlab]
 log = /var/log/gitlab/nginx/gitlab_access.log
-ignore_prefix = /assets/, /favicon.ico, /robots.txt
+ignore_path = ^/(assets/|favicon\.ico|robots\.txt)
 
 [site:showcase]                      # entirely static site
 log = /var/log/nginx/showcase.access.log
@@ -155,7 +155,7 @@ ignore_all = yes
 [site:api]                           # no rules of its own: everything is counted
 log = /var/log/nginx/api.access.log
 ```
-- `log` (required), `ignore_prefix` (path prefixes, comma-separated), `ignore_path` (regex),
+- `log` (required), `ignore_path` (regex on the path),
   `ignore_all` (nothing is counted for this target), `watch_agent` / `watch_path` (monitoring,
   see below; they replace the `[fobots]` ones for this target).
 - Its own rules **add to** the global `ignore_path` of `[fobots]`.
@@ -188,8 +188,8 @@ lowered. The path read is the one in the request line (`GET /path?…`): this al
 the *common* format.
 
 **Caution:**
-- Only exclude what is **cheap to serve**. Anchor on **prefixes** of static directories
-  (`/assets/`), not on extensions: `\.js$` or `\.css$` would also exempt repository files
+- Only exclude what is **cheap to serve**. Anchor the regex on **prefixes** of static
+  directories (`^/assets/`), not on extensions: `\.js$` or `\.css$` would also exempt repository files
   (`/-/raw/…/x.js`, `/-/blob/…`), which are dynamic and expensive, and which scrapers love.
 - A scraper that only requests excluded paths is never banned (which is intended: it is
   cheap), and lines whose request is unreadable are counted.
