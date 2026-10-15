@@ -153,6 +153,33 @@ la charge toutes les 5 s :
   une minute (médiane, p95, max) pour t'aider à choisir les niveaux ; relance-la pendant un
   ralentissement pour voir à quoi ressemble « dégradé ».
 
+### Enregistrer à quoi ressemble un ralentissement (avant de configurer quoi que ce soit)
+
+`fobots probe` fonctionne sans configuration et sans installation (`./fobots.py probe …`).
+Laissé en route sur une machine, il enregistre l'état du serveur quand la page ralentit :
+
+```
+./fobots.py probe --url HOTE@http://127.0.0.1/app/page --record probe.jsonl      # lancé à la main (nohup, tmux…)
+./fobots.py probe --report probe.jsonl
+```
+
+Il mesure la page toutes les 5 s et garde en mémoire les deux dernières minutes de relevés
+(seul `/proc` est lu : charge, mémoire disponible, activité de swap, pression, file d'accept des
+ports 80/443, ListenOverflows). Quand le temps de réponse atteint `--load-tense` (1 s par
+défaut), il écrit ces deux minutes, puis un instantané complet (avec les processus qui
+consomment le plus de mémoire, regroupés par nom : les workers du backend, pas seulement le
+serveur web) toutes les 10 s tant que le ralentissement dure, et aussitôt qu'il devient
+critique (3 s). Un relevé des périodes normales est ajouté toutes les 5 minutes pour comparer.
+Le fichier est renommé `FILE.1` au-delà de 20 Mo.
+
+`--report` liste les ralentissements et indique **quel relevé a bougé le premier, et de
+combien de temps** (colonnes *before / same / late / never*, avance médiane, et part des
+relevés normaux déjà au-delà de la valeur : une fausse alerte). Les valeurs utilisées (charge
+≥ 1 par cœur, pression ≥ 20 % (5 % pour la mémoire), mémoire disponible ≤ 15 %, swap ≥ 100
+pages/s, file d'accept ≥ 1) sont des repères, pas des recommandations : il s'agit de voir,
+sur **ta** machine, quel signal mérite d'être utilisé. Laisse-le tourner jusqu'à quelques
+ralentissements.
+
 Trois niveaux : *normal*, *tendu*, *critique*. On y monte immédiatement ; on
 redescend d'un niveau seulement après `load_recover` continu sous le palier. À
 chaque niveau, **le seuil et la durée de ban sont multipliés** par le facteur

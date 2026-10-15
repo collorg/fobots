@@ -29,9 +29,9 @@ LEVELS = ("normal", "tense", "critical")
 
 
 
-def read_psi(resource):
+def read_psi(resource, root="/proc"):
     """Pressure `some avg10` (in %): share of the last 10 seconds spent waiting."""
-    with open(f"/proc/pressure/{resource}") as f:
+    with open(f"{root}/pressure/{resource}") as f:
         for line in f:
             kind, *fields = line.split()
             if kind == "some":

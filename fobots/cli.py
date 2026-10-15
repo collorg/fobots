@@ -46,6 +46,8 @@ from .load import (LOAD_DEFAULTS, SIGNALS, LoadMonitor, Probe, parse_probe_urls,
                    summarize)
 from .nft import NFT_SETUP, Nft, NftError
 from .rdap import Rdap, RangeStore
+from .record import Recorder
+from .record import report as record_report
 from .sites import Site
 from .util import parse_duration
 from .welcome import Banner, Welcome, welcome_add
@@ -375,6 +377,14 @@ def add_probe_options(parser):
 
 def cmd_probe(args):
     """Measures the probe URL(s) for a while, to choose load_tense / load_critical."""
+    if args.report:
+        return record_report(args.report)
+    if args.record:
+        return cmd_record(args)
+    if args.duration is None:
+        args.duration = 60
+    if args.interval is None:
+        args.interval = 2.0
     try:
         targets = parse_probe_urls(" ".join(args.url) or args.load_probe_url)
         if not targets:
@@ -419,6 +429,42 @@ def cmd_probe(args):
         print(f"\nDefaults: load_tense = 1, load_critical = 3 (seconds). From these measures, "
               f"2 x p95 gives load_tense = {tense:g}, load_critical = {3 * tense:g}.\n"
               "Measure again during a slowdown to see what a degraded service looks like.")
+    return 0
+
+
+
+def cmd_record(args):
+    """Runs until stopped: records the state of the machine when the service slows down."""
+    try:
+        targets = parse_probe_urls(" ".join(args.url) or args.load_probe_url)
+        if not targets:
+            raise ValueError("give --url, or load_probe_url in the configuration")
+        d_tense, d_crit = LOAD_DEFAULTS["probe"]
+        tense = d_tense if args.load_tense is None else args.load_tense
+        critical = d_crit if args.load_critical is None else args.load_critical
+        probe = Probe(targets, args.load_probe_timeout, critical)
+        probe.measure(strict=True)
+        with open(args.record, "a"):
+            pass
+    except (OSError, ValueError) as e:
+        log.error("record: %s", e)
+        return 1
+    interval = 5.0 if args.interval is None else args.interval
+    rec = Recorder(probe, args.record, tense, critical, interval)
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    log.info("recording to %s: one measure every %g s, readings written from %g s "
+             "(Ctrl-C to stop; `fobots probe --report %s` to read)",
+             args.record, interval, tense, args.record)
+    try:
+        if args.duration is None:
+            rec.run()
+        else:
+            end = time.monotonic() + args.duration
+            while time.monotonic() < end:
+                rec.step()
+                time.sleep(interval)
+    except KeyboardInterrupt:
+        pass
     return 0
 
 
@@ -560,8 +606,20 @@ def main(argv=None):
                         help="measures the response time of the probe URL(s) (to set load_tense/critical)")
     pr.add_argument("--url", action="append", default=[], metavar="[HOST@]URL",
                     help="page to request (default: load_probe_url of the configuration)")
-    pr.add_argument("--duration", type=parse_duration, default=60, help="measuring time (default: 1m)")
-    pr.add_argument("--interval", type=float, default=2.0, help="seconds between requests (default: 2)")
+    pr.add_argument("--duration", type=parse_duration,
+                    help="measuring time (default: 1m; with --record: until stopped)")
+    pr.add_argument("--interval", type=float,
+                    help="seconds between requests (default: 2; with --record: 5)")
+    pr.add_argument("--record", metavar="FILE",
+                    help="runs until stopped and writes to FILE the state of the machine "
+                         "(load, memory, swap, pressure, accept queue, processes) when the response "
+                         "time reaches --load-tense")
+    pr.add_argument("--report", metavar="FILE",
+                    help="reads a --record file: slowdowns, and which reading moved first")
+    pr.add_argument("--load-tense", type=float,
+                    help="--record: response time (s) starting a slowdown record (default: 1)")
+    pr.add_argument("--load-critical", type=float,
+                    help="--record: response time (s) of the critical level (default: 3)")
     add_probe_options(pr)
     pr.set_defaults(fn=cmd_probe)
 

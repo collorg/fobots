@@ -28,6 +28,8 @@ from fobots.grouping import cluster_ips, pick_groups, wide_blocks  # noqa: E402
 from fobots.load import LoadMonitor, Probe, parse_probe_urls, read_psi, summarize  # noqa: E402
 from fobots.nft import Nft, NftError, parse_elems, val_nets  # noqa: E402
 from fobots.rdap import RangeStore  # noqa: E402
+from fobots.record import Recorder, episodes, read_records, read_sys, scan_procs  # noqa: E402
+from fobots.record import report as record_report  # noqa: E402
 from fobots.sites import Site  # noqa: E402
 from fobots.util import fmt_range, parse_duration, parse_ts, prefix_of, range_nets, subtract  # noqa: E402
 from fobots.welcome import Banner, Welcome, welcome_add  # noqa: E402
@@ -876,6 +878,123 @@ class ProbeTests(unittest.TestCase):
         self.assertEqual(self.cli("probe").returncode, 1)
 
 
+class RecordTests(TmpDirCase):
+    """`fobots probe --record` / `--report` against a fake /proc."""
+
+    def fake_proc(self, avail=8000, swap_free=1000, pswp=0, queue=0, drops=0, psi_mem=0.0):
+        root = os.path.join(self.dir, "proc")
+        for sub in ("net", "pressure", "10", "11"):
+            os.makedirs(os.path.join(root, sub), exist_ok=True)
+
+        def put(rel, text):
+            with open(os.path.join(root, rel), "w") as f:
+                f.write(text)
+        put("loadavg", "0.50 0.40 0.30 1/100 999\n")
+        put("meminfo", f"MemTotal: 10000 kB\nMemAvailable: {avail} kB\nSwapTotal: 4096 kB\n"
+                       f"SwapFree: {swap_free} kB\n")
+        put("vmstat", f"pswpin {pswp}\npswpout 0\n")
+        for r in ("cpu", "io", "memory"):
+            put(f"pressure/{r}", f"some avg10={psi_mem if r == 'memory' else 0.0} avg60=0 avg300=0 total=0\n")
+        put("net/tcp", "  sl  local_address rem_address   st tx_queue rx_queue\n"
+                       f"   0: 00000000:0050 00000000:0000 0A 00000000:{queue:08X} 00:0 0 0 0\n"
+                       "   1: 00000000:0016 00000000:0000 0A 00000000:00000009 00:0 0 0 0\n")
+        put("net/netstat", "TcpExt: SyncookiesSent ListenOverflows ListenDrops\n"
+                           f"TcpExt: 0 {drops} 0\n")
+        for pid, name, ticks, pages in (("10", "php-fpm", 300, 2560), ("11", "nginx (w)", 100, 256)):
+            put(f"{pid}/stat", f"{pid} ({name}) S 1 1 1 0 -1 0 0 0 0 0 {ticks} {ticks} 0 0 20 0 1\n")
+            put(f"{pid}/statm", f"100 {pages} 10 1 0 1 0\n")
+        return root
+
+    def test_read_sys(self):
+        root = self.fake_proc(avail=1000, swap_free=96, queue=7, psi_mem=12.5)
+        s, state = read_sys(root, None, 100.0)
+        self.assertEqual((s["avail_pct"], s["swap_mb"], s["lq"]), (10.0, 3, 7))  # port 22 ignored
+        self.assertEqual(s["psi"], {"cpu": 0.0, "io": 0.0, "memory": 12.5})
+        self.assertNotIn("swap_rate", s)  # needs two readings
+        self.fake_proc(pswp=500, drops=3)
+        s, _ = read_sys(root, state, 110.0)
+        self.assertEqual((s["swap_rate"], s["lovf"]), (50.0, 3))
+
+    def test_read_sys_survives_missing_files(self):
+        s, _ = read_sys(os.path.join(self.dir, "nothing"), None, 1.0)
+        self.assertIsNone(s["load"])
+        self.assertIsNone(s["psi"])
+        self.assertIsNone(s["lq"])
+
+    def test_scan_procs_groups_by_name(self):
+        root = self.fake_proc()
+        top, cpu = scan_procs(root, None)
+        self.assertEqual([g["name"] for g in top], ["php-fpm", "nginx (w)"])
+        self.assertEqual((top[0]["n"], top[0]["rss_mb"], top[0]["cpu_s"]), (1, 10, None))
+        self.assertGreater(cpu["php-fpm"], 0)
+        top, _ = scan_procs(root, {"php-fpm": 0.0})
+        self.assertGreater(top[0]["cpu_s"], 0)
+
+    def recorder(self, times, **kw):
+        it = iter(times)
+        probe = mock.Mock(targets=[(None, "http://127.0.0.1/x")], timeout=10.0)
+        probe.fetch = lambda host, url: (200, next(it))
+        root = self.fake_proc(**kw)
+        return Recorder(probe, os.path.join(self.dir, "rec.jsonl"), 1.0, 3.0, 5.0, root), root
+
+    def test_slowdown_is_recorded_with_what_preceded_it(self):
+        rec, root = self.recorder([0.1, 0.1, 0.1, 1.5, 3.5, 0.2, 0.1])
+        for i in range(3):
+            rec.step(i * 5, 1000.0 + i * 5)
+        self.fake_proc(avail=500)  # memory drops as the page slows down
+        rec.step(15, 1015.0)
+        rec.step(20, 1020.0)  # critical: a new snapshot at once
+        rec.step(25, 1025.0)
+        rec.step(30, 1030.0)
+        kinds = [r["kind"] for r in read_records(rec.path)]
+        self.assertEqual(kinds, ["base", "pre", "pre", "snap", "snap", "end"])
+        eps = episodes(read_records(rec.path))
+        self.assertEqual(len(eps), 1)
+        self.assertEqual(len(eps[0]["pre"]), 2)
+        self.assertEqual(eps[0]["snaps"][1]["level"], 2)
+        self.assertEqual(eps[0]["snaps"][0]["procs"][0]["name"], "php-fpm")
+
+    def test_report_says_which_reading_moved_first(self):
+        rec, root = self.recorder([0.1, 0.1, 0.1, 0.1, 1.5, 3.5, 0.1])
+        for i in range(2):
+            rec.step(i * 5, 1000.0 + i * 5)
+        self.fake_proc(avail=900)  # 9 % available, two readings before the page slows down
+        rec.step(10, 1010.0)
+        rec.step(15, 1015.0)
+        rec.step(20, 1020.0)
+        rec.step(25, 1025.0)
+        rec.step(30, 1030.0)
+        lines = []
+        self.assertEqual(record_report(rec.path, lines.append), 0)
+        text = "\n".join(lines)
+        self.assertIn("1 slowdown(s)", text)
+        row = next(x for x in lines if x.strip().startswith("memory available"))
+        self.assertEqual(row.split()[5:9], ["1", "0", "0", "0"])  # before=1
+        self.assertIn("10 s", row)
+        self.assertIn("php-fpm", text)
+
+    def test_gap_is_recorded(self):
+        rec, _ = self.recorder([0.1, 0.1])
+        rec.step(0, 1000.0)
+        rec.step(500, 1500.0)
+        self.assertIn("gap", [r["kind"] for r in read_records(rec.path)])
+
+    def test_file_is_rotated(self):
+        rec, _ = self.recorder([0.1] * 3)
+        rec.max_bytes = 10
+        rec.step(0, 1000.0)
+        rec.step(400, 1400.0)
+        self.assertTrue(os.path.exists(rec.path + ".1"))
+
+    def test_report_without_slowdown(self):
+        rec, _ = self.recorder([0.1])
+        rec.step(0, 1000.0)
+        lines = []
+        record_report(rec.path, lines.append)
+        self.assertIn("No slowdown recorded", "\n".join(lines))
+
+
+
 class SiteTests(unittest.TestCase):
     def test_rules(self):
         s = Site("s", "/l", regex=r"^/(assets/|favicon\.ico)|\.png$")
@@ -1069,6 +1188,18 @@ class Commands(TmpDirCase):
         finally:
             logger.removeHandler(handler)
         return rc, out.getvalue(), err.getvalue() + "\n".join(records)
+
+    def test_probe_report_command(self):
+        path = self.write("rec.jsonl", json.dumps({"t": 1000.0, "kind": "base", "rt": 0.1, "level": 0,
+                                                    "sys": {"load": 0.1}}) + "\n")
+        rc, out, _ = self.run_main("probe", "--report", path)
+        self.assertEqual(rc, 0)
+        self.assertIn("1 reading(s) of normal times", out)
+
+    def test_probe_record_requires_a_url(self):
+        rc, _, err = self.run_main("probe", "--record", self.path("x.jsonl"))
+        self.assertEqual(rc, 1)
+        self.assertIn("give --url", err)
 
     def test_run_replays_a_log_in_dry_run(self):
         log_path = self.write("access.log", "".join(line(f"43.1.1.{i}", 0) for i in range(8)))

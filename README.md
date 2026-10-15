@@ -145,6 +145,31 @@ Disabled by default (`load_signal = none`). When enabled, a thread measures the 
   never taken from the log. `fobots probe` measures the URL for a minute (median, p95, max) to
   help choose the levels; run it again during a slowdown to see what "degraded" looks like.
 
+### Recording what a slowdown looks like (before configuring anything)
+
+`fobots probe` works without any configuration and without installation (`./fobots.py probe …`).
+Left running on a machine, it records what the server looks like when the page slows down:
+
+```
+./fobots.py probe --url HOST@http://127.0.0.1/app/page --record probe.jsonl      # run by hand (nohup, tmux…)
+./fobots.py probe --report probe.jsonl
+```
+
+It measures the page every 5 s and keeps the last two minutes of readings in memory (only
+`/proc` is read: load, memory available, swap activity, pressure stall, accept queue of ports
+80/443, ListenOverflows). When the response time reaches `--load-tense` (default 1 s) it writes
+those two minutes, then a full snapshot (with the processes using the most memory, grouped by
+name: the backend workers, not only the web server) every 10 s while the slowdown lasts, and
+immediately when it gets critical (3 s). A reading of normal times is added every 5 minutes for
+comparison. The file is renamed `FILE.1` above 20 MB.
+
+`--report` lists the slowdowns and tells **which reading moved first, and by how long** (columns
+*before / same / late / never*, median lead, and the share of normal readings that were already
+beyond the value: a false alarm). The values it uses (load ≥ 1 per core, pressure ≥ 20 % (5 %
+for memory), memory available ≤ 15 %, swap ≥ 100 pages/s, accept queue ≥ 1) are reference
+points, not recommendations: the point is to see, on **your** machine, which signal deserves
+to be used. Let it run until a few slowdowns have happened.
+
 Three levels: *normal*, *tense*, *critical*. It goes up immediately; it goes down one level
 only after `load_recover` continuously below the threshold. At each level, **the threshold
 and the ban duration are multiplied** by the factor (0.5 then 0.25 by default), without going
