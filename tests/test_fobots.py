@@ -807,7 +807,11 @@ class Follow(TmpDirCase):
 
 class Commands(TmpDirCase):
     def run_main(self, *argv):
-        """(return code, stdout, stderr + log records)"""
+        """(return code, stdout, stderr + log records). Unless a test gives its own -f, a minimal
+        configuration is used: /etc/fobots/fobots.conf or ./fobots.conf of the machine running
+        the tests (make upgrade on a server) must not change the results."""
+        if not any(a in ("-f", "--config") for a in argv):
+            argv = (*argv, "-f", self.write("isolated.conf", "[fobots]\n"))
         out, err, records = io.StringIO(), io.StringIO(), []
 
         class Collect(logging.Handler):
@@ -882,7 +886,9 @@ class Commands(TmpDirCase):
         self.assertIn("LAST BAN", out)
         self.assertIn("20.1.1.1/32 40.2.2.2/32", out)
         rc, out, err = self.run_main("watched", "--dry-run", "--dir", self.dir, "--cmd")
-        self.assertEqual(out.strip(), "fobots welcome add 20.1.1.1/32 40.2.2.2/32")
+        # without an explicit -f, the command has no -f; with one, it is repeated
+        self.assertEqual(out.strip(), "fobots welcome add 20.1.1.1/32 40.2.2.2/32 "
+                         f"-f {self.path('isolated.conf')}")
         rc, out, err = self.run_main("watched", "--dry-run", "--dir", self.path("empty"))
         self.assertIn("no finding", out)
 
