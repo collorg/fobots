@@ -125,7 +125,25 @@ Disabled by default (`load_signal = none`). When enabled, a thread measures the 
 
 - `psi`: `/proc/pressure` pressure (max of cpu and io, `some avg10`, in %), very reactive;
   automatically falls back to `loadavg` if the kernel does not offer it;
-- `loadavg`: 1-minute load divided by the number of cores (slower).
+- `loadavg`: 1-minute load divided by the number of cores (slower);
+- `probe`: **the response time of the service itself**, the most faithful indicator when what
+  you want to protect is a degrading site (a server can be saturated in Apache workers or
+  database connections with an idle CPU). One `GET` per URL every 5 s, from the machine:
+
+  ```ini
+  load_signal = probe
+  load_probe_url = www.example.org@http://127.0.0.1/app/some-dynamic-page
+  # load_tense = 1       # seconds (default)
+  # load_critical = 3
+  # load_probe_timeout = 10s   # a slower answer counts as 10 s
+  ```
+  `HOST@` sets the `Host` header (virtual host); several URLs are separated by commas, the
+  level follows the slowest. Choose a **dynamic page typical of your service**, answering 2xx:
+  the daemon refuses to start otherwise (a redirection or a 404 would measure nothing). A
+  connection error or an HTTP 5xx only counts as critical after 3 consecutive failures. The
+  probe comes from `127.0.0.1`: private, so never counted nor banned. It is chosen by you,
+  never taken from the log. `fobots probe` measures the URL for a minute (median, p95, max) to
+  help choose the levels; run it again during a slowdown to see what "degraded" looks like.
 
 Three levels: *normal*, *tense*, *critical*. It goes up immediately; it goes down one level
 only after `load_recover` continuously below the threshold. At each level, **the threshold
@@ -311,7 +329,8 @@ the configuration file. **The command line overrides the configuration.** See
 | `observed_escalate` | 4 | `observed`: partial bans of an allocation, within a ban's duration, before falling back to wide blocks |
 | `observed_max_prefix` | 16 | `observed`: width of the blocks banned as a fallback (IPv4 prefix; IPv6: `/32`); `0` = whole allocation |
 | `rdap_per_hour`, `delay` | 100, 2 | budget and spacing of RDAP requests |
-| `load_signal` | `none` | load-based hardening: `psi`, `loadavg` or `none` |
+| `load_signal` | `none` | load-based hardening: `probe`, `psi`, `loadavg` or `none` |
+| `load_probe_url`, `load_probe_timeout` | none, 10s | `probe` signal: `[HOST@]URL` page(s) requested; answer time counted as the timeout when slower |
 | `load_tense`, `load_critical` | 20 / 50 (psi), 1.0 / 2.0 (loadavg) | signal levels |
 | `load_recover` | 5m | time below the level before going down one level |
 | `tense_factor`, `critical_factor` | 0.5, 0.25 | multiplier of the threshold **and** of the ban duration |

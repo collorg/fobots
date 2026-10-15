@@ -19,9 +19,13 @@ ban_time = 1h        # duration of a ban: 30m, 1h, 1d…
 # Load-based hardening (disabled by default).
 # At the "tense" / "critical" level, the threshold AND the ban duration are multiplied by
 # the factor: bans are stricter but shorter, and ranges are re-judged sooner.
-# load_signal = none   # none | psi (reactive, /proc/pressure) | loadavg (load / cores)
-# load_tense = 20      # signal value for the tense level (psi: %; loadavg: per core)
-# load_critical = 50   # same for critical (loadavg defaults: 1.0 and 2.0)
+# load_signal = none   # none | probe (response time of the service) | psi (/proc/pressure) | loadavg
+# probe: one GET every 5 s on a typical DYNAMIC page (must answer 2xx), from the machine itself;
+# levels in seconds (defaults 1 and 3). Measure first: `fobots probe --url …`
+# load_probe_url = www.example.org@http://127.0.0.1/app/some-dynamic-page
+# load_probe_timeout = 10s
+# load_tense = 20      # signal value for the tense level (probe: 1 s; psi: %; loadavg: per core)
+# load_critical = 50   # same for critical (probe: 3 s; loadavg defaults: 1.0 and 2.0)
 # load_recover = 5m    # time below the level before going down one level
 # tense_factor = 0.5
 # critical_factor = 0.25

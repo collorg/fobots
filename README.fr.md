@@ -131,7 +131,27 @@ la charge toutes les 5 s :
 
 - `psi` : pression `/proc/pressure` (max de cpu et io, `some avg10`, en %), très
   réactive ; repli automatique sur `loadavg` si le noyau ne l'offre pas ;
-- `loadavg` : charge sur 1 minute divisée par le nombre de cœurs (plus lente).
+- `loadavg` : charge sur 1 minute divisée par le nombre de cœurs (plus lente) ;
+- `probe` : **le temps de réponse du service lui-même**, l'indicateur le plus fidèle quand
+  ce qu'on protège est un site qui se dégrade (un serveur peut être saturé en processus
+  Apache ou en connexions à la base avec un CPU au repos). Un `GET` par URL toutes les 5 s,
+  depuis la machine :
+
+  ```ini
+  load_signal = probe
+  load_probe_url = www.example.org@http://127.0.0.1/app/une-page-dynamique
+  # load_tense = 1       # secondes (défaut)
+  # load_critical = 3
+  # load_probe_timeout = 10s   # une réponse plus lente compte pour 10 s
+  ```
+  `HOTE@` fixe l'en-tête `Host` (vhost) ; plusieurs URL se séparent par des virgules, le
+  niveau suit la plus lente. Choisis une **page dynamique typique de ton service**, qui
+  répond en 2xx : le démon refuse de démarrer sinon (une redirection ou un 404 ne
+  mesureraient rien). Une erreur de connexion ou un HTTP 5xx ne compte comme critique qu'après
+  3 échecs consécutifs. La sonde vient de `127.0.0.1` : adresse privée, donc jamais comptée ni
+  bannie. Elle est choisie par toi, jamais tirée du log. `fobots probe` mesure l'URL pendant
+  une minute (médiane, p95, max) pour t'aider à choisir les niveaux ; relance-la pendant un
+  ralentissement pour voir à quoi ressemble « dégradé ».
 
 Trois niveaux : *normal*, *tendu*, *critique*. On y monte immédiatement ; on
 redescend d'un niveau seulement après `load_recover` continu sous le palier. À
@@ -324,7 +344,8 @@ conf.** Voir `fobots.conf.example` pour toutes les clés :
 | `observed_escalate` | 4 | `observed` : bans partiels d'une allocation, pendant la durée d'un ban, avant le repli en blocs larges |
 | `observed_max_prefix` | 16 | `observed` : largeur des blocs bannis en repli (préfixe IPv4 ; IPv6 : `/32`) ; `0` = allocation entière |
 | `rdap_per_hour`, `delay` | 100, 2 | budget et espacement des requêtes RDAP |
-| `load_signal` | `none` | durcissement selon la charge : `psi`, `loadavg` ou `none` |
+| `load_signal` | `none` | durcissement selon la charge : `probe`, `psi`, `loadavg` ou `none` |
+| `load_probe_url`, `load_probe_timeout` | aucun, 10s | signal `probe` : page(s) `[HOTE@]URL` demandée(s) ; une réponse plus lente compte pour la valeur du délai |
 | `load_tense`, `load_critical` | 20 / 50 (psi), 1.0 / 2.0 (loadavg) | paliers du signal |
 | `load_recover` | 5m | durée sous le palier avant de redescendre d'un niveau |
 | `tense_factor`, `critical_factor` | 0.5, 0.25 | multiplicateur du seuil **et** de la durée de ban |

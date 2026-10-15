@@ -9,6 +9,7 @@ nftables set as soon as the threshold is exceeded. Bans expire by themselves (nf
   fobots run                         # follows the log given in fobots.conf
   tail -F /var/log/gitlab/nginx/gitlab_access.log | fobots run -t 5 -
   fobots setup                       # creates nft table, sets and rules (idempotent)
+  fobots probe                       # response time of the load probe URL(s)
   fobots bans                        # active bans with remaining time
   fobots analyse access.log          # suggests threshold and ignore_path from a log
   fobots welcome add 17.0.0.0/8      # welcome list + removal of the bans concerned
@@ -23,11 +24,13 @@ then in /etc/fobots/, or given with -f. The command line overrides it.
 Signals: SIGUSR1 prints the most active ranges, SIGTERM/SIGINT stop the daemon.
 """
 import argparse
+import http.client
 import ipaddress
 import logging
 import os
 import re
 import signal
+import socket
 import sys
 import time
 from datetime import datetime
@@ -39,7 +42,8 @@ from .detector import OBSERVED_PREFIX6, OBSERVED_WIDE6, SCOPES, Detector
 from .events import read_events, trim_events
 from .follow import log_lines, run_sites, stdin_is_feed
 from .install import Installer
-from .load import LOAD_DEFAULTS, LoadMonitor, read_load
+from .load import (LOAD_DEFAULTS, SIGNALS, LoadMonitor, Probe, parse_probe_urls, read_load,
+                   summarize)
 from .nft import NFT_SETUP, Nft, NftError
 from .rdap import Rdap, RangeStore
 from .sites import Site
@@ -88,24 +92,41 @@ def cmd_run(args):
     rdap = Rdap(store, args.delay, args.rdap_per_hour)
     rdap.start()
     load = None
-    if args.load_signal not in ("none", "psi", "loadavg"):
-        log.error("invalid load_signal: %r (none, psi or loadavg)", args.load_signal)
+    if args.load_signal not in SIGNALS:
+        log.error("invalid load_signal: %r (%s)", args.load_signal, ", ".join(SIGNALS))
         return 1
     if args.load_signal != "none":
-        signal_name = args.load_signal
-        try:
-            read_load(signal_name)
-        except (OSError, ValueError) as e:
-            if signal_name != "psi":
-                log.error("load: %s", e)
-                return 1
-            log.warning("PSI unavailable (%s), falling back to loadavg", e)
-            signal_name = "loadavg"
+        signal_name, sampler = args.load_signal, None
         d_tense, d_crit = LOAD_DEFAULTS[signal_name]
-        load = LoadMonitor(signal_name,
-                           d_tense if args.load_tense is None else args.load_tense,
-                           d_crit if args.load_critical is None else args.load_critical,
-                           args.load_recover, (args.tense_factor, args.critical_factor))
+        tense = d_tense if args.load_tense is None else args.load_tense
+        critical = d_crit if args.load_critical is None else args.load_critical
+        if signal_name == "probe":
+            try:
+                targets = parse_probe_urls(args.load_probe_url)
+                if not targets:
+                    raise ValueError("load_probe_url is required with load_signal = probe")
+                probe = Probe(targets, args.load_probe_timeout, critical)
+                first = probe.measure(strict=True)  # the URL must answer 2xx now
+            except (OSError, ValueError) as e:
+                log.error("load probe: %s", e)
+                return 1
+            sampler = probe.measure
+            log.info("load probe: %d URL(s), first answer in %.2f s", len(targets), first)
+        else:
+            try:
+                read_load(signal_name)
+            except (OSError, ValueError) as e:
+                if signal_name != "psi":
+                    log.error("load: %s", e)
+                    return 1
+                log.warning("PSI unavailable (%s), falling back to loadavg", e)
+                signal_name = "loadavg"
+                d_tense, d_crit = LOAD_DEFAULTS[signal_name]
+                tense = d_tense if args.load_tense is None else args.load_tense
+                critical = d_crit if args.load_critical is None else args.load_critical
+        load = LoadMonitor(signal_name, tense, critical,
+                           args.load_recover, (args.tense_factor, args.critical_factor),
+                           sampler=sampler)
         load.start()
         log.info("load monitoring: %s, levels %s, recovery after %d s",
                  signal_name, load.thresholds, args.load_recover)
@@ -343,6 +364,65 @@ def cmd_welcome(args):
 
 
 
+def add_probe_options(parser):
+    parser.add_argument("--load-probe-url", metavar="[HOST@]URL,…",
+                        help="load_signal = probe: page(s) to request, e.g. "
+                             "www.example.org@http://127.0.0.1/app/page (HOST = Host header)")
+    parser.add_argument("--load-probe-timeout", type=parse_duration, default=10, metavar="DURATION",
+                        help="probe: an answer slower than this counts as this many seconds (default: 10s)")
+
+
+
+def cmd_probe(args):
+    """Measures the probe URL(s) for a while, to choose load_tense / load_critical."""
+    try:
+        targets = parse_probe_urls(" ".join(args.url) or args.load_probe_url)
+        if not targets:
+            raise ValueError("give --url, or load_probe_url in the configuration")
+        probe = Probe(targets, args.load_probe_timeout, 3.0)
+        probe.measure(strict=True)
+    except (OSError, ValueError) as e:
+        log.error("probe: %s", e)
+        return 1
+    samples = {url: [] for _, url in targets}
+    end = time.monotonic() + args.duration
+    print(f"probing {len(targets)} URL(s) for {args.duration} s, one request every "
+          f"{args.interval:g} s (Ctrl-C to stop)…", flush=True)
+    try:
+        while True:
+            for host, url in targets:
+                try:
+                    status, seconds = probe.fetch(host, url)
+                except socket.timeout:
+                    status, seconds = None, args.load_probe_timeout
+                except (OSError, http.client.HTTPException):
+                    status, seconds = None, None
+                samples[url].append(seconds if status is None or status < 500 else None)
+            if time.monotonic() >= end:
+                break
+            time.sleep(args.interval)
+    except KeyboardInterrupt:
+        pass
+    allv = []
+    for url, vals in samples.items():
+        ok = [v for v in vals if v is not None]
+        if not ok:
+            print(f"{url}: no answer ({len(vals)} attempts)")
+            continue
+        med, p95, mx = summarize(ok)
+        allv += ok
+        print(f"{url}\n  {len(ok)} answers, {len(vals) - len(ok)} failure(s): median {med:.2f} s, "
+              f"p95 {p95:.2f} s, max {mx:.2f} s")
+    if allv:
+        med, p95, mx = summarize(allv)
+        tense = max(1.0, float(-(-2 * p95 // 1)))
+        print(f"\nDefaults: load_tense = 1, load_critical = 3 (seconds). From these measures, "
+              f"2 x p95 gives load_tense = {tense:g}, load_critical = {3 * tense:g}.\n"
+              "Measure again during a slowdown to see what a degraded service looks like.")
+    return 0
+
+
+
 def main(argv=None):
     pre = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
     pre.add_argument("-f", "--config")
@@ -394,13 +474,16 @@ def main(argv=None):
                    help="window of --slow-threshold (default: 10m)")
     r.add_argument("--window", type=int, default=60,
                    help="window in seconds over which IPs are tracked (default: 60)")
-    r.add_argument("--load-signal", choices=["none", "psi", "loadavg"], default="none",
-                   help="hardens the rules according to the load: psi (reactive), loadavg "
-                        "(load/cores) or none (default)")
+    r.add_argument("--load-signal", choices=SIGNALS, default="none",
+                   help="hardens the rules according to the load: probe (response time of the "
+                        "service itself), psi (reactive), loadavg (load/cores) or none (default)")
     r.add_argument("--load-tense", type=float,
-                   help="signal value at the tense level (default: 20 %% for psi, 1.0 for loadavg)")
+                   help="signal value at the tense level (default: 1 s for probe, 20 %% for psi, "
+                        "1.0 for loadavg)")
     r.add_argument("--load-critical", type=float,
-                   help="value at the critical level (default: 50 %% for psi, 2.0 for loadavg)")
+                   help="value at the critical level (default: 3 s for probe, 50 %% for psi, "
+                        "2.0 for loadavg)")
+    add_probe_options(r)
     r.add_argument("--load-recover", type=parse_duration, default=300,
                    help="time below the level before going down one level (default: 5m)")
     r.add_argument("--tense-factor", type=float, default=0.5,
@@ -472,6 +555,15 @@ def main(argv=None):
                          "integer = µs like Apache %%D)")
     an.add_argument("--top", type=int, default=10, help="rows of the rankings (default: 10)")
     an.set_defaults(fn=cmd_analyse)
+
+    pr = sub.add_parser("probe", parents=[common],
+                        help="measures the response time of the probe URL(s) (to set load_tense/critical)")
+    pr.add_argument("--url", action="append", default=[], metavar="[HOST@]URL",
+                    help="page to request (default: load_probe_url of the configuration)")
+    pr.add_argument("--duration", type=parse_duration, default=60, help="measuring time (default: 1m)")
+    pr.add_argument("--interval", type=float, default=2.0, help="seconds between requests (default: 2)")
+    add_probe_options(pr)
+    pr.set_defaults(fn=cmd_probe)
 
     wd = sub.add_parser("watched", parents=[common],
                         help="monitored IPs (watch_*) caught in a ban: possible false positives")

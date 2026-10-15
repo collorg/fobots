@@ -25,7 +25,7 @@ from fobots.detector import Detector  # noqa: E402
 from fobots.events import append_event, read_events, trim_events  # noqa: E402
 from fobots.follow import follow  # noqa: E402
 from fobots.grouping import cluster_ips, pick_groups, wide_blocks  # noqa: E402
-from fobots.load import LoadMonitor, read_psi  # noqa: E402
+from fobots.load import LoadMonitor, Probe, parse_probe_urls, read_psi, summarize  # noqa: E402
 from fobots.nft import Nft, NftError, parse_elems, val_nets  # noqa: E402
 from fobots.rdap import RangeStore  # noqa: E402
 from fobots.sites import Site  # noqa: E402
@@ -747,6 +747,133 @@ class AnalyseTests(unittest.TestCase):
         an = self.analysis()
         an.feed('43.1.1.1 - - [14/Oct/2026:10:00:00 +0000] "GET /x HTTP/1.1" 200 12\n')
         self.assertEqual(an.lines, 1)
+
+
+class ProbeTests(unittest.TestCase):
+    """The load signal 'probe', against a real local HTTP server."""
+
+    @classmethod
+    def setUpClass(cls):
+        import http.server
+        cls.mode = {"delay": 0.0, "status": 200}
+        cls.hosts = []
+        outer = cls
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                outer.hosts.append(self.headers.get("Host"))
+                time.sleep(outer.mode["delay"])
+                self.send_response(outer.mode["status"])
+                self.send_header("Content-Length", "2")
+                self.end_headers()
+                self.wfile.write(b"ok")
+
+            def log_message(self, *a):
+                pass
+        cls.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        cls.url = f"http://127.0.0.1:{cls.server.server_address[1]}/page"
+        threading.Thread(target=cls.server.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+
+    def setUp(self):
+        self.mode.update(delay=0.0, status=200)
+        self.hosts.clear()
+
+    def test_parse_urls(self):
+        self.assertEqual(parse_probe_urls("a.org@http://127.0.0.1/x, http://127.0.0.1:8080/y"),
+                         [("a.org", "http://127.0.0.1/x"), (None, "http://127.0.0.1:8080/y")])
+        self.assertEqual(parse_probe_urls(""), [])
+        with self.assertRaises(ValueError):
+            parse_probe_urls("ftp://x/y")
+        with self.assertRaises(ValueError):
+            parse_probe_urls("/just/a/path")
+
+    def test_measures_the_response_time_and_sends_the_host(self):
+        p = Probe([("www.example.org", self.url)], timeout=5)
+        self.assertLess(p.measure(), 0.5)
+        self.assertEqual(self.hosts, ["www.example.org"])
+        self.mode["delay"] = 0.3
+        self.assertGreaterEqual(p.measure(), 0.3)
+
+    def test_worst_of_several_urls(self):
+        p = Probe([(None, self.url), (None, self.url + "2")], timeout=5)
+        self.mode["delay"] = 0.2
+        self.assertGreaterEqual(p.measure(), 0.2)
+
+    def test_timeout_counts_as_the_timeout(self):
+        self.mode["delay"] = 1.0
+        p = Probe([(None, self.url)], timeout=0.2)
+        self.assertEqual(p.measure(), 0.2)
+
+    def test_server_errors_become_critical_only_after_repeated_failures(self):
+        p = Probe([(None, self.url)], timeout=4, critical=3.0)
+        self.assertLess(p.measure(), 0.5)
+        self.mode["status"] = 503
+        self.assertLess(p.measure(), 0.5)   # first failures: the previous value is kept
+        self.assertLess(p.measure(), 0.5)
+        with self.assertLogs("fobots", "WARNING"):
+            self.assertEqual(p.measure(), 4)    # third failure: critical (max of timeout, critical)
+        self.mode["status"] = 200
+        with self.assertLogs("fobots", "INFO"):
+            self.assertLess(p.measure(), 0.5)
+
+    def test_strict_start_check(self):
+        p = Probe([(None, self.url)], timeout=2)
+        self.assertLess(p.measure(strict=True), 0.5)
+        self.mode["status"] = 404
+        with self.assertRaises(OSError):
+            p.measure(strict=True)
+        with self.assertRaises(OSError):
+            Probe([(None, "http://127.0.0.1:1/x")], timeout=1).measure(strict=True)
+
+    def test_monitor_levels_follow_the_probe(self):
+        values = iter([0.2, 1.5, 3.5, 0.2])
+        m = LoadMonitor("probe", 1.0, 3.0, 10, (0.5, 0.25), sampler=lambda: next(values))
+        levels = []
+        with self.assertLogs("fobots", "INFO"):
+            for now in (0, 1, 2, 3):
+                m.step(now)
+                levels.append(m.level)
+        self.assertEqual(levels, [0, 1, 2, 2])
+        self.assertIn("probe=0.20 s", m.describe())
+
+    def test_summarize(self):
+        self.assertEqual(summarize([1, 2, 3, 4, 100]), (3, 100, 100))
+
+    def cli(self, *argv):
+        root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
+        with tempfile.TemporaryDirectory() as d:
+            conf = os.path.join(d, "f.conf")
+            with open(conf, "w") as f:
+                f.write("[fobots]\n")
+            return subprocess.run([sys.executable, os.path.join(root, "fobots.py"), *argv, "-f", conf,
+                                   "--dir", d], capture_output=True, text=True, timeout=60)
+
+    def test_run_refuses_to_start_if_the_probe_page_does_not_answer_2xx(self):
+        self.mode["status"] = 404
+        r = self.cli("run", "--dry-run", "--load-signal", "probe", "--load-probe-url", self.url, "/dev/null")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("load probe", r.stderr)
+        self.assertIn("HTTP 404", r.stderr)
+        r = self.cli("run", "--dry-run", "--load-signal", "probe", "/dev/null")
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("load_probe_url is required", r.stderr)
+
+    def test_run_starts_with_the_probe_signal(self):
+        r = self.cli("run", "--dry-run", "--load-signal", "probe", "--load-probe-url", self.url, "/dev/null")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("load monitoring: probe, levels (1.0, 3.0)", r.stderr)
+
+    def test_probe_command(self):
+        r = self.cli("probe", "--url", self.url, "--duration", "1s", "--interval", "0.2")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("median", r.stdout)
+        self.assertIn("load_tense = 1", r.stdout)
+        self.assertEqual(self.cli("probe").returncode, 1)
 
 
 class SiteTests(unittest.TestCase):

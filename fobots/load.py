@@ -1,15 +1,29 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 Joël Maizi
 """Server load measurement for load-based hardening."""
+import http.client
 import logging
 import os
+import re
+import socket
+import ssl
+import statistics
 import threading
 import time
+from urllib.parse import urlsplit
 
 log = logging.getLogger("fobots")
 
 
-LOAD_DEFAULTS = {"psi": (20.0, 50.0), "loadavg": (1.0, 2.0)}  # (tense, critical)
+LOAD_DEFAULTS = {"psi": (20.0, 50.0), "loadavg": (1.0, 2.0), "probe": (1.0, 3.0)}  # (tense, critical)
+
+SIGNALS = ("none", "psi", "loadavg", "probe")
+
+UNITS = {"probe": " s"}
+
+PROBE_FAILS = 3           # consecutive failures before an unreachable service counts as critical
+
+PROBE_MAX_BODY = 1 << 20  # bytes read from the page (the whole response time is measured)
 
 LEVELS = ("normal", "tense", "critical")
 
@@ -33,6 +47,98 @@ def read_load(signal):
 
 
 
+def parse_probe_urls(text):
+    """[(Host header or None, url)] from `URL` or `HOST@URL` entries separated by spaces/commas."""
+    targets = []
+    for entry in re.split(r"[,\s]+", (text or "").strip()):
+        if not entry:
+            continue
+        host, sep, rest = entry.partition("@")
+        if not sep or "://" in host:  # no `HOST@`: the whole entry is the URL
+            host, rest = None, entry
+        if urlsplit(rest).scheme not in ("http", "https") or not urlsplit(rest).hostname:
+            raise ValueError(f"invalid probe URL {entry!r} (expected [HOST@]http://127.0.0.1/path)")
+        targets.append((host, rest))
+    return targets
+
+
+
+class Probe:
+    """The load signal 'probe': response time (s) of the service itself, the worst of the URLs.
+
+    One GET per URL and per measure. A timeout counts as `timeout` seconds; a connection error
+    or an HTTP 5xx keeps the previous value, and only counts as critical after PROBE_FAILS
+    consecutive failures (an incident of a second is not a critical load)."""
+
+    def __init__(self, targets, timeout=10.0, critical=3.0):
+        self.targets, self.timeout, self.critical = list(targets), timeout, critical
+        self.fails, self.last = {}, {}
+
+    def fetch(self, host, url):
+        """(HTTP status, seconds for the whole response); socket errors are raised."""
+        u = urlsplit(url)
+        ctx = None
+        if u.scheme == "https":
+            ctx = ssl.create_default_context()
+            if u.hostname in ("127.0.0.1", "localhost", "::1"):  # certificate of the vhost name
+                ctx.check_hostname, ctx.verify_mode = False, ssl.CERT_NONE
+            conn = http.client.HTTPSConnection(u.hostname, u.port, timeout=self.timeout, context=ctx)
+        else:
+            conn = http.client.HTTPConnection(u.hostname, u.port, timeout=self.timeout)
+        t0 = time.monotonic()
+        try:
+            conn.putrequest("GET", (u.path or "/") + (f"?{u.query}" if u.query else ""),
+                            skip_host=True, skip_accept_encoding=True)
+            conn.putheader("Host", host or u.netloc)
+            conn.putheader("User-Agent", "fobots-probe")
+            conn.putheader("Connection", "close")
+            conn.endheaders()
+            resp = conn.getresponse()
+            resp.read(PROBE_MAX_BODY)
+            return resp.status, time.monotonic() - t0
+        finally:
+            conn.close()
+
+    def measure(self, strict=False):
+        """Worst response time (s). strict (startup check): any failure, or a status other than
+        2xx (redirection, 404: the measured time would mean nothing), raises OSError."""
+        worst = 0.0
+        for host, url in self.targets:
+            try:
+                status, seconds = self.fetch(host, url)
+                if strict and not 200 <= status < 300:
+                    raise OSError(f"{url}: HTTP {status} (the probe needs a page answering 2xx)")
+                failed = status >= 500
+            except socket.timeout:
+                status, seconds, failed = None, self.timeout, False  # very slow: its own signal
+            except (OSError, http.client.HTTPException) as e:
+                if strict:
+                    raise OSError(f"{url}: {e}") from e
+                status, seconds, failed = None, 0.0, True
+            if failed:
+                n = self.fails[url] = self.fails.get(url, 0) + 1
+                if n == PROBE_FAILS:
+                    log.warning("probe %s: %d consecutive failures (HTTP %s): counted as critical",
+                                url, n, status or "no answer")
+                seconds = max(self.timeout, self.critical) if n >= PROBE_FAILS \
+                    else self.last.get(url, 0.0)
+            else:
+                if self.fails.get(url):
+                    log.info("probe %s: answers again", url)
+                self.fails[url] = 0
+                self.last[url] = seconds
+            worst = max(worst, seconds)
+        return worst
+
+
+
+def summarize(samples):
+    """(median, p95, maximum) of a list of seconds."""
+    s = sorted(samples)
+    return statistics.median(s), s[min(len(s) - 1, int(0.95 * len(s)))], s[-1]
+
+
+
 class LoadMonitor(threading.Thread):
     """Measures the load every `interval` s and derives a level (0, 1, 2).
 
@@ -53,7 +159,7 @@ class LoadMonitor(threading.Thread):
         return self.factors[self.level]
 
     def describe(self):
-        return f"{self.signal}={self.value:.2f}, level {LEVELS[self.level]} (x{self.factor:g})"
+        return f"{self.signal}={self.value:.2f}{UNITS.get(self.signal, '')}, level {LEVELS[self.level]} (x{self.factor:g})"
 
     def step(self, now):
         try:
