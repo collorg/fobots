@@ -983,6 +983,27 @@ class RecordTests(TmpDirCase):
         self.assertEqual(tail.read(102.0), {"req_s": 2.0, "e5": 25.0, "ips": 4})
         self.assertEqual(tail.read(104.0), {"req_s": 0.0, "e5": None, "ips": 0})
 
+    def test_logtail_gives_no_rate_over_a_tiny_interval(self):
+        path = self.write("access.log", "")
+        tail = LogTail([path])
+        with open(path, "a") as f:
+            f.write(line("1.1.1.1", 0) * 60)
+        self.assertEqual(tail.read(100.0), {})  # first call: nothing to compare with
+        with open(path, "a") as f:
+            f.write(line("1.1.1.1", 0) * 60)
+        self.assertEqual(tail.read(100.01), {})  # 60 lines in 10 ms would be 6000 requests/s
+        self.assertEqual(tail.read(101.0)["req_s"], 0.0)
+
+    def test_normal_times_use_every_measure(self):
+        rec, _ = self.recorder([0.1, 0.2, 0.3, 0.4])
+        rec.step(0, 1000.0)
+        for i in (1, 2):
+            rec.step(i * 5, 1000.0 + i * 5)
+        rec.step(300, 1300.0)
+        lines = []
+        record_report(rec.path, lines.append)
+        self.assertIn("(4 measures)", "\n".join(lines))
+
     def test_logtail_follows_a_rotation(self):
         path = self.write("access.log", line("1.1.1.1", 0) * 5)
         tail = LogTail([path])

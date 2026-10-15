@@ -31,6 +31,7 @@ TOP_PROCS = 8
 EPISODE_GAP = 120        # seconds without snapshot: the next slowdown is another episode
 
 LOG_RE = re.compile(r'^(\S+) .*?"[A-Z]+ [^"]*" (\d{3}) ')
+MIN_LOG_SECONDS = 0.5    # a rate over less than this would be meaningless
 LOG_MAX_READ = 8 << 20   # bytes read from one log per measure (the rest is read next time)
 
 # Reference values to judge when a reading "moved" (not recommendations).
@@ -218,8 +219,8 @@ class LogTail:
                     errors += m.group(2).startswith("5")
                     ips.add(m.group(1))
         dt, self.t = (None if self.t is None else now - self.t), now
-        if not dt or dt <= 0:
-            return {}
+        if dt is None or dt < MIN_LOG_SECONDS:
+            return {}  # first call, or too short an interval to give a rate
         return {"req_s": round(count / dt, 1), "e5": round(100 * errors / count, 1) if count else None,
                 "ips": len(ips)}
 
@@ -240,8 +241,7 @@ class Recorder:
         self.last_base = self.last_snap = self.snap_level = None
         self.last_step = None
         self.logs = LogTail(logs) if logs else None
-        if self.logs:
-            self.logs.t = time.time()
+        self.rts = []  # response times of the normal measures since the last reading of normal times
 
     def measure(self):
         """(worst response time, error text or None); a timeout counts as the timeout."""
@@ -298,9 +298,12 @@ class Recorder:
             if self.episode:
                 self.episode = False
                 self.write({**entry, "kind": "end"})
-            elif self.last_base is None or mono - self.last_base >= BASE_EVERY:
-                self.last_base = mono
-                self.write({**entry, "kind": "base"})
+            else:
+                self.rts.append(entry["rt"])
+                if self.last_base is None or mono - self.last_base >= BASE_EVERY:
+                    self.last_base = mono
+                    self.write({**entry, "kind": "base", "rts": self.rts})
+                    self.rts = []
         self.ring.append(entry)
         return entry
 
@@ -364,11 +367,11 @@ def report(path, out=print):
     out(f"{path}: {len(records)} records over {span / 3600:.1f} h, "
         f"{len(base)} reading(s) of normal times, {len(eps)} slowdown(s)"
         + (f", {len(gaps)} gap(s) in the measures (the machine or the recorder stalled)" if gaps else ""))
-    times = [r["rt"] for r in base if r.get("rt") is not None]
+    times = [t for r in base for t in (r.get("rts") or [r.get("rt")]) if t is not None]
     if times:
         med, p95, mx = summarize(times)
         tense = max(1.0, float(-(-2 * p95 // 1)))
-        out(f"\nNormal times: median {med:.2f} s, p95 {p95:.2f} s, max {mx:.2f} s -> "
+        out(f"\nNormal times ({len(times)} measures): median {med:.2f} s, p95 {p95:.2f} s, max {mx:.2f} s -> "
             f"load_tense = {tense:g}, load_critical = {3 * tense:g} would stay quiet.")
     if not eps:
         out("\nNo slowdown recorded yet: let the recorder run until one happens.")
