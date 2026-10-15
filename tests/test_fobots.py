@@ -1085,8 +1085,19 @@ class RecordTests(TmpDirCase):
         lines = []
         record_report(self.synthetic(hours=1, long_peaks=(), short_peaks=()), lines.append)
         text = "\n".join(lines)
-        self.assertIn("Not enough normal data yet", text)
+        self.assertIn("Not enough data yet", text)
         self.assertNotIn("load_tense", text)
+
+    def test_report_trusts_several_severe_slowdowns_on_a_short_recording(self):
+        lines = []
+        record_report(self.synthetic(hours=1, long_peaks=(6.0, 7.0, 9.0), short_peaks=()), lines.append)
+        text = "\n".join(lines)
+        self.assertIn("Short recording", text)
+        self.assertRegex(text, r"load_tense = 1 ")
+        self.assertIn("load_critical", text)
+        lines = []
+        record_report(self.synthetic(hours=1, long_peaks=(6.0, 7.0), short_peaks=()), lines.append)
+        self.assertIn("Not enough data yet", "\n".join(lines))
 
     def test_report_does_not_compare_signals_with_few_slowdowns(self):
         lines = []

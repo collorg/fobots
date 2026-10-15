@@ -178,7 +178,8 @@ slowdowns), each line with its justification, and a **replay** of the daemon's r
 daemon can use (`psi`, `loadavg`) moved before the page in at least two thirds of the slowdowns, with at
 least 20 s of advance and under 5 % of false alarms, it is offered as an alternative (the daemon takes one
 signal); the other readings are only reported as observations. Nothing is suggested without enough data:
-500 normal measures over 2 hours for the levels, 3 slowdowns to compare the signals. The values are a
+500 normal measures over 2 hours for the levels, or 3 slowdowns of 5 s or more (a machine under attack
+will not give hours of normal times), and 3 slowdowns to compare the signals. The values are a
 starting point: review them after the first real incident.
 
 Add `--log /var/log/nginx/access.log` (repeatable) to couple the recording with the access logs: each

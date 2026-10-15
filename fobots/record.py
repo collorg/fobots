@@ -31,7 +31,10 @@ WEB_PORTS = (80, 443)
 TOP_PROCS = 8
 MIN_MEASURES = 500       # normal measures needed before suggesting levels
 MIN_SPAN = 7200          # seconds recorded needed before suggesting levels
+SEVERE = 5.0            # seconds: a slowdown this slow is an incident by itself
+SEVERE_EPISODES = 3      # of them: enough to suggest levels without a long record of normal times
 MIN_EPISODES = 3         # slowdowns needed before comparing the other signals
+MIN_FEW = 30             # normal measures needed to use their p99 at all
 MIN_KNOWN = 10           # normal readings needed to judge the false alarms of a reading
 SHORT_EPISODE = 20       # seconds: a slowdown this short or less is an excursion, not an incident
 MAX_FALSE = 0.05         # false alarms accepted of a reading proposed as a signal
@@ -445,13 +448,23 @@ def suggest(records, base, eps, times, normal, out, recover=300):
     interval = start.get("interval") or 5.0
     span = records[-1]["t"] - records[0]["t"]
     out("\nSuggested configuration")
-    if len(times) < MIN_MEASURES or span < MIN_SPAN:
-        out(f"  Not enough normal data yet ({len(times)} measures over {span / 3600:.1f} h: "
-            f"need {MIN_MEASURES} over {MIN_SPAN // 3600} h). Let the recorder run.")
+    severe = sum(max(r["rt"] if not r.get("err") else 99.0 for r in e["snaps"]) >= SEVERE for e in eps)
+    enough = len(times) >= MIN_MEASURES and span >= MIN_SPAN
+    if not enough and severe < SEVERE_EPISODES:
+        out(f"  Not enough data yet ({len(times)} normal measures over {span / 3600:.1f} h: need "
+            f"{MIN_MEASURES} over {MIN_SPAN // 3600} h, or {SEVERE_EPISODES} slowdowns of {SEVERE:g} s or more, "
+            f"{severe} so far). Let the recorder run.")
         return
-    p99 = quantile(times, 0.99)
-    floor = max(start.get("tense") or 1.0, 1.0, ceil_half(2 * p99))
-    why_t = f"twice the p99 of {len(times)} normal measures ({p99:.2f} s)"
+    floor = max(start.get("tense") or 1.0, 1.0)
+    if len(times) >= MIN_FEW:
+        p99 = quantile(times, 0.99)
+        floor = max(floor, ceil_half(2 * p99))
+        why_t = f"twice the p99 of {len(times)} normal measures ({p99:.2f} s)"
+    else:
+        why_t = f"default: only {len(times)} normal measures recorded"
+    if not enough:
+        out(f"  Short recording ({len(times)} normal measures over {span / 3600:.1f} h), but "
+            f"{severe} slowdowns of {SEVERE:g} s or more: levels suggested from them.")
     tense = floor
     longs = [e for e in eps if e["snaps"][-1]["t"] - e["snaps"][0]["t"] > SHORT_EPISODE]
     shorts = [e for e in eps if e not in longs]

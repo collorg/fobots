@@ -188,7 +188,8 @@ du démon sur l'enregistrement (« avec 1 s / 3 s tu aurais été tendu 38 % du 
 12 % »). Si un relevé que le démon sait lire (`psi`, `loadavg`) a bougé avant la page dans au moins deux
 tiers des ralentissements, avec au moins 20 s d'avance et moins de 5 % de fausses alertes, il est proposé
 en alternative (le démon prend un seul signal) ; les autres relevés sont seulement signalés. Rien n'est
-suggéré sans assez de données : 500 mesures normales sur 2 heures pour les paliers, 3 ralentissements
+suggéré sans assez de données : 500 mesures normales sur 2 heures pour les paliers, ou 3 ralentissements
+de 5 s ou plus (une machine attaquée ne donnera pas des heures de temps normal), et 3 ralentissements
 pour comparer les signaux. Les valeurs sont un point de départ : à revoir après le premier vrai incident.
 
 Ajoute `--log /var/log/nginx/access.log` (répétable) pour coupler l'enregistrement aux logs d'accès :
