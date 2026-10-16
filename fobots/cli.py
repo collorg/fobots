@@ -736,7 +736,7 @@ def main(argv=None):
     add_probe_options(pr)
     pr.set_defaults(fn=cmd_probe)
 
-    rp = sub.add_parser("stress", aliases=["replay"], parents=[common],
+    rp = sub.add_parser("stress", parents=[common],
                         help="replays the GET requests of a log against a server with a rising load")
     rp.add_argument("files", nargs="*", help="log(s) to replay (default: those of the configuration)")
     rp.add_argument("--base", metavar="URL", help="server to load, e.g. https://www.example.org")
