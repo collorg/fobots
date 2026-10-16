@@ -471,7 +471,7 @@ indique aussi le nombre de lignes illisibles (format de log inattendu, par ex. l
 fobots run [-t SEUIL] [-p SEUIL_PREFIXE] [--log FICHIER] [fichiers…]   (sans argument : suit les logs de la conf)
 fobots install [--dry-run] [--log F] installe nftables, l'utilisateur, la conf, l'unité systemd
 fobots setup                      crée la table, les sets et les règles nft
-fobots bans                       bans actifs et temps restant
+fobots bans [--lookup]             bans actifs, temps restant et organisation (nom + contact abuse RDAP ; --lookup complète les manquants)
 fobots welcome add CIDR…        liste welcome + retrait des bans concernés
 fobots welcome list
 fobots watched [--active] [--cmd]  IP surveillées (watch_*) prises dans un ban

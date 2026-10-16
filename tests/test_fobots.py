@@ -29,7 +29,7 @@ from fobots.follow import follow  # noqa: E402
 from fobots.grouping import cluster_ips, pick_groups, wide_blocks  # noqa: E402
 from fobots.load import LoadMonitor, Probe, parse_probe_urls, read_psi, summarize  # noqa: E402
 from fobots.nft import Nft, NftError, parse_elems, val_nets  # noqa: E402
-from fobots.rdap import RangeStore  # noqa: E402
+from fobots.rdap import label, RangeStore  # noqa: E402
 from fobots.replay import Replay, make_fetcher, parse_rates, read_requests, schedule, select_requests  # noqa: E402
 from fobots.replay import report as replay_report  # noqa: E402
 from fobots.record import LogTail, Recorder, episodes, read_records, read_sys, recorded_span, scan_procs  # noqa: E402
@@ -265,6 +265,22 @@ class RangeStoreTests(TmpDirCase):
         s.add(rng("10.0.0.0", "10.255.255.255"))  # duplicate: no change
         self.assertEqual(s.version, v + 1)
         self.assertEqual(RangeStore(p).ranges, s.ranges)
+
+    def test_names_are_kept_and_old_files_load(self):
+        p = self.path("named.json")
+        s = RangeStore(p)
+        r = rng("10.0.0.0", "10.255.255.255")
+        s.add(r)
+        self.assertEqual(s.name(r), "")
+        s.add(r, "ACME-NET")  # known range, name arrives later
+        self.assertEqual(RangeStore(p).name(r), "ACME-NET")
+        self.assertEqual(RangeStore(p).ranges, (r,))
+
+    def test_label_has_name_and_abuse_contact(self):
+        data = {"name": "ACME-NET", "entities": [{"roles": ["registrant"], "entities": [
+            {"roles": ["abuse"], "vcardArray": ["vcard", [["email", {}, "text", "abuse@acme.example"]]]}]}]}
+        self.assertEqual(label(data), "ACME-NET abuse@acme.example")
+        self.assertEqual(label({"name": "X"}), "X")
 
     def test_old_format_and_corrupt_file(self):
         p = self.write("old.json", json.dumps([[4, 1, 2, "name"]]))
@@ -1591,6 +1607,19 @@ class Commands(TmpDirCase):
         finally:
             logger.removeHandler(handler)
         return rc, out.getvalue(), err.getvalue() + "\n".join(records)
+
+    def test_bans_shows_the_organisation(self):
+        cache = self.path("ranges.json")
+        store = RangeStore(cache)
+        store.add(rng("10.0.0.0", "10.255.255.255"), "ACME-NET")
+        net = ipaddress.ip_network("10.1.0.0/16")
+        with mock.patch("fobots.cli.Nft.elements",
+                        lambda self, ver: [(net, 3000)] if ver == 4 else []):
+            rc, out, _ = self.run_main("bans", "-c", cache)
+        self.assertEqual(rc, 0)
+        self.assertIn("10.1.0.0/16", out)
+        self.assertIn("3000 s left", out)
+        self.assertIn("ACME-NET", out)
 
     def test_probe_report_command(self):
         path = self.write("rec.jsonl", json.dumps({"t": 1000.0, "kind": "base", "rt": 0.1, "level": 0,

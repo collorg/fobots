@@ -32,11 +32,13 @@ class RangeStore:
         self.version = 0  # incremented on each addition (invalidates the memos)
         self._lock = threading.Lock()
         self.ranges = ()
+        self.names = {}  # range -> name of the organisation (when known)
         if path and os.path.exists(path):
             try:
                 with open(path) as f:
-                    # tolerates the old format (version, start, end, name)
-                    self.ranges = tuple({tuple(r[:3]) for r in json.load(f)})
+                    data = json.load(f)
+                self.ranges = tuple({tuple(r[:3]) for r in data})
+                self.names = {tuple(r[:3]): r[3] for r in data if len(r) > 3 and r[3]}
             except (OSError, ValueError) as e:
                 log.warning("cache %s unreadable (%s), starting from scratch", path, e)
 
@@ -49,16 +51,24 @@ class RangeStore:
                     best = r
         return best
 
-    def add(self, r):
+    def name(self, r):
+        return self.names.get(tuple(r[:3]), "")
+
+    def add(self, r, name=""):
         with self._lock:
-            if r in self.ranges:
+            new = r not in self.ranges
+            if not new and (not name or self.names.get(r) == name):
                 return
-            self.ranges = self.ranges + (r,)
-            self.version += 1
+            if new:
+                self.ranges = self.ranges + (r,)
+                self.version += 1
+            if name:
+                self.names[r] = name
             if self.path:
                 tmp = self.path + ".tmp"
                 with open(tmp, "w") as f:
-                    json.dump(self.ranges, f)
+                    json.dump([list(x) + [self.names[x]] if x in self.names else list(x)
+                               for x in self.ranges], f)
                 os.replace(tmp, self.path)
 
 
@@ -71,6 +81,24 @@ class RdapError(Exception):
 
 
 
+def abuse_email(data):
+    """Email of the entity with the `abuse` role (searched in nested entities), or ""."""
+    for ent in data.get("entities") or []:
+        if "abuse" in (ent.get("roles") or []):
+            for item in (ent.get("vcardArray") or [None, []])[1]:
+                if item and item[0] == "email" and item[-1]:
+                    return str(item[-1])
+        found = abuse_email(ent)
+        if found:
+            return found
+    return ""
+
+
+def label(data):
+    """Organisation as shown by `bans`: name of the allocation and abuse contact."""
+    return " ".join(x for x in (str(data.get("name") or ""), abuse_email(data)) if x)
+
+
 def fetch_rdap(ip):
     req = urllib.request.Request(RDAP_URL.format(ip),
                                  headers={"Accept": "application/rdap+json",
@@ -79,7 +107,7 @@ def fetch_rdap(ip):
         with urllib.request.urlopen(req, timeout=15) as r:
             data = json.load(r)
         return (ipaddress.ip_address(data["startAddress"]),
-                ipaddress.ip_address(data["endAddress"]))
+                ipaddress.ip_address(data["endAddress"]), label(data))
     except urllib.error.HTTPError as e:
         if e.code == 429:
             ra = e.headers.get("Retry-After", "")
@@ -132,15 +160,15 @@ class Rdap(threading.Thread):
             addr, prefix = self.q.get()
             try:
                 self._wait_budget()
-                start, end = self.fetch(str(addr))
+                start, end, *rest = self.fetch(str(addr))
                 ver = addr.version
                 if not int(start) <= int(addr) <= int(end):
                     raise RdapError("the range does not contain the IP", retry=3600)
                 if int(end) - int(start) + 1 > 2 ** (addr.max_prefixlen - MIN_PREFIX[ver]):
                     raise RdapError(f"range too wide ({start}-{end})", retry=3600)
                 r = (ver, int(start), int(end))
-                self.store.add(r)
-                log.info("RDAP %s -> %s", addr, fmt_range(r))
+                self.store.add(r, rest[0] if rest else "")
+                log.info("RDAP %s -> %s %s", addr, fmt_range(r), rest[0] if rest else "")
             except RdapError as e:
                 log.warning("RDAP %s: %s", addr, e)
                 self.retry[prefix] = time.monotonic() + e.retry

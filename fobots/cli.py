@@ -47,7 +47,7 @@ from .install import Installer
 from .load import (LOAD_DEFAULTS, SIGNALS, LoadMonitor, Probe, parse_probe_urls, read_load,
                    summarize)
 from .nft import NFT_SETUP, Nft, NftError
-from .rdap import Rdap, RangeStore
+from .rdap import Rdap, RangeStore, RdapError, fetch_rdap
 from .record import Recorder
 from .replay import MIN_REQUESTS, Replay, make_fetcher, parse_rates, read_requests, select_requests
 from .replay import report as replay_report
@@ -231,9 +231,24 @@ def cmd_setup(args):
 
 def cmd_bans(args):
     nft = Nft(args.nft_bin, args.dry_run)
-    for ver in (4, 6):
-        for n, exp in sorted(nft.elements(ver), key=lambda e: e[0].network_address):
-            print(f"{str(n):<24} {'' if exp is None else f'{exp} s left'}")
+    cache, _ = paths(args)
+    store = RangeStore(cache)
+    rows = [(n, exp) for ver in (4, 6)
+            for n, exp in sorted(nft.elements(ver), key=lambda e: e[0].network_address)]
+    names = []
+    for n, _ in rows:
+        r = store.find(n.network_address)
+        if r and args.lookup and not store.name(r):
+            try:
+                _, _, name = fetch_rdap(str(n.network_address))
+                store.add(r, name)
+                time.sleep(args.delay)  # RDAP politeness
+            except (RdapError, ValueError):
+                pass
+        names.append(store.name(r) if r else "")
+    for (n, exp), name in zip(rows, names):
+        left = "" if exp is None else f"{exp} s left"
+        print(f"{str(n):<24} {left:<12} {name}".rstrip())
     return 0
 
 
@@ -660,7 +675,10 @@ def main(argv=None):
 
     sub.add_parser("setup", parents=[common],
                    help="creates the nft table if absent").set_defaults(fn=cmd_setup)
-    sub.add_parser("bans", parents=[common], help="lists the active bans").set_defaults(fn=cmd_bans)
+    b = sub.add_parser("bans", parents=[common], help="lists the active bans, with the organisation")
+    b.add_argument("--lookup", action="store_true",
+                   help="asks RDAP for the name of the ranges whose organisation is not in the cache yet")
+    b.set_defaults(fn=cmd_bans)
 
     ins = sub.add_parser("install", parents=[common],
                          help="installs fobots (nftables, user, directories, configuration, systemd unit)")
