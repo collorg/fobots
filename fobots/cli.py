@@ -242,9 +242,9 @@ def cmd_bans(args):
             try:
                 _, _, name = fetch_rdap(str(n.network_address))
                 store.add(r, name)
-                time.sleep(args.delay)  # RDAP politeness
-            except (RdapError, ValueError):
-                pass
+                time.sleep(1)  # RDAP politeness
+            except (RdapError, ValueError) as e:
+                print(f"RDAP {n}: {e}", file=sys.stderr)
         names.append(store.name(r) if r else "")
     for (n, exp), name in zip(rows, names):
         left = "" if exp is None else f"{exp} s left"
@@ -676,8 +676,9 @@ def main(argv=None):
     sub.add_parser("setup", parents=[common],
                    help="creates the nft table if absent").set_defaults(fn=cmd_setup)
     b = sub.add_parser("bans", parents=[common], help="lists the active bans, with the organisation")
-    b.add_argument("--lookup", action="store_true",
-                   help="asks RDAP for the name of the ranges whose organisation is not in the cache yet")
+    b.add_argument("--no-lookup", dest="lookup", action="store_false",
+                   help="does not ask RDAP for the organisation of ranges missing from the cache "
+                        "(by default it does, 1 request/s, and keeps the answer in the cache)")
     b.set_defaults(fn=cmd_bans)
 
     ins = sub.add_parser("install", parents=[common],

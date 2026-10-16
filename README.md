@@ -452,7 +452,7 @@ the Apache `vhost_combined` format, which is not supported).
 fobots run [-t THRESHOLD] [-p PREFIX_THRESHOLD] [--log FILE] [files…]   (no argument: follows the logs of the configuration)
 fobots install [--dry-run] [--log F] installs nftables, the user, the configuration, the systemd unit
 fobots setup                      creates the nft table, sets and rules
-fobots bans [--lookup]             active bans, remaining time and organisation (RDAP name + abuse email; --lookup fills the missing ones)
+fobots bans [--no-lookup]          active bans, remaining time and organisation (RDAP name + abuse email, looked up and cached when missing)
 fobots welcome add CIDR…          welcome list + removal of the bans concerned
 fobots welcome list
 fobots watched [--active] [--cmd]  monitored IPs (watch_*) caught in a ban
