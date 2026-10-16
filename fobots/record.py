@@ -29,6 +29,7 @@ GAP_FACTOR = 3           # a measure later than this x the interval is recorded 
 MAX_BYTES = 20 << 20     # the file is renamed FILE.1 above this size
 WEB_PORTS = (80, 443)
 TOP_PROCS = 8
+MAX_SHOWN = 30           # incidents detailed in the report (the latest)
 MIN_MEASURES = 500       # normal measures needed before suggesting levels
 MIN_SPAN = 7200          # seconds recorded needed before suggesting levels
 SEVERE = 5.0            # seconds: a slowdown this slow is an incident by itself
@@ -492,13 +493,39 @@ def simulate(points, tense, critical, recover, interval):
 
 
 
-def suggest(records, base, eps, times, normal, out, recover=300):
+def measured_peak(e, timeout, slow_only=False):
+    """Worst response time (s) of a slowdown. A connection that failed has no time: it counts as the
+    probe timeout (slow_only: it is left out, it says nothing about slowness)."""
+    vals = []
+    for r in e["snaps"]:
+        if r.get("err") and r["rt"] <= 0:
+            if not slow_only:
+                vals.append(timeout)
+        else:
+            vals.append(r["rt"])
+    return max(vals, default=0.0)
+
+
+
+def split_episodes(eps, critical, timeout):
+    """(incidents, excursions): an excursion is short and never reaches the critical level; it is
+    jitter of the service, not something the daemon should harden the rules for."""
+    inc, exc = [], []
+    for e in eps:
+        long = e["snaps"][-1]["t"] - e["snaps"][0]["t"] > SHORT_EPISODE
+        (inc if long or measured_peak(e, timeout) >= critical else exc).append(e)
+    return inc, exc
+
+
+
+def suggest(records, base, eps, excursions, times, normal, out, recover=300):
     """The configuration the recording supports. Says so when it does not support one."""
     start = next((r for r in reversed(records) if r.get("kind") == "start"), {})
     interval = start.get("interval") or 5.0
     span = recorded_span(records)
     out("\nSuggested configuration")
-    severe = sum(max(r["rt"] if not r.get("err") else 99.0 for r in e["snaps"]) >= SEVERE for e in eps)
+    timeout = start.get("timeout") or 10.0
+    severe = sum(measured_peak(e, timeout) >= SEVERE for e in eps)
     severe += sum(sec >= SEVERE for _, sec, _ in interruptions(records))  # a machine that no longer records
     enough = len(times) >= MIN_MEASURES and span >= MIN_SPAN
     if not enough and severe < SEVERE_EPISODES:
@@ -517,27 +544,30 @@ def suggest(records, base, eps, times, normal, out, recover=300):
         out(f"  Short recording ({len(times)} normal measures over {span / 3600:.1f} h), but "
             f"{severe} slowdowns of {SEVERE:g} s or more: levels suggested from them.")
     tense = floor
-    longs = [e for e in eps if e["snaps"][-1]["t"] - e["snaps"][0]["t"] > SHORT_EPISODE]
-    shorts = [e for e in eps if e not in longs]
-    peak = lambda e: max(r["rt"] if not r.get("err") else 99.0 for r in e["snaps"])
     note = ""
+    shorts = [measured_peak(e, timeout, slow_only=True) for e in excursions]
+    shorts = [x for x in shorts if x > 0]
     if shorts:
-        sp = max(peak(e) for e in shorts)
+        sp = max(shorts)
         cand = max(floor, ceil_half(sp * 1.05))
         if cand > floor:
-            if not longs or cand <= 0.8 * min(peak(e) for e in longs):
+            if not eps or cand <= 0.8 * min(measured_peak(e, timeout) for e in eps):
                 tense, why_t = cand, (f"above the {len(shorts)} short excursion(s) of {SHORT_EPISODE} s or "
-                                      f"less (up to {sp:.1f} s), which are not slowdowns")
+                                      f"less (up to {sp:.1f} s), which are not incidents")
             else:
                 note = (f"  Warning: short excursions up to {sp:.1f} s cannot be told from the start of the "
                         "real slowdowns: they will raise the tense level.")
-    if longs:
-        peaks = [peak(e) for e in longs]
-        critical = min(max(peaks), max(2 * tense, ceil_half(0.8 * statistics.median(peaks))))
-        why_c = f"under the median peak of the {len(longs)} slowdown(s) lasting more than {SHORT_EPISODE} s " \
-                f"({', '.join(f'{x:.1f}' for x in sorted(peaks))} s)"
+    cap = max(2 * tense, ceil_half(timeout / 2))
+    if eps:
+        peaks = [measured_peak(e, timeout) for e in eps]
+        want = max(2 * tense, ceil_half(0.8 * statistics.median(peaks)))
+        critical = min(want, cap)
+        why_c = (f"median peak of the {len(eps)} incident(s) x 0.8 ({', '.join(f'{x:.1f}' for x in sorted(peaks))} s)"
+                 if want <= cap else
+                 f"capped at half the probe timeout ({timeout:g} s): the incidents peak at "
+                 f"{', '.join(f'{x:.1f}' for x in sorted(peaks))} s, past what the daemon can tell apart")
     else:
-        critical, why_c = 3 * tense, "default ratio (no slowdown lasting more than "f"{SHORT_EPISODE} s recorded yet)"
+        critical, why_c = 3 * tense, "default ratio (no incident recorded yet)"
     out("  [fobots]")
     out("  load_signal = probe")
     out(f"  load_probe_url = {start.get('url') or '<the URL given to --url>'}")
@@ -552,7 +582,7 @@ def suggest(records, base, eps, times, normal, out, recover=300):
         out(f"  replay, {label}: tense or critical {100 * (spent[1] + spent[2]) / tot:.1f} % of the time "
             f"({ups} rise(s), critical {100 * spent[2] / tot:.1f} %), load_recover = {recover // 60} min")
     if len(eps) < MIN_EPISODES:
-        out(f"  Other signals: {len(eps)} slowdown(s) recorded, {MIN_EPISODES} needed to compare them.")
+        out(f"  Other signals: {len(eps)} incident(s) recorded, {MIN_EPISODES} needed to compare them.")
         return
     usable = {"psi": ("pressure cpu or io >= 20 %, as the daemon computes it", "load_tense = 20, load_critical = 50",
                       lambda s: _either(alarm("pressure cpu", s), alarm("pressure io", s))),
@@ -605,11 +635,14 @@ def report(path, out=print):
         out(f"{path}: nothing recorded")
         return 1
     base = [r for r in records if r.get("kind") == "base"]
-    eps = episodes(records)
+    start = next((r for r in reversed(records) if r.get("kind") == "start"), {})
+    timeout = start.get("timeout") or 10.0
+    eps, excursions = split_episodes(episodes(records), start.get("critical") or 3.0, timeout)
     span = recorded_span(records)
     cuts = interruptions(records)
     out(f"{path}: {len(records)} records over {span / 3600:.1f} h, "
-        f"{len(base)} reading(s) of normal times, {len(eps)} slowdown(s)"
+        f"{len(base)} reading(s) of normal times, {len(eps)} incident(s), "
+        f"{len(excursions)} short excursion(s)"
         + (f", {len(cuts)} unexpected interruption(s)" if cuts else ""))
     for t, sec, text in cuts:
         out(f"  interruption at {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(t))}: "
@@ -619,14 +652,19 @@ def report(path, out=print):
     if times:
         med, p95, mx = summarize(times)
         out(f"\nNormal times ({len(times)} measures): median {med:.2f} s, p95 {p95:.2f} s, max {mx:.2f} s")
+    if excursions:
+        peaks = [measured_peak(e, timeout, slow_only=True) for e in excursions]
+        out(f"Short excursions (<= {SHORT_EPISODE} s, under the critical level): {len(excursions)}, "
+            f"peak median {statistics.median(peaks):.1f} s, max {max(peaks):.1f} s")
     if not eps:
-        out("\nNo slowdown recorded yet: let the recorder run until one happens.")
-        suggest(records, base, eps, times, normal, out)
+        out("\nNo incident recorded yet: let the recorder run until one happens.")
+        suggest(records, base, eps, excursions, times, normal, out)
         return 0
     limits = _limits(base)
     req = [r["sys"]["req_s"] for r in base if r["sys"].get("req_s") is not None]
-    out("\nSlowdowns:")
-    for i, e in enumerate(eps, 1):
+    shown = eps[-MAX_SHOWN:]
+    out("\nIncidents" + (f" (the last {MAX_SHOWN} of {len(eps)})" if len(eps) > MAX_SHOWN else "") + ":")
+    for i, e in enumerate(shown, len(eps) - len(shown) + 1):
         peak = max(e["snaps"], key=lambda r: (r["rt"], r["level"]))
         end = e["end"]["t"] if e["end"] else e["snaps"][-1]["t"]
         t0 = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(e["snaps"][0]["t"]))
@@ -641,7 +679,7 @@ def report(path, out=print):
         for g in (peak.get("procs") or [])[:3]:
             out(f"       at the peak: {g['name']} x{g['n']}, {g['rss_mb']} MB"
                 + ("" if g["cpu_s"] is None else f", {g['cpu_s']:g} s of CPU"))
-    out("\nWhich reading moved first (reference values, not recommendations)?")
+    out(f"\nWhich reading moved first, over the {len(eps)} incident(s) (reference values, not recommendations)?")
     out(f"  {'reading':<34}{'before':>8}{'same':>6}{'late':>6}{'never':>7}{'lead':>9}{'false alarms':>14}")
     for name, (_, limit, op) in ALARMS.items():
         if not any(ALARMS[name][0](r["sys"]) is not None for r in records if "sys" in r):
@@ -653,7 +691,7 @@ def report(path, out=print):
         lead = f"{statistics.median(leads):.0f} s" if leads else "-"
         label = f"{name} {op} " + ("2x normal" if limit is None else str(limit))
         out(f"  {label:<34}{before:>8}{same:>6}{late:>6}{never:>7}{lead:>9}{false:>14}")
-    out("\nbefore = crossed before the response time did; lead = median advance; "
-        "false alarms = share of normal readings already beyond the value.")
-    suggest(records, base, eps, times, normal, out)
+    out("\nbefore = crossed before the response time did; lead = median advance (the recorder keeps "
+        f"{PRE_SECONDS} s before a slowdown); false alarms = share of normal readings already beyond the value.")
+    suggest(records, base, eps, excursions, times, normal, out)
     return 0

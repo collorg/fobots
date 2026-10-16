@@ -967,7 +967,7 @@ class RecordTests(TmpDirCase):
         lines = []
         self.assertEqual(record_report(rec.path, lines.append), 0)
         text = "\n".join(lines)
-        self.assertIn("1 slowdown(s)", text)
+        self.assertIn("1 incident(s)", text)
         row = next(x for x in lines if x.strip().startswith("memory available"))
         self.assertEqual(row.split()[5:9], ["1", "0", "0", "0"])  # before=1
         self.assertIn("10 s", row)
@@ -1146,6 +1146,42 @@ class RecordTests(TmpDirCase):
         record_report(path, lines.append)
         self.assertIn("Short recording", "\n".join(lines))
 
+    def test_a_collapse_does_not_give_absurd_levels(self):
+        """A server that falls down for hours (HTTP 500 after 39 s) and failed connections: the levels
+        stay within what the daemon can tell apart (the probe timeout), and errors are not 'slowness'."""
+        ok = {"load": 0.1, "avail_pct": 40.0}
+        recs = [{"t": 0.0, "kind": "start", "interval": 5.0, "tense": 1.0, "critical": 3.0, "timeout": 10.0}]
+        for i in range(30):
+            recs.append({"t": 300.0 * (i + 1), "kind": "base", "rt": 0.2, "level": 0, "sys": ok, "rts": [0.2] * 60})
+        for k in range(5):  # refused connections: one measure each, no time measured
+            recs.append({"t": 1000.0 + 700 * k, "kind": "snap", "rt": 0.0, "level": 2, "err": "refused", "sys": ok})
+            recs.append({"t": 1005.0 + 700 * k, "kind": "end", "rt": 0.2, "level": 0, "sys": ok})
+        for k in range(40):  # the collapse
+            recs.append({"t": 5000.0 + 10 * k, "kind": "snap", "rt": 39.1, "level": 2, "err": "HTTP 500", "sys": ok})
+        recs.sort(key=lambda r: r["t"])
+        path = self.write("rec.jsonl", "".join(json.dumps(r) + "\n" for r in recs))
+        lines = []
+        record_report(path, lines.append)
+        text = "\n".join(lines)
+        self.assertRegex(text, r"load_tense = 1 ")          # refused connections are not slowness
+        self.assertRegex(text, r"load_critical = 5 ")       # half the 10 s timeout, not 0.8 x 39 s
+        self.assertIn("capped at half the probe timeout", text)
+        self.assertNotIn("Warning", text)
+
+    def test_short_excursions_are_summarised_not_listed(self):
+        ok = {"load": 0.1}
+        recs = [{"t": 0.0, "kind": "start", "interval": 5.0, "tense": 1.0, "critical": 3.0}]
+        for i in range(60):
+            recs.append({"t": 100.0 * i, "kind": "snap", "rt": 1.3, "level": 1, "sys": ok})
+            recs.append({"t": 100.0 * i + 5, "kind": "end", "rt": 0.2, "level": 0, "sys": ok})
+        path = self.write("rec.jsonl", "".join(json.dumps(r) + "\n" for r in recs))
+        lines = []
+        record_report(path, lines.append)
+        text = "\n".join(lines)
+        self.assertIn("60 short excursion(s)", text)
+        self.assertIn("0 incident(s)", text)
+        self.assertNotIn("  60. ", text)
+
     def test_gap_is_recorded(self):
         rec, _ = self.recorder([0.1, 0.1])
         rec.step(0, 1000.0)
@@ -1164,7 +1200,7 @@ class RecordTests(TmpDirCase):
         rec.step(0, 1000.0)
         lines = []
         record_report(rec.path, lines.append)
-        self.assertIn("No slowdown recorded", "\n".join(lines))
+        self.assertIn("No incident recorded", "\n".join(lines))
 
 
 

@@ -170,6 +170,12 @@ for memory), memory available ≤ 15 %, swap ≥ 100 pages/s, accept queue ≥ 1
 points, not recommendations: the point is to see, on **your** machine, which signal deserves
 to be used. Let it run until a few slowdowns have happened.
 
+The report separates **incidents** (longer than 20 s, or reaching the critical level) from **short
+excursions** (jitter of the service: counted and summarised, not listed). Only the incidents are used to compare
+the readings and to size the levels. A failed connection has no response time: it counts as the probe timeout,
+and `load_critical` is never suggested above half of it, since beyond the timeout the daemon cannot tell
+responses apart (a 40 s collapse and a 10 s one look the same).
+
 At the end, `--report` writes a **suggested configuration** from what was recorded: `load_probe_url`
 (kept in a header line of the file), `load_tense` (above the normal jitter, and above the short
 excursions of 20 s or less that are not slowdowns) and `load_critical` (under the median peak of the real

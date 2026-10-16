@@ -180,6 +180,12 @@ pages/s, file d'accept ≥ 1) sont des repères, pas des recommandations : il s'
 sur **ta** machine, quel signal mérite d'être utilisé. Laisse-le tourner jusqu'à quelques
 ralentissements.
 
+Le rapport sépare les **incidents** (plus de 20 s, ou atteignant le niveau critique) des **excursions
+courtes** (gigue du service : comptées et résumées, pas listées). Seuls les incidents servent à comparer les
+relevés et à dimensionner les paliers. Une connexion qui échoue n'a pas de temps de réponse : elle compte comme
+le timeout de la sonde, et `load_critical` n'est jamais suggéré au-delà de sa moitié, car au-delà du timeout
+le démon ne distingue plus les réponses (un effondrement à 40 s et un à 10 s se ressemblent).
+
 À la fin, `--report` écrit une **configuration suggérée** d'après ce qui a été enregistré :
 `load_probe_url` (conservée dans une ligne d'en-tête du fichier), `load_tense` (au-dessus de la gigue
 normale et des excursions de 20 s ou moins qui ne sont pas des ralentissements) et `load_critical` (sous
