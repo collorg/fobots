@@ -241,7 +241,10 @@ way*, without waiting for the next incident and without touching the log format.
 - **Fidelity.** The log keeps the status and size of every answer. The report compares them with what the
   server answers now: a page refused or redirected for lack of a session is cheaper than the real one, so
   the load measured is then a lower bound. Every request with another status is counted and the most
-  frequent changes (`200 -> 302`) are listed.
+  frequent changes (`200 -> 302`) are listed. Failures under the load (`200 -> no answer`, 5xx) are told
+  apart: that is the server giving way, not a difference of session. The replay sends
+  `Accept-Encoding: gzip` like most clients (the server pays for the compression, and the size received is the
+  logged one); `--no-compression` turns it off.
 
 Together with `probe --record` running on the server during the replay, the incident is complete: the
 response time of each type of request, and what the machine looked like (memory, swap, accept queue,

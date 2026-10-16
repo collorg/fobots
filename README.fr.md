@@ -255,7 +255,10 @@ attendre le prochain incident et sans toucher au format du log.
 - **Fidélité.** Le log garde le statut et la taille de chaque réponse. Le rapport les compare à ce que le
   serveur répond maintenant : une page refusée ou redirigée faute de session coûte moins que la vraie, la
   charge mesurée est alors une borne basse. Chaque requête au statut différent est comptée et les changements
-  les plus fréquents (`200 -> 302`) sont listés.
+  les plus fréquents (`200 -> 302`) sont listés. Les échecs sous la charge (`200 -> no answer`, 5xx) sont
+  distingués : c'est le serveur qui cède, pas une différence de session. Le rejeu envoie
+  `Accept-Encoding: gzip` comme la plupart des clients (le serveur paie la compression, et la taille reçue est
+  celle du log) ; `--no-compression` le désactive.
 
 Avec `probe --record` qui tourne sur le serveur pendant le rejeu, l'incident est complet : le temps de réponse
 de chaque type de requête, et l'état de la machine (mémoire, swap, file d'accept, processus) à chaque palier.

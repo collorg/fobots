@@ -118,7 +118,7 @@ def schedule(window, speed, step):
 
 
 
-def make_fetcher(base, host=None, timeout=20.0, insecure=False, user_agent=None):
+def make_fetcher(base, host=None, timeout=20.0, insecure=False, user_agent=None, compress=True):
     u = urlsplit(base)
     if u.scheme not in ("http", "https") or not u.hostname:
         raise ValueError(f"invalid --base {base!r} (expected https://host[:port])")
@@ -139,6 +139,8 @@ def make_fetcher(base, host=None, timeout=20.0, insecure=False, user_agent=None)
             conn.putheader("Host", host or u.netloc)
             conn.putheader("User-Agent", user_agent or agent or "fobots-replay")
             conn.putheader("Accept", "*/*")
+            if compress:  # like browsers and most robots: the server pays for the compression, and the
+                conn.putheader("Accept-Encoding", "gzip")  # size received (not decompressed) is the logged one
             conn.putheader("Connection", "close")
             conn.endheaders()
             resp = conn.getresponse()
@@ -378,17 +380,22 @@ def report(path, out=print, top=10):
     odd = collections.Counter((r["ls"], r["st"]) for r in reqs if not faithful(r))
     if odd:
         total = sum(odd.values())
+        under = sum(n for (ls, st), n in odd.items() if st is None or st >= 500)
         out(f"\nNot faithful: {total} of {len(reqs)} requests ({100 * total / len(reqs):.0f} %) got another status "
-            "than in the log; the most frequent (logged -> now):")
-        for (ls, st), n in odd.most_common(5):
+            "than in the log (logged -> now):")
+        for (ls, st), n in odd.most_common(6):
             out(f"  {ls} -> {st if st is not None else 'no answer'}: {n}")
-        out("These are probably requests refused or redirected for lack of a session: cheaper than the real "
-            "ones, so the load measured is a lower bound.")
+        if under:
+            out(f"{under} of them failed under the load (no answer or 5xx): the server giving way, not a difference "
+                "of session.")
+        if total > under:
+            out(f"The other {total - under} are probably requests refused or redirected for lack of a session: cheaper "
+                "than the real ones, so the load measured is a lower bound.")
     else:
         out("\nEvery request got the status it had in the log.")
     sizes = [r for r in reqs if r["st"] == 200 and r["ls"] == 200 and r["lb"]]
     if sizes:
         far = sum(abs(r["b"] - r["lb"]) > SIZE_TOLERANCE * r["lb"] for r in sizes)
         out(f"Size: {100 * (len(sizes) - far) / len(sizes):.0f} % of the 200 answers within "
-            f"{100 * SIZE_TOLERANCE:.0f} % of the logged size (compression and session can make it differ).")
+            f"{100 * SIZE_TOLERANCE:.0f} % of the logged size (compression, session or changing content make it differ).")
     return 0

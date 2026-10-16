@@ -490,7 +490,8 @@ def cmd_replay(args):
         exclude_re = re.compile(args.exclude) if args.exclude else None
         since = datetime.fromisoformat(args.since).timestamp() if args.since else None
         until = datetime.fromisoformat(args.until).timestamp() if args.until else None
-        fetch = make_fetcher(args.base, args.host, args.timeout, args.insecure, args.user_agent)
+        fetch = make_fetcher(args.base, args.host, args.timeout, args.insecure, args.user_agent,
+                             not args.no_compression)
         probe_text = args.probe_url or getattr(args, "load_probe_url", None)
         probe = None
         if probe_text:
@@ -726,6 +727,8 @@ def main(argv=None):
                     help="stops when this many requests wait for an answer (default: 100)")
     rp.add_argument("--timeout", type=parse_duration, default=20, metavar="DURATION",
                     help="a request without answer after this fails (default: 20s)")
+    rp.add_argument("--no-compression", action="store_true",
+                    help="does not send Accept-Encoding: gzip (default: sent, like most clients)")
     rp.add_argument("--insecure", action="store_true", help="does not verify the certificate")
     rp.add_argument("--probe-url", metavar="[HOST@]URL",
                     help="page measured during the replay, also stops it (default: load_probe_url)")

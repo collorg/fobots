@@ -1218,6 +1218,8 @@ class RecordTests(TmpDirCase):
 class ReplayTests(TmpDirCase):
     """`fobots replay` against a real local HTTP server."""
 
+    seen_encodings = []
+
     @classmethod
     def setUpClass(cls):
         cls.delay = 0.0
@@ -1225,6 +1227,7 @@ class ReplayTests(TmpDirCase):
 
         class Handler(http.server.BaseHTTPRequestHandler):
             def do_GET(self):
+                outer.seen_encodings.append(self.headers.get("Accept-Encoding"))
                 time.sleep(outer.delay)
                 code = 404 if self.path.startswith("/gone/") else 200
                 self.send_response(code)
@@ -1320,6 +1323,30 @@ class ReplayTests(TmpDirCase):
         type(self).delay = 1.0
         rp, reason, out, _ = self.run_replay([1.0], 3.0, max_inflight=5, stop_latency=60, log={"per_second": 20})
         self.assertIn("waiting for an answer", reason)
+
+    def test_replay_asks_for_gzip_unless_told_not_to(self):
+        type(self).seen_encodings = []
+        path = self.write("a.log", "".join(line("1.1.1.1", 0, "/ok/a") for _ in range(3)))
+        window = read_requests([path])
+        make_fetcher(self.base)("/ok/a", "ua")
+        make_fetcher(self.base, compress=False)("/ok/a", "ua")
+        self.assertEqual(self.seen_encodings, ["gzip", None])
+        self.assertTrue(window)
+
+    def test_report_tells_failures_from_session_differences(self):
+        rp, reason, out, said = self.run_replay([1.0], 2.0)
+        recs = read_results_file(out)
+        with open(out, "a") as f:  # two failures under load, on top of the 404s
+            for _ in range(2):
+                f.write(json.dumps({"kind": "req", "s": 1, "t": 0, "k": "/ok/", "p": "/ok/z", "ls": 200,
+                                    "lb": 10, "st": None, "b": 0, "d": 20.0, "e": "timeout"}) + "\n")
+        lines = []
+        replay_report(out, lines.append)
+        text = "\n".join(lines)
+        self.assertIn("200 -> no answer: 2", text)
+        self.assertIn("2 of them failed under the load", text)
+        self.assertIn("for lack of a session", text)
+        self.assertTrue(recs)
 
     def test_replay_stops_on_errors(self):
         window, _, _ = select_window(read_requests([self.make_log(per_second=20)]), 10)
