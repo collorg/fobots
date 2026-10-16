@@ -226,21 +226,24 @@ Les faux positifs se corrigent avec `welcome add`.
 
 ## Rejouer un log pour charger le serveur
 
-`fobots replay` rejoue les requêtes `GET` d'un log d'accès contre un serveur, avec une charge qui monte par
-paliers, et mesure. Il répond à *quelles requêtes sont coûteuses, et à quelle charge le service cède*, sans
+`fobots replay` rejoue les requêtes `GET` d'un log d'accès contre un serveur, à un débit que tu choisis, par
+paliers croissants, et mesure. Il répond à *quelles requêtes sont coûteuses, et à quelle charge le service cède*, sans
 attendre le prochain incident et sans toucher au format du log.
 
 ```
 ./fobots.py replay /var/log/nginx/access.log --base https://www.example.org --agent 'bot|crawl|spider' \
-        --speed 1,1.5,2,3 --step 3m --probe-url HOTE@http://127.0.0.1/app/page
+        --rate 2,5,10,15 --step 3m --probe-url HOTE@http://127.0.0.1/app/page
 ./fobots.py replay --report replay.jsonl        # relit les résultats
 ```
 
-- **La charge.** Le passage le plus chargé du log (`--window`, par défaut aussi long qu'un palier ; ou
-  `--from/--until`) est rejoué en boucle à ×1, ×1,5, ×2… de sa propre vitesse : chaque palier envoie les
-  mêmes requêtes, plus vite. `--agent` et `--exclude` (expressions régulières) choisissent ce qui est rejoué,
-  par exemple seulement les robots. Seules les requêtes `GET` sont rejouées (un `POST` n'a pas de corps dans
-  le log) ; une requête qui écrirait est refusée par le service faute de session ou de jeton.
+- **La charge.** `--rate` est le nombre de requêtes par seconde infligées au serveur, palier par palier (2,5,10,15
+  par défaut), régulièrement espacées ; `--step` est la durée d'un palier (3m). Les requêtes sont prises dans
+  l'ordre du log à partir d'une **position aléatoire** (affichée avec sa `--seed`, pour refaire un essai ;
+  `--from/--until` bornent la partie du log où elle est tirée), et reprennent au début à la fin du log : chaque
+  palier envoie les mêmes requêtes, plus vite. Si un palier demande plus de requêtes que le log n'en a, le plan le
+  dit (les caches se réchauffent). `--agent` et `--exclude` (expressions régulières) choisissent ce qui est
+  rejoué, par exemple seulement les robots. Seules les requêtes `GET` sont rejouées (un `POST` n'a pas de corps
+  dans le log) ; une requête qui écrirait est refusée par le service faute de session ou de jeton.
 - **Il s'arrête tout seul**, en laissant finir les requêtes en vol, dès que le temps de réponse médian des 20
   dernières requêtes atteint `--stop-latency` (3 s), ou que 20 % des 50 dernières ont échoué, ou que
   `--max-inflight` (100) requêtes attendent une réponse, ou que la page de sonde facultative

@@ -213,21 +213,24 @@ look at the `load: psi=…` lines (every 5 minutes and at each level change) to 
 
 ## Replaying a log to load the server
 
-`fobots replay` replays the `GET` requests of an access log against a server, with a load that rises
+`fobots replay` replays the `GET` requests of an access log against a server, at a rate you choose that rises
 by stages, and measures. It answers *which requests are costly, and at which load does the service give
 way*, without waiting for the next incident and without touching the log format.
 
 ```
 ./fobots.py replay /var/log/nginx/access.log --base https://www.example.org --agent 'bot|crawl|spider' \
-        --speed 1,1.5,2,3 --step 3m --probe-url HOST@http://127.0.0.1/app/page
+        --rate 2,5,10,15 --step 3m --probe-url HOST@http://127.0.0.1/app/page
 ./fobots.py replay --report replay.jsonl        # reads the results again
 ```
 
-- **The load.** The busiest stretch of the log (`--window`, default: as long as a stage; or
-  `--from/--until`) is replayed in loop at ×1, ×1.5, ×2… of its own speed: each stage sends the same
-  requests, faster. `--agent` and `--exclude` (regular expressions) select what to replay, for instance
-  only the robots. Only `GET` requests are replayed (a `POST` has no body in the log); a request that
-  would write is refused by the service for lack of a session or token.
+- **The load.** `--rate` is the number of requests per second inflicted on the server, stage by stage (default
+  2,5,10,15), evenly spaced; `--step` is the length of a stage (3m). The requests are taken in the order of the
+  log from a **random position** (printed with its `--seed`, to repeat a run; `--from/--until` bound the part of
+  the log it draws from), and start over at the end of the log: every stage sends the same requests, faster. If a
+  stage needs more requests than the log has, the plan says so (the caches get warm). `--agent` and `--exclude`
+  (regular expressions) select what to replay, for instance only the robots. Only `GET` requests are replayed
+  (a `POST` has no body in the log); a request that would write is refused by the service for lack of a
+  session or token.
 - **It stops by itself**, finishing the requests in flight, as soon as the median response time of the last
   20 requests reaches `--stop-latency` (3 s), or 20 % of the last 50 failed, or `--max-inflight` (100)
   requests wait for an answer, or the optional probe page (`--probe-url`, else `load_probe_url`) is slow.

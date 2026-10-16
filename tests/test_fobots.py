@@ -30,7 +30,7 @@ from fobots.grouping import cluster_ips, pick_groups, wide_blocks  # noqa: E402
 from fobots.load import LoadMonitor, Probe, parse_probe_urls, read_psi, summarize  # noqa: E402
 from fobots.nft import Nft, NftError, parse_elems, val_nets  # noqa: E402
 from fobots.rdap import RangeStore  # noqa: E402
-from fobots.replay import Replay, make_fetcher, parse_speeds, read_requests, schedule, select_window  # noqa: E402
+from fobots.replay import Replay, make_fetcher, parse_rates, read_requests, schedule, select_requests  # noqa: E402
 from fobots.replay import report as replay_report  # noqa: E402
 from fobots.record import LogTail, Recorder, episodes, read_records, read_sys, recorded_span, scan_procs  # noqa: E402
 from fobots.record import report as record_report  # noqa: E402
@@ -1266,42 +1266,43 @@ class ReplayTests(TmpDirCase):
         self.assertEqual(len(read_requests([path], re.compile("bot"))), 30)
         self.assertEqual(len(read_requests([path], None, re.compile("^/gone/"))), 54)
 
-    def test_select_window_takes_the_busiest_stretch(self):
-        rows = [line("1.1.1.1", s) for s in range(0, 20, 2)]            # sparse: 10 requests
-        rows += [line("1.1.1.2", s) * 5 for s in range(40, 46)]          # burst: 30 requests in 6 s
-        path = self.write("a.log", "".join(rows))
-        window, first, last = select_window(read_requests([path]), 6)
-        self.assertEqual(len(window), 30)
-        self.assertEqual(last - first, 5)
+    def test_select_requests_by_time(self):
+        path = self.write("a.log", "".join(line("1.1.1.1", sec) for sec in range(30)))
+        reqs = read_requests([path])
+        base = reqs[0].ts
+        self.assertEqual(len(select_requests(reqs, base + 10, base + 19)), 10)
+        self.assertEqual(len(select_requests(reqs)), 30)
 
-    def test_schedule_loops_the_window_faster(self):
-        path = self.write("a.log", "".join(line("1.1.1.1", s) for s in range(3)))
-        window = read_requests([path])
-        plan = schedule(window, 2.0, 3.0)
-        self.assertEqual(len(plan), 6)
-        self.assertEqual([round(w, 2) for w, _ in plan], [0, 0.5, 1.0, 1.5, 2.0, 2.5])
+    def test_schedule_is_a_steady_rate_from_the_start_position_and_wraps(self):
+        path = self.write("a.log", "".join(line("1.1.1.1", s, f"/p{s}") for s in range(3)))
+        reqs = read_requests([path])
+        plan = schedule(reqs, 1, 2.0, 2.0)  # 2 requests/s for 2 s
+        self.assertEqual([w for w, _ in plan], [0, 0.5, 1.0, 1.5])
+        self.assertEqual([r.path for _, r in plan], ["/p1", "/p2", "/p0", "/p1"])
+        self.assertEqual(len(schedule(reqs, 0, 10.0, 3.0)), 30)
 
-    def test_parse_speeds(self):
-        self.assertEqual(parse_speeds("1, 1.5,2"), [1.0, 1.5, 2.0])
+    def test_parse_rates(self):
+        self.assertEqual(parse_rates("2, 5.5,10"), [2.0, 5.5, 10.0])
         for bad in ("", "a", "0", "-1,2"):
             with self.assertRaises(ValueError):
-                parse_speeds(bad)
+                parse_rates(bad)
 
-    def run_replay(self, speeds, step, **kw):
-        window, _, _ = select_window(read_requests([self.make_log(**kw.pop("log", {}))]), 10)
+    def run_replay(self, rates, step, **kw):
+        reqs = read_requests([self.make_log(**kw.pop("log", {}))])
         out = self.path("replay.jsonl")
         said = []
-        rp = Replay(window, make_fetcher(self.base, None, 5.0), speeds, step, out=out, say=said.append, **kw)
+        rp = Replay(reqs, make_fetcher(self.base, None, 5.0), rates, step, out=out, say=said.append, **kw)
         return rp, rp.run(), out, said
 
     def test_replay_measures_each_stage_and_the_fidelity(self):
-        rp, reason, out, said = self.run_replay([1.0, 2.0], 2.0)
+        rp, reason, out, said = self.run_replay([5.0, 10.0], 2.0, start=7, seed=42)
         self.assertIsNone(reason)
         lines = []
         self.assertEqual(replay_report(out, lines.append), 0)
         text = "\n".join(lines)
-        self.assertRegex(text, r"x1 .*\n.*x2 ")
-        self.assertIn("Held up to x2", text)
+        self.assertRegex(text, r"5/s .*\n.*10/s ")
+        self.assertIn("Held up to 10 requests/s", text)
+        self.assertIn("from position 7 (seed 42)", text)
         self.assertIn("200 -> 404", text)           # /gone/ answers 404 although logged 200
         self.assertIn("/ok/", text)                  # cost by type of request
         recs = read_results_file(out)
@@ -1310,7 +1311,7 @@ class ReplayTests(TmpDirCase):
 
     def test_replay_stops_by_itself_when_the_server_is_slow(self):
         type(self).delay = 0.4
-        rp, reason, out, said = self.run_replay([1.0, 2.0, 3.0], 3.0, stop_latency=0.3, log={"per_second": 20})
+        rp, reason, out, said = self.run_replay([20.0, 40.0, 60.0], 3.0, stop_latency=0.3, log={"per_second": 20})
         self.assertIn("median response time", reason)
         recs = read_results_file(out)
         self.assertEqual(recs[-1]["kind"], "stop")
@@ -1321,7 +1322,7 @@ class ReplayTests(TmpDirCase):
 
     def test_replay_stops_when_too_many_requests_wait(self):
         type(self).delay = 1.0
-        rp, reason, out, _ = self.run_replay([1.0], 3.0, max_inflight=5, stop_latency=60, log={"per_second": 20})
+        rp, reason, out, _ = self.run_replay([20.0], 3.0, max_inflight=5, stop_latency=60, log={"per_second": 20})
         self.assertIn("waiting for an answer", reason)
 
     def test_replay_asks_for_gzip_unless_told_not_to(self):
@@ -1334,7 +1335,7 @@ class ReplayTests(TmpDirCase):
         self.assertTrue(window)
 
     def test_report_tells_failures_from_session_differences(self):
-        rp, reason, out, said = self.run_replay([1.0], 2.0)
+        rp, reason, out, said = self.run_replay([10.0], 2.0)
         recs = read_results_file(out)
         with open(out, "a") as f:  # two failures under load, on top of the 404s
             for _ in range(2):
@@ -1349,8 +1350,8 @@ class ReplayTests(TmpDirCase):
         self.assertTrue(recs)
 
     def test_replay_stops_on_errors(self):
-        window, _, _ = select_window(read_requests([self.make_log(per_second=20)]), 10)
-        rp = Replay(window, make_fetcher("http://127.0.0.1:1", None, 1.0), [1.0], 2.0,
+        reqs = read_requests([self.make_log(per_second=20)])
+        rp = Replay(reqs, make_fetcher("http://127.0.0.1:1", None, 1.0), [20.0], 2.0,
                     out=self.path("r.jsonl"), say=lambda *_: None)
         self.assertIn("failed", rp.run())
 

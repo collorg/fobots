@@ -1,14 +1,14 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 Joël Maizi
-"""`fobots replay`: replays the GET requests of an access log against a server, with a rising load.
+"""`fobots replay`: replays the GET requests of an access log against a server, at a chosen rate.
 
-The log gives the mix of requests and their timing. A window of it (by default its busiest five
-minutes) is replayed in loop at ×1, ×1.5, ×2… of its own speed: each stage sends the same requests,
-faster. The response time of every request is measured, by type of request and by stage, which
-shows what is costly and at which load the service gives way. The replay stops by itself as soon
-as the service suffers (see Replay.check). The status and size logged for each request are
-compared to what the server answers now: a request refused for lack of a session is cheaper than
-the real one, and the report says how much of the replay is faithful."""
+The log gives the mix of requests, in their order. They are replayed from a random position of the log,
+in stages of increasing rate (requests per second, evenly spaced): each stage sends the same requests,
+faster. The response time of every request is measured, by type of request and by stage, which shows
+what is costly and at which load the service gives way. The replay stops by itself as soon as the
+service suffers (see Replay.check). The status and size logged for each request are compared to what
+the server answers now: a request refused for lack of a session is cheaper than the real one, and the
+report says how much of the replay is faithful."""
 import collections
 import concurrent.futures
 import http.client
@@ -27,8 +27,8 @@ from .util import parse_ts
 
 LOG_RE = re.compile(r'^(\S+) \S+ \S+ \[([^\]]+)\] "([A-Z]+) (\S+)[^"]*" (\d{3}) (\S+) "[^"]*" "([^"]*)"')
 
-DEFAULT_SPEEDS = (1.0, 1.5, 2.0, 3.0)
-MIN_WINDOW_REQUESTS = 20   # fewer requests than this: not a load
+DEFAULT_RATES = (2.0, 5.0, 10.0, 15.0)  # requests per second
+MIN_REQUESTS = 20          # fewer requests than this in the log: not a mix
 MAX_BODY = 8 << 20         # bytes read of a response
 RECENT = 50                # completed requests the stop criteria look at
 MEDIAN_OVER = 20
@@ -45,14 +45,14 @@ class Req:
 
 
 
-def parse_speeds(text):
+def parse_rates(text):
     try:
-        speeds = [float(x) for x in text.split(",") if x.strip()]
+        rates = [float(x) for x in text.split(",") if x.strip()]
     except ValueError:
-        raise ValueError(f"invalid --speed {text!r} (e.g. 1,1.5,2,3)")
-    if not speeds or any(s <= 0 for s in speeds):
-        raise ValueError(f"invalid --speed {text!r}: positive numbers expected")
-    return speeds
+        raise ValueError(f"invalid --rate {text!r} (e.g. 2,5,10,15)")
+    if not rates or any(r <= 0 for r in rates):
+        raise ValueError(f"invalid --rate {text!r}: positive numbers expected (requests per second)")
+    return rates
 
 
 
@@ -81,40 +81,16 @@ def read_requests(paths, agent_re=None, exclude_re=None):
 
 
 
-def select_window(reqs, seconds, since=None, until=None):
-    """The requests to replay: those between since and until, and if that is longer than `seconds`,
-    the busiest stretch of that length. -> (requests, first ts, last ts)"""
-    if since is not None:
-        reqs = [r for r in reqs if r.ts >= since]
-    if until is not None:
-        reqs = [r for r in reqs if r.ts <= until]
-    if not reqs:
-        return [], 0, 0
-    best_i = best_n = j = 0
-    for i in range(len(reqs)):
-        while reqs[i].ts - reqs[j].ts >= seconds:
-            j += 1
-        if i - j + 1 > best_n:
-            best_n, best_i = i - j + 1, j
-    chosen = [r for r in reqs[best_i:best_i + best_n]]
-    return chosen, chosen[0].ts, chosen[-1].ts
+def select_requests(reqs, since=None, until=None):
+    """The requests between since and until (timestamps), in order."""
+    return [r for r in reqs if (since is None or r.ts >= since) and (until is None or r.ts <= until)]
 
 
 
-def schedule(window, speed, step):
-    """[(seconds from the start of the stage, request)] over `step` seconds: the window, in loop,
-    at `speed` times its own speed."""
-    t0 = window[0].ts
-    span = max(1.0, window[-1].ts - t0 + 1.0)
-    out, loop = [], 0
-    while loop * span / speed < step:
-        for r in window:
-            when = loop * span / speed + (r.ts - t0) / speed
-            if when >= step:
-                return out
-            out.append((when, r))
-        loop += 1
-    return out
+def schedule(reqs, start, rate, step):
+    """[(seconds from the start of the stage, request)]: `rate` requests per second, evenly spaced, taken
+    in the order of the log from position `start` (back to the beginning at the end of the log)."""
+    return [(i / rate, reqs[(start + i) % len(reqs)]) for i in range(int(rate * step))]
 
 
 
@@ -158,9 +134,11 @@ class Replay:
     (no answer, 5xx); or the probe page (optional) takes `stop_latency`; or `max_inflight`
     requests wait for an answer (the server no longer follows)."""
 
-    def __init__(self, window, fetch, speeds=DEFAULT_SPEEDS, step=180.0, stop_latency=3.0,
-                 stop_errors=0.2, max_inflight=100, timeout=20.0, probe=None, out=None, say=print):
-        self.window, self.fetch, self.speeds, self.step = window, fetch, list(speeds), step
+    def __init__(self, reqs, fetch, rates=DEFAULT_RATES, step=180.0, stop_latency=3.0,
+                 stop_errors=0.2, max_inflight=100, timeout=20.0, probe=None, out=None, say=print,
+                 start=0, seed=None):
+        self.reqs, self.fetch, self.rates, self.step = reqs, fetch, list(rates), step
+        self.start, self.seed = start, seed
         self.stop_latency, self.stop_errors = stop_latency, stop_errors
         self.max_inflight, self.timeout, self.probe, self.out, self.say = max_inflight, timeout, probe, out, say
         self.lock, self.halted = threading.Lock(), threading.Event()
@@ -223,27 +201,26 @@ class Replay:
                 pass
 
     def run(self):
-        self.write({"kind": "run", "t": round(time.time(), 1), "speeds": self.speeds, "step": self.step,
-                    "window": [self.window[0].ts, self.window[-1].ts, len(self.window)],
+        self.write({"kind": "run", "t": round(time.time(), 1), "rates": self.rates, "step": self.step,
+                    "n": len(self.reqs), "start": self.start, "seed": self.seed,
                     "stop_latency": self.stop_latency})
         if self.probe:
             threading.Thread(target=self.watch_probe, daemon=True).start()
         pool = concurrent.futures.ThreadPoolExecutor(max_workers=self.max_inflight + 8)
         try:
-            for n, speed in enumerate(self.speeds, 1):
+            for n, rate in enumerate(self.rates, 1):
                 if self.halted.is_set():
                     break
-                self.stage(pool, n, speed)
+                self.stage(pool, n, rate)
         finally:
             self.halted.set()  # also ends the probe thread
             pool.shutdown(wait=True)
             self.write({"kind": "stop" if self.reason else "end", "reason": self.reason})
         return self.reason
 
-    def stage(self, pool, n, speed):
-        plan = schedule(self.window, speed, self.step)
-        self.say(f"stage {n}/{len(self.speeds)}: x{speed:g}, {len(plan) / self.step:.1f} requests/s "
-                 f"for {self.step:.0f} s")
+    def stage(self, pool, n, rate):
+        plan = schedule(self.reqs, self.start, rate, self.step)
+        self.say(f"stage {n}/{len(self.rates)}: {rate:g} requests/s for {self.step:.0f} s")
         start, last_check, sent = time.monotonic(), 0.0, 0
         with self.lock:
             self.results = []
@@ -264,7 +241,7 @@ class Replay:
                 self.check()
         elapsed = time.monotonic() - start
         if not self.halted.is_set():
-            elapsed = max(elapsed, self.step)  # the log window can end before the stage does
+            elapsed = max(elapsed, self.step)  # the last request leaves slightly before the end of the stage
         deadline = time.monotonic() + self.timeout * 1.2
         while time.monotonic() < deadline:  # the requests in flight finish
             with self.lock:
@@ -277,7 +254,7 @@ class Replay:
         for r in done:
             self.write(r)
         st = stage_stats(done)
-        self.write({"kind": "stage", "s": n, "speed": speed, "sent": sent, "seconds": round(elapsed, 1),
+        self.write({"kind": "stage", "s": n, "rate": rate, "sent": sent, "seconds": round(elapsed, 1),
                     "probe_max": round(self.probe_max, 2) if self.probe else None})
         self.say(f"  sent {sent} ({sent / max(elapsed, 1e-9):.1f}/s), {st['text']}"
                  + (f", probe up to {self.probe_max:.1f} s" if self.probe else ""))
@@ -338,27 +315,26 @@ def report(path, out=print, top=10):
     stages = [r for r in recs if r.get("kind") == "stage"]
     reqs = [r for r in recs if r.get("kind") == "req"]
     end = next((r for r in recs if r.get("kind") in ("stop", "end")), None)
-    w = run["window"]
-    out(f"{path}: window of {w[1] - w[0] + 1:.0f} s of the log, {w[2]} requests, replayed at x"
-        + ", x".join(f"{s:g}" for s in run["speeds"]) + f" for {run['step']:.0f} s each")
-    out(f"\n  {'stage':<8}{'req/s':>7}{'requests':>10}{'median':>9}{'p95':>8}{'max':>8}{'failed':>8}"
+    out(f"{path}: {run['n']} requests of the log, from position {run['start']}"
+        + ("" if run.get("seed") is None else f" (seed {run['seed']})")
+        + ", replayed at " + ", ".join(f"{r:g}" for r in run["rates"]) + f" requests/s for {run['step']:.0f} s each")
+    out(f"\n  {'asked':<8}{'sent/s':>7}{'requests':>10}{'median':>9}{'p95':>8}{'max':>8}{'failed':>8}"
         f"{'same status':>13}{'probe max':>11}")
     for st in stages:
         rs = [r for r in reqs if r["s"] == st["s"]]
         s = stage_stats(rs)
         if not s["n"] or s["med"] is None:
-            out(f"  x{st['speed']:<7g}{st['sent'] / max(st['seconds'], 1e-9):>7.1f}{st['sent']:>10}   no response")
+            out(f"  {str(f"{st['rate']:g}/s"):<8}{st['sent'] / max(st['seconds'], 1e-9):>7.1f}{st['sent']:>10}   no response")
             continue
         probe = "" if st.get("probe_max") is None else f"{st['probe_max']:.1f} s"
-        out(f"  x{st['speed']:<7g}{st['sent'] / max(st['seconds'], 1e-9):>7.1f}{s['n']:>10}{s['med']:>8.2f}s"
+        out(f"  {str(f"{st['rate']:g}/s"):<8}{st['sent'] / max(st['seconds'], 1e-9):>7.1f}{s['n']:>10}{s['med']:>8.2f}s"
             f"{s['p95']:>7.2f}s{s['max']:>7.1f}s{100 * s['failed']:>7.0f}%{100 * s['same']:>12.0f}%{probe:>11}")
     if end and end.get("reason"):
         out(f"\nStopped: {end['reason']}.")
     held = [st for st in stages if not (end and end.get("reason") and st is stages[-1])]
     if held:
         top_st = held[-1]
-        out(f"Held up to x{top_st['speed']:g} ({top_st['sent'] / max(top_st['seconds'], 1e-9):.1f} requests/s "
-            "replayed, on top of the real traffic).")
+        out(f"Held up to {top_st['rate']:g} requests/s (on top of the real traffic).")
     elif end and end.get("reason"):
         out("The first stage was already too much.")
     first, final = (stages[0]["s"], stages[-1]["s"]) if stages else (None, None)

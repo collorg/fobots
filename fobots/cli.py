@@ -10,7 +10,7 @@ nftables set as soon as the threshold is exceeded. Bans expire by themselves (nf
   tail -F /var/log/gitlab/nginx/gitlab_access.log | fobots run -t 5 -
   fobots setup                       # creates nft table, sets and rules (idempotent)
   fobots probe                       # response time of the load probe URL(s)
-  fobots replay LOG --base URL       # replays a log with a rising load: costs, capacity
+  fobots replay LOG --base URL       # replays a log at 2, 5, 10… req/s: costs, capacity
   fobots bans                        # active bans with remaining time
   fobots analyse access.log          # suggests threshold and ignore_path from a log
   fobots welcome add 17.0.0.0/8      # welcome list + removal of the bans concerned
@@ -29,6 +29,7 @@ import http.client
 import ipaddress
 import logging
 import os
+import random
 import re
 import signal
 import socket
@@ -48,7 +49,7 @@ from .load import (LOAD_DEFAULTS, SIGNALS, LoadMonitor, Probe, parse_probe_urls,
 from .nft import NFT_SETUP, Nft, NftError
 from .rdap import Rdap, RangeStore
 from .record import Recorder
-from .replay import MIN_WINDOW_REQUESTS, Replay, make_fetcher, parse_speeds, read_requests, select_window
+from .replay import MIN_REQUESTS, Replay, make_fetcher, parse_rates, read_requests, select_requests
 from .replay import report as replay_report
 from .record import report as record_report
 from .sites import Site
@@ -485,7 +486,7 @@ def cmd_replay(args):
     try:
         if not args.base:
             raise ValueError("give --base (e.g. https://www.example.org): the server to load")
-        speeds = parse_speeds(args.speed)
+        rates = parse_rates(args.rate)
         agent_re = re.compile(args.agent) if args.agent else None
         exclude_re = re.compile(args.exclude) if args.exclude else None
         since = datetime.fromisoformat(args.since).timestamp() if args.since else None
@@ -512,16 +513,22 @@ def cmd_replay(args):
     except OSError as e:
         log.error("replay: %s", e)
         return 1
-    window, first, last = select_window(reqs, args.window or args.step, since, until)
-    if len(window) < MIN_WINDOW_REQUESTS:
+    reqs = select_requests(reqs, since, until)
+    if len(reqs) < MIN_REQUESTS:
         log.error("replay: %d GET request(s) selected: too few to make a load (check --agent, "
-                  "--exclude, --from, --until)", len(window))
+                  "--exclude, --from, --until)", len(reqs))
         return 1
-    rate = len(window) / max(1.0, last - first + 1)
+    seed = args.seed if args.seed is not None else random.randrange(1_000_000)
+    start = random.Random(seed).randrange(len(reqs))
     print(f"Target: {args.base}" + (f" (Host: {args.host})" if args.host else ""))
-    print(f"Window: {len(window)} GET requests over {last - first + 1:.0f} s of the log, {rate:.1f} requests/s"
-          + (f", user agents matching {args.agent!r}" if args.agent else ""))
-    print("Stages: " + ", ".join(f"x{s:g} ({rate * s:.1f}/s)" for s in speeds) + f", {args.step:.0f} s each")
+    print(f"Log: {len(reqs)} GET requests" + (f", user agents matching {args.agent!r}" if args.agent else "")
+          + f"; replayed in the order of the log from position {start} (seed {seed}, --seed to repeat)")
+    print("Stages: " + ", ".join(f"{r:g}/s" for r in rates) + f", {args.step:.0f} s each")
+    for r in rates:
+        if r * args.step > len(reqs):
+            print(f"NB: {r:g}/s for {args.step:.0f} s needs {r * args.step:.0f} requests, the log has "
+                  f"{len(reqs)}: some are replayed again (warm caches).")
+            break
     print(f"Stops by itself: median response time >= {args.stop_latency:g} s, {100 * args.stop_errors:.0f} % of failures, "
           f"{args.max_inflight} requests in flight" + (", or the probe page slow" if probe else ""))
     print("The requests come ON TOP of the real traffic. Put this machine's IP in the welcome list "
@@ -532,8 +539,8 @@ def cmd_replay(args):
             return 1
         if input("Start? [y/N] ").strip().lower() not in ("y", "yes", "o", "oui"):
             return 1
-    rp = Replay(window, fetch, speeds, args.step, args.stop_latency, args.stop_errors,
-                args.max_inflight, args.timeout, probe, args.results)
+    rp = Replay(reqs, fetch, rates, args.step, args.stop_latency, args.stop_errors,
+                args.max_inflight, args.timeout, probe, args.results, start=start, seed=seed)
     try:
         rp.run()
     except KeyboardInterrupt:
@@ -707,12 +714,11 @@ def main(argv=None):
     rp.add_argument("files", nargs="*", help="log(s) to replay (default: those of the configuration)")
     rp.add_argument("--base", metavar="URL", help="server to load, e.g. https://www.example.org")
     rp.add_argument("--host", help="Host header (default: that of --base)")
-    rp.add_argument("--speed", default="1,1.5,2,3", metavar="X,X,…",
-                    help="stages: multiples of the speed of the log window (default: 1,1.5,2,3)")
+    rp.add_argument("--rate", default="2,5,10,15", metavar="R,R,…",
+                    help="stages: requests per second inflicted on the server (default: 2,5,10,15)")
     rp.add_argument("--step", type=parse_duration, default=180, metavar="DURATION",
                     help="duration of each stage (default: 3m)")
-    rp.add_argument("--window", type=parse_duration, metavar="DURATION",
-                    help="length of the log stretch replayed in loop: the busiest one (default: --step)")
+    rp.add_argument("--seed", type=int, help="seed of the random starting position in the log (to repeat a run)")
     rp.add_argument("--from", dest="since", metavar="DATETIME",
                     help="only the log after this time (local time, 2026-10-15 23:00)")
     rp.add_argument("--until", metavar="DATETIME", help="only the log before this time")
