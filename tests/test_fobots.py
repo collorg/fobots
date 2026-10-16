@@ -90,6 +90,33 @@ class NoRdap:
         self.requested.append((addr, prefix))
 
 
+class Python38Syntax(unittest.TestCase):
+    """The server runs Python 3.8, the tests a recent one: a syntax of 3.12+ must not slip in."""
+
+    def test_sources_are_python_38_syntax(self):
+        root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
+        files = [os.path.join(root, "fobots.py")]
+        for sub in ("fobots", "tests"):
+            files += [os.path.join(root, sub, f) for f in sorted(os.listdir(os.path.join(root, sub)))
+                      if f.endswith(".py")]
+        r = subprocess.run([sys.executable, os.path.join(root, "tests", "check_py38.py"), *files],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout)
+
+    def test_the_check_catches_a_nested_f_string(self):
+        root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "t.py")
+            with open(path, "w") as f:
+                f.write('x = {"k": 1}\nprint(f"{x["k"]}")\n')
+            r = subprocess.run([sys.executable, os.path.join(root, "tests", "check_py38.py"), path],
+                               capture_output=True, text=True)
+        if sys.version_info >= (3, 12):  # older Pythons refuse that file themselves
+            self.assertEqual(r.returncode, 1)
+            self.assertIn("same quote", r.stdout)
+
+
+
 class QuietServer(http.server.ThreadingHTTPServer):
     """Test server: a client that gave up (timeout tests) is not worth a traceback."""
 

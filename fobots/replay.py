@@ -323,11 +323,12 @@ def report(path, out=print, top=10):
     for st in stages:
         rs = [r for r in reqs if r["s"] == st["s"]]
         s = stage_stats(rs)
+        asked = f"{st['rate']:g}/s"
         if not s["n"] or s["med"] is None:
-            out(f"  {str(f"{st['rate']:g}/s"):<8}{st['sent'] / max(st['seconds'], 1e-9):>7.1f}{st['sent']:>10}   no response")
+            out(f"  {asked:<8}{st['sent'] / max(st['seconds'], 1e-9):>7.1f}{st['sent']:>10}   no response")
             continue
         probe = "" if st.get("probe_max") is None else f"{st['probe_max']:.1f} s"
-        out(f"  {str(f"{st['rate']:g}/s"):<8}{st['sent'] / max(st['seconds'], 1e-9):>7.1f}{s['n']:>10}{s['med']:>8.2f}s"
+        out(f"  {asked:<8}{st['sent'] / max(st['seconds'], 1e-9):>7.1f}{s['n']:>10}{s['med']:>8.2f}s"
             f"{s['p95']:>7.2f}s{s['max']:>7.1f}s{100 * s['failed']:>7.0f}%{100 * s['same']:>12.0f}%{probe:>11}")
     if end and end.get("reason"):
         out(f"\nStopped: {end['reason']}.")
