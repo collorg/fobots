@@ -211,6 +211,42 @@ The default levels are **not calibrated** for your server: first run with `--dry
 look at the `load: psi=…` lines (every 5 minutes and at each level change) to choose
 `load_tense` / `load_critical`. False positives are fixed with `welcome add`.
 
+## Replaying a log to load the server
+
+`fobots replay` replays the `GET` requests of an access log against a server, with a load that rises
+by stages, and measures. It answers *which requests are costly, and at which load does the service give
+way*, without waiting for the next incident and without touching the log format.
+
+```
+./fobots.py replay /var/log/nginx/access.log --base https://www.example.org --agent 'bot|crawl|spider' \
+        --speed 1,1.5,2,3 --step 3m --probe-url HOST@http://127.0.0.1/app/page
+./fobots.py replay --report replay.jsonl        # reads the results again
+```
+
+- **The load.** The busiest stretch of the log (`--window`, default: as long as a stage; or
+  `--from/--until`) is replayed in loop at ×1, ×1.5, ×2… of its own speed: each stage sends the same
+  requests, faster. `--agent` and `--exclude` (regular expressions) select what to replay, for instance
+  only the robots. Only `GET` requests are replayed (a `POST` has no body in the log); a request that
+  would write is refused by the service for lack of a session or token.
+- **It stops by itself**, finishing the requests in flight, as soon as the median response time of the last
+  20 requests reaches `--stop-latency` (3 s), or 20 % of the last 50 failed, or `--max-inflight` (100)
+  requests wait for an answer, or the optional probe page (`--probe-url`, else `load_probe_url`) is slow.
+  It asks for confirmation (`--yes` to skip it) and prints the plan first.
+- **The requests come on top of the real traffic**: choose a quiet hour. Put the IP of the machine that
+  replays in the welcome list, or fobots bans it. Replaying from another machine than the server avoids
+  taking its CPU and memory.
+- **The report** gives, for each stage, the requests/s, the median / p95 / max response time, the failures and
+  the highest probe time; where the service gave way; and the **cost by type of request** (the directories,
+  as in `fobots analyse`): the p95 of the first and of the last stage.
+- **Fidelity.** The log keeps the status and size of every answer. The report compares them with what the
+  server answers now: a page refused or redirected for lack of a session is cheaper than the real one, so
+  the load measured is then a lower bound. Every request with another status is counted and the most
+  frequent changes (`200 -> 302`) are listed.
+
+Together with `probe --record` running on the server during the replay, the incident is complete: the
+response time of each type of request, and what the machine looked like (memory, swap, accept queue,
+processes) at each stage.
+
 ## One log per host: rules per target
 
 A well-configured server writes **one log per virtual host**. Each log becomes a *target*,

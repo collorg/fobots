@@ -224,6 +224,42 @@ avec `--dry-run -v` et regarde les lignes `load: psi=…` (toutes les 5 minutes 
 à chaque changement de niveau) pour choisir `load_tense` / `load_critical`.
 Les faux positifs se corrigent avec `welcome add`.
 
+## Rejouer un log pour charger le serveur
+
+`fobots replay` rejoue les requêtes `GET` d'un log d'accès contre un serveur, avec une charge qui monte par
+paliers, et mesure. Il répond à *quelles requêtes sont coûteuses, et à quelle charge le service cède*, sans
+attendre le prochain incident et sans toucher au format du log.
+
+```
+./fobots.py replay /var/log/nginx/access.log --base https://www.example.org --agent 'bot|crawl|spider' \
+        --speed 1,1.5,2,3 --step 3m --probe-url HOTE@http://127.0.0.1/app/page
+./fobots.py replay --report replay.jsonl        # relit les résultats
+```
+
+- **La charge.** Le passage le plus chargé du log (`--window`, par défaut aussi long qu'un palier ; ou
+  `--from/--until`) est rejoué en boucle à ×1, ×1,5, ×2… de sa propre vitesse : chaque palier envoie les
+  mêmes requêtes, plus vite. `--agent` et `--exclude` (expressions régulières) choisissent ce qui est rejoué,
+  par exemple seulement les robots. Seules les requêtes `GET` sont rejouées (un `POST` n'a pas de corps dans
+  le log) ; une requête qui écrirait est refusée par le service faute de session ou de jeton.
+- **Il s'arrête tout seul**, en laissant finir les requêtes en vol, dès que le temps de réponse médian des 20
+  dernières requêtes atteint `--stop-latency` (3 s), ou que 20 % des 50 dernières ont échoué, ou que
+  `--max-inflight` (100) requêtes attendent une réponse, ou que la page de sonde facultative
+  (`--probe-url`, sinon `load_probe_url`) est lente. Il demande confirmation (`--yes` pour l'éviter) et
+  affiche d'abord le plan.
+- **Les requêtes s'ajoutent au trafic réel** : choisis une heure creuse. Mets l'IP de la machine qui rejoue
+  dans la liste welcome, sinon fobots la bannit. Rejouer depuis une autre machine que le serveur évite de lui
+  prendre CPU et mémoire.
+- **Le rapport** donne, pour chaque palier, les requêtes/s, le temps de réponse médian / p95 / max, les échecs
+  et le temps de sonde le plus haut ; où le service a cédé ; et le **coût par type de requête** (les
+  répertoires, comme dans `fobots analyse`) : le p95 du premier et du dernier palier.
+- **Fidélité.** Le log garde le statut et la taille de chaque réponse. Le rapport les compare à ce que le
+  serveur répond maintenant : une page refusée ou redirigée faute de session coûte moins que la vraie, la
+  charge mesurée est alors une borne basse. Chaque requête au statut différent est comptée et les changements
+  les plus fréquents (`200 -> 302`) sont listés.
+
+Avec `probe --record` qui tourne sur le serveur pendant le rejeu, l'incident est complet : le temps de réponse
+de chaque type de requête, et l'état de la machine (mémoire, swap, file d'accept, processus) à chaque palier.
+
 ## Un log par hôte : règles par cible
 
 Un serveur bien configuré écrit **un log par hôte virtuel**. Chaque log devient une

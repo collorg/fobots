@@ -10,6 +10,7 @@ nftables set as soon as the threshold is exceeded. Bans expire by themselves (nf
   tail -F /var/log/gitlab/nginx/gitlab_access.log | fobots run -t 5 -
   fobots setup                       # creates nft table, sets and rules (idempotent)
   fobots probe                       # response time of the load probe URL(s)
+  fobots replay LOG --base URL       # replays a log with a rising load: costs, capacity
   fobots bans                        # active bans with remaining time
   fobots analyse access.log          # suggests threshold and ignore_path from a log
   fobots welcome add 17.0.0.0/8      # welcome list + removal of the bans concerned
@@ -47,6 +48,8 @@ from .load import (LOAD_DEFAULTS, SIGNALS, LoadMonitor, Probe, parse_probe_urls,
 from .nft import NFT_SETUP, Nft, NftError
 from .rdap import Rdap, RangeStore
 from .record import Recorder
+from .replay import MIN_WINDOW_REQUESTS, Replay, make_fetcher, parse_speeds, read_requests, select_window
+from .replay import report as replay_report
 from .record import report as record_report
 from .sites import Site
 from .util import parse_duration
@@ -475,6 +478,71 @@ def cmd_record(args):
 
 
 
+def cmd_replay(args):
+    """Replays the GET requests of a log against a server with a rising load, and measures."""
+    if args.report:
+        return replay_report(args.report)
+    try:
+        if not args.base:
+            raise ValueError("give --base (e.g. https://www.example.org): the server to load")
+        speeds = parse_speeds(args.speed)
+        agent_re = re.compile(args.agent) if args.agent else None
+        exclude_re = re.compile(args.exclude) if args.exclude else None
+        since = datetime.fromisoformat(args.since).timestamp() if args.since else None
+        until = datetime.fromisoformat(args.until).timestamp() if args.until else None
+        fetch = make_fetcher(args.base, args.host, args.timeout, args.insecure, args.user_agent)
+        probe_text = args.probe_url or getattr(args, "load_probe_url", None)
+        probe = None
+        if probe_text:
+            targets = parse_probe_urls(probe_text)
+            probe = Probe(targets, getattr(args, "load_probe_timeout", 10), args.stop_latency)
+            probe.measure(strict=True)
+    except (OSError, ValueError, re.error) as e:
+        log.error("replay: %s", e)
+        return 1
+    logs = args.files or [x["log"] for x in (getattr(args, "sites", None) or [])]
+    if not logs and getattr(args, "log", None):
+        logs = [args.log]
+    if not logs:
+        log.error("replay: give the log(s) to replay, or define `log =` in the configuration")
+        return 1
+    try:
+        reqs = read_requests(logs, agent_re, exclude_re)
+    except OSError as e:
+        log.error("replay: %s", e)
+        return 1
+    window, first, last = select_window(reqs, args.window or args.step, since, until)
+    if len(window) < MIN_WINDOW_REQUESTS:
+        log.error("replay: %d GET request(s) selected: too few to make a load (check --agent, "
+                  "--exclude, --from, --until)", len(window))
+        return 1
+    rate = len(window) / max(1.0, last - first + 1)
+    print(f"Target: {args.base}" + (f" (Host: {args.host})" if args.host else ""))
+    print(f"Window: {len(window)} GET requests over {last - first + 1:.0f} s of the log, {rate:.1f} requests/s"
+          + (f", user agents matching {args.agent!r}" if args.agent else ""))
+    print("Stages: " + ", ".join(f"x{s:g} ({rate * s:.1f}/s)" for s in speeds) + f", {args.step:.0f} s each")
+    print(f"Stops by itself: median response time >= {args.stop_latency:g} s, {100 * args.stop_errors:.0f} % of failures, "
+          f"{args.max_inflight} requests in flight" + (", or the probe page slow" if probe else ""))
+    print("The requests come ON TOP of the real traffic. Put this machine's IP in the welcome list "
+          "(fobots would ban it).")
+    if not args.yes:
+        if not sys.stdin.isatty():
+            log.error("replay: not interactive: add --yes to start")
+            return 1
+        if input("Start? [y/N] ").strip().lower() not in ("y", "yes", "o", "oui"):
+            return 1
+    rp = Replay(window, fetch, speeds, args.step, args.stop_latency, args.stop_errors,
+                args.max_inflight, args.timeout, probe, args.results)
+    try:
+        rp.run()
+    except KeyboardInterrupt:
+        rp.halt("interrupted")
+        print("interrupted")
+    print()
+    return replay_report(args.results)
+
+
+
 def main(argv=None):
     pre = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
     pre.add_argument("-f", "--config")
@@ -632,6 +700,40 @@ def main(argv=None):
                     help="--record: response time (s) of the critical level (default: 3)")
     add_probe_options(pr)
     pr.set_defaults(fn=cmd_probe)
+
+    rp = sub.add_parser("replay", parents=[common],
+                        help="replays the GET requests of a log against a server with a rising load")
+    rp.add_argument("files", nargs="*", help="log(s) to replay (default: those of the configuration)")
+    rp.add_argument("--base", metavar="URL", help="server to load, e.g. https://www.example.org")
+    rp.add_argument("--host", help="Host header (default: that of --base)")
+    rp.add_argument("--speed", default="1,1.5,2,3", metavar="X,X,…",
+                    help="stages: multiples of the speed of the log window (default: 1,1.5,2,3)")
+    rp.add_argument("--step", type=parse_duration, default=180, metavar="DURATION",
+                    help="duration of each stage (default: 3m)")
+    rp.add_argument("--window", type=parse_duration, metavar="DURATION",
+                    help="length of the log stretch replayed in loop: the busiest one (default: --step)")
+    rp.add_argument("--from", dest="since", metavar="DATETIME",
+                    help="only the log after this time (local time, 2026-10-15 23:00)")
+    rp.add_argument("--until", metavar="DATETIME", help="only the log before this time")
+    rp.add_argument("--agent", metavar="REGEX", help="only the requests whose user agent matches (e.g. bots)")
+    rp.add_argument("--exclude", metavar="REGEX", help="not the requests whose path matches")
+    rp.add_argument("--user-agent", help="user agent sent (default: the logged one)")
+    rp.add_argument("--stop-latency", type=float, default=3.0, metavar="SECONDS",
+                    help="stops when the median response time of the last 20 requests reaches this (default: 3)")
+    rp.add_argument("--stop-errors", type=float, default=0.2, metavar="SHARE",
+                    help="stops when this share of the last 50 requests failed (default: 0.2)")
+    rp.add_argument("--max-inflight", type=int, default=100,
+                    help="stops when this many requests wait for an answer (default: 100)")
+    rp.add_argument("--timeout", type=parse_duration, default=20, metavar="DURATION",
+                    help="a request without answer after this fails (default: 20s)")
+    rp.add_argument("--insecure", action="store_true", help="does not verify the certificate")
+    rp.add_argument("--probe-url", metavar="[HOST@]URL",
+                    help="page measured during the replay, also stops it (default: load_probe_url)")
+    rp.add_argument("--results", default="replay.jsonl", metavar="FILE",
+                    help="results (default: replay.jsonl)")
+    rp.add_argument("--yes", action="store_true", help="does not ask for confirmation")
+    rp.add_argument("--report", metavar="FILE", help="reads the results of a replay instead of running one")
+    rp.set_defaults(fn=cmd_replay)
 
     wd = sub.add_parser("watched", parents=[common],
                         help="monitored IPs (watch_*) caught in a ban: possible false positives")

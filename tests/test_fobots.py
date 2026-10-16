@@ -8,6 +8,7 @@ import ipaddress
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -28,6 +29,8 @@ from fobots.grouping import cluster_ips, pick_groups, wide_blocks  # noqa: E402
 from fobots.load import LoadMonitor, Probe, parse_probe_urls, read_psi, summarize  # noqa: E402
 from fobots.nft import Nft, NftError, parse_elems, val_nets  # noqa: E402
 from fobots.rdap import RangeStore  # noqa: E402
+from fobots.replay import Replay, make_fetcher, parse_speeds, read_requests, schedule, select_window  # noqa: E402
+from fobots.replay import report as replay_report  # noqa: E402
 from fobots.record import LogTail, Recorder, episodes, read_records, read_sys, recorded_span, scan_procs  # noqa: E402
 from fobots.record import report as record_report  # noqa: E402
 from fobots.sites import Site  # noqa: E402
@@ -1204,6 +1207,127 @@ class RecordTests(TmpDirCase):
 
 
 
+class ReplayTests(TmpDirCase):
+    """`fobots replay` against a real local HTTP server."""
+
+    @classmethod
+    def setUpClass(cls):
+        import http.server
+        cls.delay = 0.0
+        outer = cls
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                time.sleep(outer.delay)
+                code = 404 if self.path.startswith("/gone/") else 200
+                self.send_response(code)
+                self.send_header("Content-Length", "10")
+                self.end_headers()
+                self.wfile.write(b"0123456789")
+
+            def log_message(self, *a):
+                pass
+        cls.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        cls.base = f"http://127.0.0.1:{cls.server.server_address[1]}"
+        threading.Thread(target=cls.server.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+
+    def setUp(self):
+        super().setUp()
+        type(self).delay = 0.0
+
+    def make_log(self, per_second=6, seconds=10):
+        rows = []
+        for sec in range(seconds):
+            for i in range(per_second):
+                n = sec * per_second + i
+                path = "/gone/x" if n % 10 == 0 else f"/ok/p{n}"
+                rows.append(line(f"1.1.1.{n % 5}", sec, path, "bot" if n % 2 else "firefox"))
+        rows.append(line("1.1.1.1", 3, "/ok/post", "bot").replace('"GET', '"POST'))
+        return self.write("access.log", "".join(rows))
+
+    def test_read_requests_keeps_get_and_filters(self):
+        path = self.make_log()
+        self.assertEqual(len(read_requests([path])), 60)  # the POST is left out
+        self.assertEqual(len(read_requests([path], re.compile("bot"))), 30)
+        self.assertEqual(len(read_requests([path], None, re.compile("^/gone/"))), 54)
+
+    def test_select_window_takes_the_busiest_stretch(self):
+        rows = [line("1.1.1.1", s) for s in range(0, 20, 2)]            # sparse: 10 requests
+        rows += [line("1.1.1.2", s) * 5 for s in range(40, 46)]          # burst: 30 requests in 6 s
+        path = self.write("a.log", "".join(rows))
+        window, first, last = select_window(read_requests([path]), 6)
+        self.assertEqual(len(window), 30)
+        self.assertEqual(last - first, 5)
+
+    def test_schedule_loops_the_window_faster(self):
+        path = self.write("a.log", "".join(line("1.1.1.1", s) for s in range(3)))
+        window = read_requests([path])
+        plan = schedule(window, 2.0, 3.0)
+        self.assertEqual(len(plan), 6)
+        self.assertEqual([round(w, 2) for w, _ in plan], [0, 0.5, 1.0, 1.5, 2.0, 2.5])
+
+    def test_parse_speeds(self):
+        self.assertEqual(parse_speeds("1, 1.5,2"), [1.0, 1.5, 2.0])
+        for bad in ("", "a", "0", "-1,2"):
+            with self.assertRaises(ValueError):
+                parse_speeds(bad)
+
+    def run_replay(self, speeds, step, **kw):
+        window, _, _ = select_window(read_requests([self.make_log(**kw.pop("log", {}))]), 10)
+        out = self.path("replay.jsonl")
+        said = []
+        rp = Replay(window, make_fetcher(self.base, None, 5.0), speeds, step, out=out, say=said.append, **kw)
+        return rp, rp.run(), out, said
+
+    def test_replay_measures_each_stage_and_the_fidelity(self):
+        rp, reason, out, said = self.run_replay([1.0, 2.0], 2.0)
+        self.assertIsNone(reason)
+        lines = []
+        self.assertEqual(replay_report(out, lines.append), 0)
+        text = "\n".join(lines)
+        self.assertRegex(text, r"x1 .*\n.*x2 ")
+        self.assertIn("Held up to x2", text)
+        self.assertIn("200 -> 404", text)           # /gone/ answers 404 although logged 200
+        self.assertIn("/ok/", text)                  # cost by type of request
+        recs = read_results_file(out)
+        self.assertEqual([r["s"] for r in recs if r["kind"] == "stage"], [1, 2])
+        self.assertEqual(recs[-1]["kind"], "end")
+
+    def test_replay_stops_by_itself_when_the_server_is_slow(self):
+        type(self).delay = 0.4
+        rp, reason, out, said = self.run_replay([1.0, 2.0, 3.0], 3.0, stop_latency=0.3, log={"per_second": 20})
+        self.assertIn("median response time", reason)
+        recs = read_results_file(out)
+        self.assertEqual(recs[-1]["kind"], "stop")
+        self.assertEqual([r["s"] for r in recs if r["kind"] == "stage"], [1])  # the next stages never started
+        lines = []
+        replay_report(out, lines.append)
+        self.assertIn("Stopped:", "\n".join(lines))
+
+    def test_replay_stops_when_too_many_requests_wait(self):
+        type(self).delay = 1.0
+        rp, reason, out, _ = self.run_replay([1.0], 3.0, max_inflight=5, stop_latency=60, log={"per_second": 20})
+        self.assertIn("waiting for an answer", reason)
+
+    def test_replay_stops_on_errors(self):
+        window, _, _ = select_window(read_requests([self.make_log(per_second=20)]), 10)
+        rp = Replay(window, make_fetcher("http://127.0.0.1:1", None, 1.0), [1.0], 2.0,
+                    out=self.path("r.jsonl"), say=lambda *_: None)
+        self.assertIn("failed", rp.run())
+
+
+
+def read_results_file(path):
+    with open(path) as f:
+        return [json.loads(x) for x in f]
+
+
+
 class SiteTests(unittest.TestCase):
     def test_rules(self):
         s = Site("s", "/l", regex=r"^/(assets/|favicon\.ico)|\.png$")
@@ -1409,6 +1533,23 @@ class Commands(TmpDirCase):
         rc, _, err = self.run_main("probe", "--record", self.path("x.jsonl"))
         self.assertEqual(rc, 1)
         self.assertIn("give --url", err)
+
+    def test_replay_needs_a_base_and_confirmation(self):
+        log_path = self.write("a.log", "".join(line("1.1.1.1", s % 30) for s in range(60)))
+        rc, _, err = self.run_main("replay", log_path)
+        self.assertEqual(rc, 1)
+        self.assertIn("give --base", err)
+        with mock.patch("fobots.cli.sys.stdin", io.StringIO("")):
+            rc, out, err = self.run_main("replay", log_path, "--base", "http://127.0.0.1:1")
+        self.assertEqual(rc, 1)
+        self.assertIn("add --yes", err)
+        self.assertIn("ON TOP of the real traffic", out)
+
+    def test_replay_refuses_a_log_without_enough_requests(self):
+        log_path = self.write("a.log", line("1.1.1.1", 1))
+        rc, _, err = self.run_main("replay", log_path, "--base", "http://127.0.0.1:1", "--yes")
+        self.assertEqual(rc, 1)
+        self.assertIn("too few", err)
 
     def test_run_replays_a_log_in_dry_run(self):
         log_path = self.write("access.log", "".join(line(f"43.1.1.{i}", 0) for i in range(8)))
