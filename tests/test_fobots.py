@@ -113,7 +113,7 @@ class Python38Syntax(unittest.TestCase):
                                capture_output=True, text=True)
         if sys.version_info >= (3, 12):  # older Pythons refuse that file themselves
             self.assertEqual(r.returncode, 1)
-            self.assertIn("same quote", r.stdout)
+            self.assertIn("Python 3.12+ only", r.stdout)
 
 
 
