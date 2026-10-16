@@ -3,6 +3,7 @@
 """Unit tests for fobots (standard library only): python3 -m unittest discover -s tests -v"""
 import argparse
 import contextlib
+import http.server
 import io
 import ipaddress
 import json
@@ -87,6 +88,14 @@ class NoRdap:
 
     def request(self, addr, prefix):
         self.requested.append((addr, prefix))
+
+
+class QuietServer(http.server.ThreadingHTTPServer):
+    """Test server: a client that gave up (timeout tests) is not worth a traceback."""
+
+    def handle_error(self, request, client_address):
+        pass
+
 
 
 class TmpDirCase(unittest.TestCase):
@@ -759,7 +768,6 @@ class ProbeTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        import http.server
         cls.mode = {"delay": 0.0, "status": 200}
         cls.hosts = []
         outer = cls
@@ -775,7 +783,7 @@ class ProbeTests(unittest.TestCase):
 
             def log_message(self, *a):
                 pass
-        cls.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        cls.server = QuietServer(("127.0.0.1", 0), Handler)
         cls.url = f"http://127.0.0.1:{cls.server.server_address[1]}/page"
         threading.Thread(target=cls.server.serve_forever, daemon=True).start()
 
@@ -1212,7 +1220,6 @@ class ReplayTests(TmpDirCase):
 
     @classmethod
     def setUpClass(cls):
-        import http.server
         cls.delay = 0.0
         outer = cls
 
@@ -1227,7 +1234,7 @@ class ReplayTests(TmpDirCase):
 
             def log_message(self, *a):
                 pass
-        cls.server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        cls.server = QuietServer(("127.0.0.1", 0), Handler)
         cls.base = f"http://127.0.0.1:{cls.server.server_address[1]}"
         threading.Thread(target=cls.server.serve_forever, daemon=True).start()
 
