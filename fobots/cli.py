@@ -488,7 +488,7 @@ def cmd_replay(args):
             raise ValueError("give --base (e.g. https://www.example.org): the server to load")
         rates = parse_rates(args.rate)
         agent_re = re.compile(args.agent) if args.agent else None
-        exclude_re = re.compile(args.exclude) if args.exclude else None
+        ignore_re = re.compile(args.ignore_path) if args.ignore_path else None
         since = datetime.fromisoformat(args.since).timestamp() if args.since else None
         until = datetime.fromisoformat(args.until).timestamp() if args.until else None
         fetch = make_fetcher(args.base, args.host, args.timeout, args.insecure, args.user_agent,
@@ -502,27 +502,35 @@ def cmd_replay(args):
     except (OSError, ValueError, re.error) as e:
         log.error("replay: %s", e)
         return 1
-    logs = args.files or [x["log"] for x in (getattr(args, "sites", None) or [])]
-    if not logs and getattr(args, "log", None):
-        logs = [args.log]
+    if args.files:
+        logs = [(f, None) for f in args.files]
+    else:  # the logs of the configuration, with the exclusion rules of each target
+        sites = [Site(d["name"], d["log"], d["regex"], d["all"], d.get("watch"))
+                 for d in (getattr(args, "sites", None) or [])]
+        if getattr(args, "log", None):
+            sites.insert(0, Site("default", args.log))
+        logs = [(x.log, x) for x in sites]
     if not logs:
         log.error("replay: give the log(s) to replay, or define `log =` in the configuration")
         return 1
+    stats = {}
     try:
-        reqs = read_requests(logs, agent_re, exclude_re)
+        reqs = read_requests(logs, agent_re, ignore_re, stats)
     except OSError as e:
         log.error("replay: %s", e)
         return 1
     reqs = select_requests(reqs, since, until)
     if len(reqs) < MIN_REQUESTS:
         log.error("replay: %d GET request(s) selected: too few to make a load (check --agent, "
-                  "--exclude, --from, --until)", len(reqs))
+                  "--ignore-path, --from, --until)", len(reqs))
         return 1
     seed = args.seed if args.seed is not None else random.randrange(1_000_000)
     start = random.Random(seed).randrange(len(reqs))
     print(f"Target: {args.base}" + (f" (Host: {args.host})" if args.host else ""))
     print(f"Log: {len(reqs)} GET requests" + (f", user agents matching {args.agent!r}" if args.agent else "")
           + f"; replayed in the order of the log from position {start} (seed {seed}, --seed to repeat)")
+    if stats["ignored"]:
+        print(f"Left out by ignore_path: {stats['ignored']} request(s) (cheap pages that say nothing of the load).")
     print("Stages: " + ", ".join(f"{r:g}/s" for r in rates) + f", {args.step:.0f} s each")
     for r in rates:
         if r * args.step > len(reqs):
@@ -723,7 +731,9 @@ def main(argv=None):
                     help="only the log after this time (local time, 2026-10-15 23:00)")
     rp.add_argument("--until", metavar="DATETIME", help="only the log before this time")
     rp.add_argument("--agent", metavar="REGEX", help="only the requests whose user agent matches (e.g. bots)")
-    rp.add_argument("--exclude", metavar="REGEX", help="not the requests whose path matches")
+    rp.add_argument("--ignore-path", metavar="REGEX",
+                    help="not the requests whose path matches (default: ignore_path of the configuration, "
+                         "and the rules of each [site:NAME])")
     rp.add_argument("--user-agent", help="user agent sent (default: the logged one)")
     rp.add_argument("--stop-latency", type=float, default=3.0, metavar="SECONDS",
                     help="stops when the median response time of the last 20 requests reaches this (default: 3)")

@@ -1293,6 +1293,14 @@ class ReplayTests(TmpDirCase):
         self.assertEqual(len(read_requests([path], re.compile("bot"))), 30)
         self.assertEqual(len(read_requests([path], None, re.compile("^/gone/"))), 54)
 
+    def test_read_requests_applies_the_rules_of_a_target(self):
+        path = self.make_log()
+        stats = {}
+        self.assertEqual(len(read_requests([(path, Site("a", path, "^/gone/"))], stats=stats)), 54)
+        self.assertEqual(stats["ignored"], 6)
+        self.assertEqual(read_requests([(path, Site("a", path, all=True))]), [])
+        self.assertEqual(len(read_requests([(path, None)])), 60)
+
     def test_select_requests_by_time(self):
         path = self.write("a.log", "".join(line("1.1.1.1", sec) for sec in range(30)))
         reqs = read_requests([path])
@@ -1606,6 +1614,19 @@ class Commands(TmpDirCase):
         self.assertEqual(rc, 1)
         self.assertIn("add --yes", err)
         self.assertIn("ON TOP of the real traffic", out)
+
+    def test_replay_leaves_out_the_ignore_path_of_the_configuration(self):
+        log_path = self.write("a.log", "".join(line("1.1.1.1", s % 30, "/gone/x" if s < 25 else "/ok/y")
+                                               for s in range(60)))
+        conf = self.write("c.conf", "[fobots]\nignore_path = ^/gone/\n")
+        with mock.patch("fobots.cli.sys.stdin", io.StringIO("")):
+            rc, out, err = self.run_main("replay", log_path, "--base", "http://127.0.0.1:1", "-f", conf)
+        self.assertIn("Left out by ignore_path: 25 request(s)", out)
+        self.assertIn("Log: 35 GET requests", out)
+        with mock.patch("fobots.cli.sys.stdin", io.StringIO("")):
+            rc, out, err = self.run_main("replay", log_path, "--base", "http://127.0.0.1:1", "-f", conf,
+                                         "--ignore-path", "^/ok/")
+        self.assertIn("Log: 25 GET requests", out)  # the command line wins over the configuration
 
     def test_replay_refuses_a_log_without_enough_requests(self):
         log_path = self.write("a.log", line("1.1.1.1", 1))

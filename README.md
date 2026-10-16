@@ -227,8 +227,10 @@ way*, without waiting for the next incident and without touching the log format.
   2,5,10,15), evenly spaced; `--step` is the length of a stage (3m). The requests are taken in the order of the
   log from a **random position** (printed with its `--seed`, to repeat a run; `--from/--until` bound the part of
   the log it draws from), and start over at the end of the log: every stage sends the same requests, faster. If a
-  stage needs more requests than the log has, the plan says so (the caches get warm). `--agent` and `--exclude`
-  (regular expressions) select what to replay, for instance only the robots. Only `GET` requests are replayed
+  stage needs more requests than the log has, the plan says so (the caches get warm). `--agent` and `--ignore-path`
+  (regular expressions) select what to replay: for instance only the robots, and not the cheap pages that
+  say nothing of the load. `--ignore-path` is the `ignore_path` of the configuration by default, with the rules
+  of each `[site:NAME]`, like for `run` and `analyse`; the plan says how many requests it leaves out. Only `GET` requests are replayed
   (a `POST` has no body in the log); a request that would write is refused by the service for lack of a
   session or token.
 - **It stops by itself**, finishing the requests in flight, as soon as the median response time of the last

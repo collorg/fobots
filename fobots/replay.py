@@ -56,17 +56,22 @@ def parse_rates(text):
 
 
 
-def read_requests(paths, agent_re=None, exclude_re=None):
-    """The GET requests of the logs, in time order. Other methods are not replayed: their body
-    is not in the log."""
-    reqs = []
-    for path in paths:
+def read_requests(inputs, agent_re=None, ignore_re=None, stats=None):
+    """The GET requests of the logs, in time order. `inputs`: paths, or (path, Site) to apply the
+    exclusion rules of a target. Left out: the paths matching `ignore_re` or the target's own rules
+    (the `ignore_path` of the configuration: cheap static pages that say nothing about the load of
+    the service), and the other methods, whose body is not in the log. stats["ignored"]: count."""
+    reqs, ignored = [], 0
+    for item in inputs:
+        path, site = item if isinstance(item, tuple) else (item, None)
         with open(path, errors="replace") as f:
             for line in f:
                 m = LOG_RE.match(line)
                 if not m or m.group(3) != "GET":
                     continue
-                if exclude_re and exclude_re.search(m.group(4)):
+                if (ignore_re and ignore_re.search(m.group(4))) or \
+                        (site is not None and (site.all or site.ignores(m.group(4)))):
+                    ignored += 1
                     continue
                 if agent_re and not agent_re.search(m.group(7)):
                     continue
@@ -76,6 +81,8 @@ def read_requests(paths, agent_re=None, exclude_re=None):
                     continue
                 size = int(m.group(6)) if m.group(6).isdigit() else 0
                 reqs.append(Req(ts, m.group(4), int(m.group(5)), size, m.group(7)))
+    if stats is not None:
+        stats["ignored"] = ignored
     reqs.sort(key=lambda r: r.ts)
     return reqs
 

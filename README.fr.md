@@ -241,8 +241,10 @@ attendre le prochain incident et sans toucher au format du log.
   l'ordre du log à partir d'une **position aléatoire** (affichée avec sa `--seed`, pour refaire un essai ;
   `--from/--until` bornent la partie du log où elle est tirée), et reprennent au début à la fin du log : chaque
   palier envoie les mêmes requêtes, plus vite. Si un palier demande plus de requêtes que le log n'en a, le plan le
-  dit (les caches se réchauffent). `--agent` et `--exclude` (expressions régulières) choisissent ce qui est
-  rejoué, par exemple seulement les robots. Seules les requêtes `GET` sont rejouées (un `POST` n'a pas de corps
+  dit (les caches se réchauffent). `--agent` et `--ignore-path` (expressions régulières) choisissent ce qui est
+  rejoué : par exemple seulement les robots, et pas les pages bon marché qui ne disent rien de la charge.
+  `--ignore-path` est par défaut le `ignore_path` de la configuration, avec les règles de chaque
+  `[site:NOM]`, comme pour `run` et `analyse` ; le plan indique combien de requêtes il écarte. Seules les requêtes `GET` sont rejouées (un `POST` n'a pas de corps
   dans le log) ; une requête qui écrirait est refusée par le service faute de session ou de jeton.
 - **Il s'arrête tout seul**, en laissant finir les requêtes en vol, dès que le temps de réponse médian des 20
   dernières requêtes atteint `--stop-latency` (3 s), ou que 20 % des 50 dernières ont échoué, ou que
