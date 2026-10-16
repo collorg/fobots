@@ -1259,7 +1259,7 @@ class RecordTests(TmpDirCase):
 
 
 class ReplayTests(TmpDirCase):
-    """`fobots replay` against a real local HTTP server."""
+    """`fobots stress` against a real local HTTP server."""
 
     seen_encodings = []
 
@@ -1635,11 +1635,11 @@ class Commands(TmpDirCase):
 
     def test_replay_needs_a_base_and_confirmation(self):
         log_path = self.write("a.log", "".join(line("1.1.1.1", s % 30) for s in range(60)))
-        rc, _, err = self.run_main("replay", log_path)
+        rc, _, err = self.run_main("stress", log_path)
         self.assertEqual(rc, 1)
         self.assertIn("give --base", err)
         with mock.patch("fobots.cli.sys.stdin", io.StringIO("")):
-            rc, out, err = self.run_main("replay", log_path, "--base", "http://127.0.0.1:1")
+            rc, out, err = self.run_main("stress", log_path, "--base", "http://127.0.0.1:1")
         self.assertEqual(rc, 1)
         self.assertIn("add --yes", err)
         self.assertIn("ON TOP of the real traffic", out)
@@ -1649,17 +1649,17 @@ class Commands(TmpDirCase):
                                                for s in range(60)))
         conf = self.write("c.conf", "[fobots]\nignore_path = ^/gone/\n")
         with mock.patch("fobots.cli.sys.stdin", io.StringIO("")):
-            rc, out, err = self.run_main("replay", log_path, "--base", "http://127.0.0.1:1", "-f", conf)
+            rc, out, err = self.run_main("stress", log_path, "--base", "http://127.0.0.1:1", "-f", conf)
         self.assertIn("Left out by ignore_path: 25 request(s)", out)
         self.assertIn("Log: 35 GET requests", out)
         with mock.patch("fobots.cli.sys.stdin", io.StringIO("")):
-            rc, out, err = self.run_main("replay", log_path, "--base", "http://127.0.0.1:1", "-f", conf,
+            rc, out, err = self.run_main("stress", log_path, "--base", "http://127.0.0.1:1", "-f", conf,
                                          "--ignore-path", "^/ok/")
         self.assertIn("Log: 25 GET requests", out)  # the command line wins over the configuration
 
     def test_replay_refuses_a_log_without_enough_requests(self):
         log_path = self.write("a.log", line("1.1.1.1", 1))
-        rc, _, err = self.run_main("replay", log_path, "--base", "http://127.0.0.1:1", "--yes")
+        rc, _, err = self.run_main("stress", log_path, "--base", "http://127.0.0.1:1", "--yes")
         self.assertEqual(rc, 1)
         self.assertIn("too few", err)
 

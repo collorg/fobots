@@ -211,16 +211,16 @@ The default levels are **not calibrated** for your server: first run with `--dry
 look at the `load: psi=…` lines (every 5 minutes and at each level change) to choose
 `load_tense` / `load_critical`. False positives are fixed with `welcome add`.
 
-## Replaying a log to load the server
+## Stress-testing the server by replaying a log
 
-`fobots replay` replays the `GET` requests of an access log against a server, at a rate you choose that rises
+`fobots stress` replays the `GET` requests of an access log against a server, at a rate you choose that rises
 by stages, and measures. It answers *which requests are costly, and at which load does the service give
 way*, without waiting for the next incident and without touching the log format.
 
 ```
-./fobots.py replay /var/log/nginx/access.log --base https://www.example.org --agent 'bot|crawl|spider' \
+./fobots.py stress /var/log/nginx/access.log --base https://www.example.org --agent 'bot|crawl|spider' \
         --rate 2,5,10,15 --step 3m --probe-url HOST@http://127.0.0.1/app/page
-./fobots.py replay --report replay.jsonl        # reads the results again
+./fobots.py stress --report stress.jsonl        # reads the results again
 ```
 
 - **The load.** `--rate` is the number of requests per second inflicted on the server, stage by stage (default

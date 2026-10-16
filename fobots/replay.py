@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 Joël Maizi
-"""`fobots replay`: replays the GET requests of an access log against a server, at a chosen rate.
+"""`fobots stress`: replays the GET requests of an access log against a server, at a chosen rate.
 
 The log gives the mix of requests, in their order. They are replayed from a random position of the log,
 in stages of increasing rate (requests per second, evenly spaced): each stage sends the same requests,

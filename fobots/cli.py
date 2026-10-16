@@ -10,7 +10,7 @@ nftables set as soon as the threshold is exceeded. Bans expire by themselves (nf
   tail -F /var/log/gitlab/nginx/gitlab_access.log | fobots run -t 5 -
   fobots setup                       # creates nft table, sets and rules (idempotent)
   fobots probe                       # response time of the load probe URL(s)
-  fobots replay LOG --base URL       # replays a log at 2, 5, 10… req/s: costs, capacity
+  fobots stress LOG --base URL       # replays a log at 2, 5, 10… req/s: costs, capacity
   fobots bans                        # active bans with remaining time
   fobots analyse access.log          # suggests threshold and ignore_path from a log
   fobots welcome add 17.0.0.0/8      # welcome list + removal of the bans concerned
@@ -515,7 +515,7 @@ def cmd_replay(args):
             probe = Probe(targets, getattr(args, "load_probe_timeout", 10), args.stop_latency)
             probe.measure(strict=True)
     except (OSError, ValueError, re.error) as e:
-        log.error("replay: %s", e)
+        log.error("stress: %s", e)
         return 1
     if args.files:
         logs = [(f, None) for f in args.files]
@@ -526,17 +526,17 @@ def cmd_replay(args):
             sites.insert(0, Site("default", args.log))
         logs = [(x.log, x) for x in sites]
     if not logs:
-        log.error("replay: give the log(s) to replay, or define `log =` in the configuration")
+        log.error("stress: give the log(s) to replay, or define `log =` in the configuration")
         return 1
     stats = {}
     try:
         reqs = read_requests(logs, agent_re, ignore_re, stats)
     except OSError as e:
-        log.error("replay: %s", e)
+        log.error("stress: %s", e)
         return 1
     reqs = select_requests(reqs, since, until)
     if len(reqs) < MIN_REQUESTS:
-        log.error("replay: %d GET request(s) selected: too few to make a load (check --agent, "
+        log.error("stress: %d GET request(s) selected: too few to make a load (check --agent, "
                   "--ignore-path, --from, --until)", len(reqs))
         return 1
     seed = args.seed if args.seed is not None else random.randrange(1_000_000)
@@ -558,7 +558,7 @@ def cmd_replay(args):
           "(fobots would ban it).")
     if not args.yes:
         if not sys.stdin.isatty():
-            log.error("replay: not interactive: add --yes to start")
+            log.error("stress: not interactive: add --yes to start")
             return 1
         if input("Start? [y/N] ").strip().lower() not in ("y", "yes", "o", "oui"):
             return 1
@@ -736,7 +736,7 @@ def main(argv=None):
     add_probe_options(pr)
     pr.set_defaults(fn=cmd_probe)
 
-    rp = sub.add_parser("replay", parents=[common],
+    rp = sub.add_parser("stress", aliases=["replay"], parents=[common],
                         help="replays the GET requests of a log against a server with a rising load")
     rp.add_argument("files", nargs="*", help="log(s) to replay (default: those of the configuration)")
     rp.add_argument("--base", metavar="URL", help="server to load, e.g. https://www.example.org")
@@ -767,8 +767,8 @@ def main(argv=None):
     rp.add_argument("--insecure", action="store_true", help="does not verify the certificate")
     rp.add_argument("--probe-url", metavar="[HOST@]URL",
                     help="page measured during the replay, also stops it (default: load_probe_url)")
-    rp.add_argument("--results", default="replay.jsonl", metavar="FILE",
-                    help="results (default: replay.jsonl)")
+    rp.add_argument("--results", default="stress.jsonl", metavar="FILE",
+                    help="results (default: stress.jsonl)")
     rp.add_argument("--yes", action="store_true", help="does not ask for confirmation")
     rp.add_argument("--report", metavar="FILE", help="reads the results of a replay instead of running one")
     rp.set_defaults(fn=cmd_replay)

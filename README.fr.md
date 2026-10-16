@@ -224,16 +224,16 @@ avec `--dry-run -v` et regarde les lignes `load: psi=…` (toutes les 5 minutes 
 à chaque changement de niveau) pour choisir `load_tense` / `load_critical`.
 Les faux positifs se corrigent avec `welcome add`.
 
-## Rejouer un log pour charger le serveur
+## Tester la tenue en charge en rejouant un log
 
-`fobots replay` rejoue les requêtes `GET` d'un log d'accès contre un serveur, à un débit que tu choisis, par
+`fobots stress` rejoue les requêtes `GET` d'un log d'accès contre un serveur, à un débit que tu choisis, par
 paliers croissants, et mesure. Il répond à *quelles requêtes sont coûteuses, et à quelle charge le service cède*, sans
 attendre le prochain incident et sans toucher au format du log.
 
 ```
-./fobots.py replay /var/log/nginx/access.log --base https://www.example.org --agent 'bot|crawl|spider' \
+./fobots.py stress /var/log/nginx/access.log --base https://www.example.org --agent 'bot|crawl|spider' \
         --rate 2,5,10,15 --step 3m --probe-url HOTE@http://127.0.0.1/app/page
-./fobots.py replay --report replay.jsonl        # relit les résultats
+./fobots.py stress --report stress.jsonl        # relit les résultats
 ```
 
 - **La charge.** `--rate` est le nombre de requêtes par seconde infligées au serveur, palier par palier (2,5,10,15
