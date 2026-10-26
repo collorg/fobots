@@ -4,10 +4,10 @@
 
 > *'fo' stands for filter out! What were you thinking?*
 
-A daemon that protects a web server (behind nginx) from overly
+A daemon that protects a web server (nginx or Apache) from overly
 aggressive scrapers. It follows the access log, spots the **IP ranges** whose request rate
 exceeds a threshold, and adds them to an **nftables** set with a timeout: the traffic is
-dropped by the firewall before it reaches nginx.
+dropped by the firewall before it reaches the web server.
 
 Plain Python 3.7+ (no dependencies), nftables, Linux. On Ubuntu 20.04 (Python 3.8,
 kernel 5.4): `apt install nftables` (version 0.9.3).

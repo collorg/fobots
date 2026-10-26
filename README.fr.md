@@ -6,10 +6,10 @@
 
 Les messages, le journal et l'aide en ligne du programme sont en anglais.
 
-Démon qui protège un serveur web (derrière nginx) des
+Démon qui protège un serveur web (nginx ou Apache) des
 scrapers trop agressifs. Il suit l'access log, repère les **plages d'IP** dont le
 débit dépasse un seuil, et les ajoute à un set **nftables** avec expiration : le
-trafic est rejeté par le pare-feu avant d'atteindre nginx.
+trafic est rejeté par le pare-feu avant d'atteindre le serveur web.
 
 Python 3.7+ standard (aucune dépendance), nftables, Linux. Sur Ubuntu 20.04 (Python 3.8,
 noyau 5.4) : `apt install nftables` (version 0.9.3).
