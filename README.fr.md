@@ -6,10 +6,10 @@
 
 Les messages, le journal et l'aide en ligne du programme sont en anglais.
 
-Démon qui protège un serveur web (pensé pour un GitLab derrière nginx) des
+Démon qui protège un serveur web (derrière nginx) des
 scrapers trop agressifs. Il suit l'access log, repère les **plages d'IP** dont le
 débit dépasse un seuil, et les ajoute à un set **nftables** avec expiration : le
-trafic est rejeté par le pare-feu avant d'atteindre nginx et GitLab.
+trafic est rejeté par le pare-feu avant d'atteindre nginx.
 
 Python 3.7+ standard (aucune dépendance), nftables, Linux. Sur Ubuntu 20.04 (Python 3.8,
 noyau 5.4) : `apt install nftables` (version 0.9.3).
@@ -25,7 +25,7 @@ noyau 5.4) : `apt install nftables` (version 0.9.3).
 
 ## Fonctionnement
 
-1. Chaque ligne du log (format *combined* nginx/Apache/GitLab) est rattachée à
+1. Chaque ligne du log (format *combined* nginx/Apache) est rattachée à
    une plage d'IP : celle de l'allocation RIR qui la contient (obtenue par RDAP,
    le successeur de whois). Le détail du propriétaire n'est pas conservé : seule
    la plage compte.
@@ -50,7 +50,7 @@ Sur Debian/Ubuntu, depuis un clone du dépôt :
 
 ```
 sudo ./fobots.py install --dry-run            # le plan, sans rien modifier
-sudo ./fobots.py install --log /var/log/gitlab/nginx/gitlab_access.log
+sudo ./fobots.py install --log /var/log/nginx/access.log
 ```
 La commande est **idempotente** (on peut la relancer pour mettre à jour le programme et
 l'unité) et ne touche jamais une conf ou une liste welcome existantes. Elle :
@@ -274,8 +274,8 @@ Un serveur bien configuré écrit **un log par hôte virtuel**. Chaque log devie
 *cible*, avec ses propres règles, dans `fobots.conf` :
 
 ```ini
-[site:gitlab]
-log = /var/log/gitlab/nginx/gitlab_access.log
+[site:app]
+log = /var/log/nginx/access.log
 ignore_path = ^/(assets/|favicon\.ico|robots\.txt)
 
 [site:vitrine]                       # site entièrement statique
@@ -309,7 +309,7 @@ de RDAP, et ne sont pas non plus notées par `watch_*`.
 ```
 ignore_path = ^/(assets/|favicon|robots\.txt)
 ```
-**Pourquoi :** un seul chargement de page GitLab déclenche des dizaines de requêtes
+**Pourquoi :** un seul chargement de page déclenche des dizaines de requêtes
 d'assets dans la même seconde. Compter ces requêtes gonfle le débit des visiteurs
 légitimes et favorise les faux positifs. Une fois les statiques exclues, le seuil
 mesure surtout les requêtes coûteuses, et on peut le baisser. Le chemin lu est celui de
@@ -412,7 +412,7 @@ depuis plusieurs réseaux ressemble à un scanner (le mettre dans la liste welco
 `trap_ignore`). Pas encore couvert : un site qui répond 200 à tout, et le premier scanner (un
 piège n'existe qu'une fois que d'autres l'ont demandé).
 
-## Repérer des IP légitimes prises dans un ban (gitlab-runner…)
+## Repérer des IP légitimes prises dans un ban (runners CI…)
 
 Opt-in : `watch_agent` (regex sur l'user-agent) et `watch_path` (regex sur la route) ;
 si les deux sont donnés, les deux doivent correspondre. La route dépend de l'hôte : elles se
@@ -420,10 +420,10 @@ placent dans la section `[site:NOM]` de cet hôte (une valeur de `[fobots]` s'ap
 cibles qui n'en ont pas). Exemple pour les runners :
 
 ```
-[site:gitlab]
-log = /var/log/gitlab/nginx/gitlab_access.log
-watch_agent = ^gitlab-runner
-watch_path  = ^/api/v4/
+[site:app]
+log = /var/log/nginx/access.log
+watch_agent = ^ci-runner
+watch_path  = ^/api/
 ```
 Ces requêtes sont **comptées comme les autres** : aucune exemption, donc rien à
 usurper. Quand une plage est bannie, le démon note les IP qui correspondaient, dans
@@ -438,8 +438,8 @@ fobots watched --cmd           # n'affiche que la commande welcome add
 ```
 ```
 IP          BANS  REQ  LAST BAN          RANGE        STATE          ROUTE
-40.2.2.2       1    2  2026-10-10 13:40  40.0.0.0/12  active (1234 s) /api/v4/jobs/7/artifacts
-20.1.1.1       2    6  2026-10-10 13:40  20.0.0.0/12  expired        /api/v4/jobs/request
+40.2.2.2       1    2  2026-10-10 13:40  40.0.0.0/12  active (1234 s) /api/jobs/7/artifacts
+20.1.1.1       2    6  2026-10-10 13:40  20.0.0.0/12  expired        /api/jobs/request
 
 To protect them all:
   fobots welcome add 40.2.2.2/32 20.1.1.1/32
@@ -454,7 +454,7 @@ Limites : seules les requêtes vues dans l'heure avant le ban sont notées (5 00
 gardées au plus, 200 par constat) ; les IP privées ne sont jamais comptées ; les lignes
 dont l'agent ne se lit pas (autre format de log) ne sont pas surveillées. Les
 `git clone` des jobs portent en général l'agent `git/…` : pour les voir,
-`watch_agent = ^(gitlab-runner|git/)`.
+`watch_agent = ^(ci-runner|git/)`.
 
 ## Emplacements des fichiers
 

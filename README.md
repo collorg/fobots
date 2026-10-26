@@ -4,10 +4,10 @@
 
 > *'fo' stands for filter out! What were you thinking?*
 
-A daemon that protects a web server (designed for GitLab behind nginx) from overly
+A daemon that protects a web server (behind nginx) from overly
 aggressive scrapers. It follows the access log, spots the **IP ranges** whose request rate
 exceeds a threshold, and adds them to an **nftables** set with a timeout: the traffic is
-dropped by the firewall before it reaches nginx and GitLab.
+dropped by the firewall before it reaches nginx.
 
 Plain Python 3.7+ (no dependencies), nftables, Linux. On Ubuntu 20.04 (Python 3.8,
 kernel 5.4): `apt install nftables` (version 0.9.3).
@@ -22,7 +22,7 @@ kernel 5.4): `apt install nftables` (version 0.9.3).
 
 ## How it works
 
-1. Each line of the log (nginx/Apache/GitLab *combined* format) is attached to an IP range:
+1. Each line of the log (nginx/Apache *combined* format) is attached to an IP range:
    the RIR allocation that contains it (obtained through RDAP, the successor of whois).
    The owner's details are not kept: only the range matters.
 2. Requests are counted per range and per second. When a range exceeds `threshold` req/s
@@ -44,7 +44,7 @@ On Debian/Ubuntu, from a clone of the repository:
 
 ```
 sudo ./fobots.py install --dry-run            # the plan, nothing is modified
-sudo ./fobots.py install --log /var/log/gitlab/nginx/gitlab_access.log
+sudo ./fobots.py install --log /var/log/nginx/access.log
 ```
 The command is **idempotent** (run it again to update the program and the unit) and never
 touches an existing configuration or welcome list. It:
@@ -261,8 +261,8 @@ A well-configured server writes **one log per virtual host**. Each log becomes a
 with its own rules, in `fobots.conf`:
 
 ```ini
-[site:gitlab]
-log = /var/log/gitlab/nginx/gitlab_access.log
+[site:app]
+log = /var/log/nginx/access.log
 ignore_path = ^/(assets/|favicon\.ico|robots\.txt)
 
 [site:showcase]                      # entirely static site
@@ -299,7 +299,7 @@ and are not noted by `watch_*` either.
 ```
 ignore_path = ^/(assets/|favicon|robots\.txt)
 ```
-**Why:** a single GitLab page load triggers dozens of asset requests within the same second.
+**Why:** a single page load triggers dozens of asset requests within the same second.
 Counting them inflates the rate of legitimate visitors and favours false positives. Once the
 static files are excluded, the threshold mostly measures expensive requests, and can be
 lowered. The path read is the one in the request line (`GET /path?…`): this also works with
@@ -395,7 +395,7 @@ Options: `trap_min_ips`, `trap_min_nets`, `trap_window`, `trap_template_min`, `t
 looks like a scanner (put it in the welcome list or in `trap_ignore`). Not covered yet: a site
 that answers 200 to anything, and a first scanner (a trap exists only once others asked for it).
 
-## Spotting legitimate IPs caught in a ban (gitlab-runner…)
+## Spotting legitimate IPs caught in a ban (CI runners…)
 
 Opt-in: `watch_agent` (regex on the user agent) and `watch_path` (regex on the route); if
 both are given, both must match. The route belongs to a host, so it goes in the
@@ -403,10 +403,10 @@ both are given, both must match. The route belongs to a host, so it goes in the
 of their own). Example for runners:
 
 ```
-[site:gitlab]
-log = /var/log/gitlab/nginx/gitlab_access.log
-watch_agent = ^gitlab-runner
-watch_path  = ^/api/v4/
+[site:app]
+log = /var/log/nginx/access.log
+watch_agent = ^ci-runner
+watch_path  = ^/api/
 ```
 These requests are **counted like the others**: no exemption, so nothing to spoof. When a
 range is banned, the daemon records the IPs that matched, in the journal (a `WATCH` line)
@@ -421,8 +421,8 @@ fobots watched --cmd           # only prints the welcome add command
 ```
 ```
 IP          BANS  REQ  LAST BAN          RANGE        STATE          ROUTE
-40.2.2.2       1    2  2026-10-10 13:40  40.0.0.0/12  active (1234 s) /api/v4/jobs/7/artifacts
-20.1.1.1       2    6  2026-10-10 13:40  20.0.0.0/12  expired        /api/v4/jobs/request
+40.2.2.2       1    2  2026-10-10 13:40  40.0.0.0/12  active (1234 s) /api/jobs/7/artifacts
+20.1.1.1       2    6  2026-10-10 13:40  20.0.0.0/12  expired        /api/jobs/request
 
 To protect them all:
   fobots welcome add 40.2.2.2/32 20.1.1.1/32
@@ -435,7 +435,7 @@ lets you see them after an absence. The "active/expired" state needs access to n
 Limits: only requests seen in the hour before the ban are noted (at most 5,000 IPs kept, 200
 per finding); private IPs are never counted; lines whose agent cannot be read (another log
 format) are not monitored. Job `git clone`s generally carry the `git/…` agent: to see them,
-`watch_agent = ^(gitlab-runner|git/)`.
+`watch_agent = ^(ci-runner|git/)`.
 
 ## File locations
 
