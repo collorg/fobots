@@ -30,10 +30,14 @@ CONF_KEYS = {  # file key -> (argparse destination, conversion)
     "observed_max_prefix": ("observed_max_prefix", int),
     "watch_agent": ("watch_agent", str), "watch_path": ("watch_path", str),
     "watch_file": ("watch_file", str),
+    "traps": ("traps", lambda v: v.lower() in ("1", "true", "yes", "oui", "on")),
+    "trap_min_ips": ("trap_min_ips", int), "trap_min_nets": ("trap_min_nets", int),
+    "trap_window": ("trap_window", parse_duration), "trap_template_min": ("trap_template_min", int),
+    "traps_file": ("traps_file", str),
     "from_start": ("from_start", lambda v: v.lower() in ("1", "true", "yes", "oui", "on")),
 }
 
-PATH_KEYS = {"dir", "cache", "welcome", "log", "watch_file"}
+PATH_KEYS = {"dir", "cache", "welcome", "log", "watch_file", "traps_file"}
 
 # /etc first: the result does not depend on the current directory (./fobots.conf is for development)
 CONF_SEARCH = (os.path.join(CONF_DIR, "fobots.conf"), "fobots.conf")

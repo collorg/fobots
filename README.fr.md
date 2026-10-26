@@ -361,6 +361,31 @@ champ supplémentaire.
 Ce sont des **suggestions** : rien n'est modifié, et une suggestion tirée d'une journée
 calme se vérifie avant usage.
 
+## Chemins pièges : ce que seuls les scanners demandent (`traps`)
+
+Apprentissage seulement, **rien n'est banni**. Un chemin qui reçoit un 404 ou un 403 et que
+demandent beaucoup d'IP distinctes de réseaux différents (par défaut : 5 IP de 3 réseaux /16 en
+6 h) est un piège candidat : `/.env`, `/wp-login.php` sur un site qui n'est pas WordPress… On
+compte des IP et non des requêtes : un seul client qui boucle sur un lien mort n'en fabrique pas.
+
+Ce que le site sert réellement protège des faux positifs :
+
+- un chemin qui a répondu une fois (2xx, 3xx, 401, 405) n'est jamais un piège ;
+- un chemin de la même **forme** non plus. Les segments variables sont remplacés par un type
+  fixe (`{uuid}`, `{int}`, `{ulid}`, `{hex}`, `{slug}`) : un `/post/<uuid>` supprimé n'est pas pris
+  pour un scan dès que le site a servi `/post/{uuid}` avec `trap_template_min` (3) valeurs
+  différentes. Un segment avec `..`, `%`, `.env`, `.git`, `wp-admin`… ne correspond jamais à un
+  type, et un slug doit contenir un chiffre.
+
+```
+traps = yes          # dans [fobots] : le démon apprend, par cible, et écrit <dir>/traps.json
+fobots traps         # pièges et formes, d'après l'instantané du démon
+fobots traps access.log autre.log   # idem, calculé maintenant depuis des logs (ni nft, ni root)
+```
+Options : `trap_min_ips`, `trap_min_nets`, `trap_window`, `trap_template_min`, `traps_file`.
+Vérifier la liste sur ses propres logs avant de s'y fier : un robot d'indexation qui suit des
+liens morts depuis plusieurs réseaux ressemble à un scanner (le mettre dans la liste welcome).
+
 ## Repérer des IP légitimes prises dans un ban (gitlab-runner…)
 
 Opt-in : `watch_agent` (regex sur l'user-agent) et `watch_path` (regex sur la route) ;
@@ -439,6 +464,7 @@ conf.** Voir `fobots.conf.example` pour toutes les clés :
 | `threshold` | 5 | req/s d'une plage au-delà desquelles on bannit |
 | `prefix_threshold` | = `threshold` | req/s d'un `/16` non résolu qui autorisent RDAP |
 | `sustain`, `window` | 5, 60 | secondes consécutives au-dessus du seuil exigées ; fenêtre de suivi (s) |
+| `traps`, `trap_min_ips`, `trap_min_nets`, `trap_window`, `trap_template_min`, `traps_file` | non, 5, 3, 6h, 3, `<dir>/traps.json` | apprend les chemins pièges (404/403 demandés par beaucoup d'IP) ; rien n'est banni, voir `fobots traps` |
 | `slow_threshold`, `slow_window` | 0, 10m | bannit une plage dont le débit **moyen** sur la fenêtre dépasse cette valeur (req/s) ; `0` = désactivé |
 | `ban_time` | 1h | durée d'un ban (`30m`, `1h`, `1d`) |
 | `ban_scope` | `allocation` | `allocation` : on bannit la plage RDAP entière ; `observed` : seulement les groupes d'IP vues dedans |
@@ -475,6 +501,7 @@ fobots bans [--no-lookup]          bans actifs, temps restant et organisation (n
 fobots welcome add CIDR…        liste welcome + retrait des bans concernés
 fobots welcome list
 fobots watched [--active] [--cmd]  IP surveillées (watch_*) prises dans un ban
+fobots traps [LOG…]            chemins pièges (404/403 demandés par beaucoup d'IP), appris par le démon ou depuis des logs
 fobots analyse [LOG…]           lit des logs une fois et suggère des réglages (sans nft ni root)
 ```
 Options communes : `-f CONF`, `--dir`, `-c`, `-w`, `--ban-time`, `--nft-bin`,
@@ -597,6 +624,7 @@ Mémoire : au plus 200 000 IP suivies. Les IPv4 et IPv6 sont traitées de la mê
 | `/etc/fobots/fobots.conf` | configuration |
 | `/etc/fobots/welcome.txt` | plages à ne jamais bannir, un CIDR par ligne (créé par `welcome add`) |
 | `/var/lib/fobots/ip_ranges.json` | cache des plages RDAP |
+| `/var/lib/fobots/traps.json` | instantané des chemins pièges appris (si `traps = yes`) |
 | `/var/lib/fobots/watched.jsonl` | constats « IP surveillée prise dans un ban » (si `watch_*`) |
 
 ## Licence

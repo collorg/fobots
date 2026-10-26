@@ -345,6 +345,31 @@ number is seconds, an integer is microseconds). The daemon is not affected by th
 These are **suggestions**: nothing is changed, and a suggestion built from one quiet day
 should be checked before use.
 
+## Trap paths: what only scanners ask for (`traps`)
+
+Learning only, **nothing is banned**. A path that gets a 404 or a 403 and is asked for by many
+distinct IPs from different networks (default: 5 IPs from 3 /16 networks within 6 h) is a
+candidate trap: `/.env`, `/wp-login.php` on a site that is not WordPress… Counting IPs, not
+requests, keeps a single client looping on a dead link from creating one.
+
+What the site really serves protects against false positives:
+
+- a path that answered once (2xx, 3xx, 401, 405) is never a trap;
+- neither is a path of the same **shape**. Variable segments are replaced by a fixed type
+  (`{uuid}`, `{int}`, `{ulid}`, `{hex}`, `{slug}`), so a deleted `/post/<uuid>` is not taken for
+  a scan once the site has served `/post/{uuid}` with `trap_template_min` (3) different values.
+  Segments with `..`, `%`, `.env`, `.git`, `wp-admin`… never match a type, and a slug needs a
+  digit.
+
+```
+traps = yes          # in [fobots]: the daemon learns, per target, and writes <dir>/traps.json
+fobots traps         # traps and shapes from the daemon's snapshot
+fobots traps access.log other.log   # same, computed now from logs (no nft, no root)
+```
+Options: `trap_min_ips`, `trap_min_nets`, `trap_window`, `trap_template_min`, `traps_file`.
+Check the list on your own logs before relying on it: a crawler following dead links from many
+networks looks like a scanner (put it in the welcome list).
+
 ## Spotting legitimate IPs caught in a ban (gitlab-runner…)
 
 Opt-in: `watch_agent` (regex on the user agent) and `watch_path` (regex on the route); if
@@ -421,6 +446,7 @@ the configuration file. **The command line overrides the configuration.** See
 | `threshold` | 5 | req/s of a range above which it is banned |
 | `prefix_threshold` | = `threshold` | req/s of an unresolved `/16` that allow RDAP |
 | `sustain`, `window` | 5, 60 | consecutive seconds above the threshold required; tracking window (s) |
+| `traps`, `trap_min_ips`, `trap_min_nets`, `trap_window`, `trap_template_min`, `traps_file` | no, 5, 3, 6h, 3, `<dir>/traps.json` | learns trap paths (404/403 asked for by many IPs); nothing is banned, see `fobots traps` |
 | `slow_threshold`, `slow_window` | 0, 10m | bans a range whose **average** rate over the window exceeds this (req/s); `0` = disabled |
 | `ban_time` | 1h | duration of a ban (`30m`, `1h`, `1d`) |
 | `ban_scope` | `allocation` | `allocation`: ban the whole RDAP range; `observed`: only the groups of IPs seen inside it |
@@ -456,6 +482,7 @@ fobots bans [--no-lookup]          active bans, remaining time and organisation 
 fobots welcome add CIDR…          welcome list + removal of the bans concerned
 fobots welcome list
 fobots watched [--active] [--cmd]  monitored IPs (watch_*) caught in a ban
+fobots traps [LOG…]            trap paths (404/403 asked for by many IPs) learned by the daemon or from logs
 fobots analyse [LOG…]             reads logs once and suggests settings (no nft, no root)
 ```
 Common options: `-f CONF`, `--dir`, `-c`, `-w`, `--ban-time`, `--nft-bin`, `--dry-run`,
@@ -575,6 +602,7 @@ Memory: at most 200,000 IPs tracked. IPv4 and IPv6 are handled the same way.
 | `/etc/fobots/fobots.conf` | configuration |
 | `/etc/fobots/welcome.txt` | ranges never to ban, one CIDR per line (created by `welcome add`) |
 | `/var/lib/fobots/ip_ranges.json` | RDAP range cache |
+| `/var/lib/fobots/traps.json` | snapshot of the learned trap paths (if `traps = yes`) |
 | `/var/lib/fobots/watched.jsonl` | "monitored IP caught in a ban" findings (if `watch_*`) |
 
 ## License

@@ -62,6 +62,18 @@ ban_time = 1h        # duration of a ban: 30m, 1h, 1d…
 # watch_file = watched.jsonl   # findings recorded (default: <dir>/watched.jsonl), reread by
 #                              `fobots watched`; pruned beyond 30 days at startup
 
+# Trap paths (learning only, nothing is banned): a path that gets a 404/403 and is asked for by
+# many distinct IPs from different networks is a scanner's target. What the site really serves
+# (2xx/3xx) protects: an exact path that answered, or a path of the same shape (/post/{uuid},
+# {int}, {ulid}, {hex}, {slug}) once served with trap_template_min different values.
+# `fobots traps` lists the traps and the shapes learned (from the daemon's snapshot, or from logs).
+# traps = no
+# trap_min_ips = 5        # distinct IPs asking for the same missing path
+# trap_min_nets = 3       # ... from at least this many /16 networks
+# trap_window = 6h        # period over which the IPs are counted
+# trap_template_min = 3   # values served before a shape protects a missing path
+# traps_file = traps.json # snapshot (default: <dir>/traps.json)
+
 # Tight bans: instead of banning the whole RDAP allocation, ban the groups of IPs seen inside
 # it; fall back to wide blocks if the traffic is scattered or after several partial bans.
 # Slow scrapers: a range that stays at about one request per second for hours never exceeds

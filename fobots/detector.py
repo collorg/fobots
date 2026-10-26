@@ -2,7 +2,9 @@
 # Copyright (C) 2026 Joël Maizi
 """Detection: counting requests per range and deciding what to ban."""
 import ipaddress
+import json
 import logging
+import os
 import re
 import time
 from collections import Counter, defaultdict, deque
@@ -11,6 +13,7 @@ from .events import append_event
 from .grouping import cluster_ips, pick_groups, wide_blocks
 from .load import LEVELS, NoLoad
 from .nft import NftError
+from .traps import TrapLearner
 from .util import fmt_range, parse_ts, prefix_of
 
 log = logging.getLogger("fobots")
@@ -44,6 +47,8 @@ OBSERVED_PREFIX6 = 48         # maximum width of a group in IPv6 (adjustable in 
 
 OBSERVED_WIDE6 = 32           # maximum width of a fallback ban in IPv6 (adjustable in IPv4)
 
+TRAP_SAVE_EVERY = 300         # seconds (log time) between two snapshots of the learned traps
+
 SLOW_BUCKET = 10               # seconds per bucket of the average-rate window
 
 SCOPES = ("allocation", "observed")
@@ -55,7 +60,7 @@ class Detector:
                  load=None, min_threshold=1.0, min_ban_seconds=60, watch=None,
                  watch_file=None, ignore_path=None, sites=(), scope="allocation",
                  observed_prefix=20, escalate=4, wide_prefix=16, slow_threshold=0,
-                 slow_window=600):
+                 slow_window=600, trap_conf=None, trap_file=None):
         self.base_threshold, self.base_prefix_threshold = threshold, prefix_threshold
         self.load, self.min_threshold, self.min_ban = load or NoLoad(), min_threshold, min_ban_seconds
         self.sustain, self.window = sustain, window
@@ -84,6 +89,10 @@ class Detector:
         self.watch = watch  # (agent regex or None, path regex or None); None = disabled
         self.watched = {}   # ip -> [requests, last second seen, example path]
         self.watch_file = watch_file  # findings written here (reread by `fobots watched`)
+        self.trap_conf = trap_conf    # TrapLearner options; None = no learning of trap paths
+        self.trap_file = trap_file    # snapshot of what was learned (read by `fobots traps`)
+        self.learners = {}            # target name -> TrapLearner
+        self.last_trap_save = 0
 
     def watch_match(self, m, watch):
         """Path of the request (m: REQ_RE) if it matches the monitored patterns (watch), else
@@ -174,7 +183,28 @@ class Detector:
         except ValueError:
             self.skipped += 1
             return
+        if self.trap_conf is not None:
+            name = site.name if site is not None else "default"
+            learner = self.learners.get(name)
+            if learner is None:
+                learner = self.learners[name] = TrapLearner(**self.trap_conf)
+            learner.feed_line(line)
         self.feed(m.group(1), sec, tag)
+
+    def save_traps(self):
+        """Writes what was learned for each target (atomic), for `fobots traps`."""
+        if not self.trap_file:
+            return
+        self.last_trap_save = self.latest
+        data = {"t": int(time.time()),
+                "sites": {n: l.snapshot() for n, l in self.learners.items()}}
+        tmp = self.trap_file + ".tmp"
+        try:
+            with open(tmp, "w") as f:
+                json.dump(data, f, ensure_ascii=False)
+            os.replace(tmp, self.trap_file)
+        except OSError as e:
+            log.warning("cannot write %s: %s", self.trap_file, e)
 
     def feed(self, ip, sec, tag=None):
         key = self.memo.get(ip)
@@ -320,6 +350,8 @@ class Detector:
             keep = self.latest - self.banner.ban_seconds
             self.partial = {k: v for k, v in
                             ((k, [t for t in v if t >= keep]) for k, v in self.partial.items()) if v}
+        if self.trap_file and self.learners and self.latest - self.last_trap_save >= TRAP_SAVE_EVERY:
+            self.save_traps()
         old = self.latest - WATCH_RETENTION
         for ip in [ip for ip, e in self.watched.items() if e[1] < old]:
             del self.watched[ip]

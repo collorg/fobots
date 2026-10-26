@@ -13,6 +13,7 @@ nftables set as soon as the threshold is exceeded. Bans expire by themselves (nf
   fobots stress LOG --base URL       # replays a log at 2, 5, 10… req/s: costs, capacity
   fobots bans                        # active bans with remaining time
   fobots analyse access.log          # suggests threshold and ignore_path from a log
+  fobots traps                       # trap paths learned from the 404/403 (run --traps, or LOG…)
   fobots welcome add 17.0.0.0/8      # welcome list + removal of the bans concerned
   fobots welcome list
 
@@ -27,6 +28,7 @@ Signals: SIGUSR1 prints the most active ranges, SIGTERM/SIGINT stop the daemon.
 import argparse
 import http.client
 import ipaddress
+import json
 import logging
 import os
 import random
@@ -53,6 +55,7 @@ from .replay import MIN_REQUESTS, Replay, make_fetcher, parse_rates, read_reques
 from .replay import report as replay_report
 from .record import report as record_report
 from .sites import Site
+from .traps import MAX_VALUES, TrapLearner
 from .util import parse_duration
 from .welcome import Banner, Welcome, welcome_add
 
@@ -80,6 +83,11 @@ def ensure_dir(path):
 
 def watch_file_path(args):
     return args.watch_file or os.path.join(args.dir, "watched.jsonl")
+
+
+
+def traps_file_path(args):
+    return args.traps_file or os.path.join(args.dir, "traps.json")
 
 
 
@@ -183,11 +191,20 @@ def cmd_run(args):
     watch_file = watch_file_path(args) if watch or any(x.watch for x in sites) else None
     if watch_file:
         trim_events(watch_file)
+    trap_conf = trap_file = None
+    if args.traps:
+        trap_conf = trap_options(args)
+        trap_file = traps_file_path(args)
+        ensure_dir(os.path.dirname(os.path.abspath(trap_file)))
+        log.info("learning trap paths (no ban): %d IP(s) from %d network(s) within %d s, "
+                 "snapshot in %s", args.trap_min_ips, args.trap_min_nets, args.trap_window,
+                 trap_file)
     det = Detector(args.threshold, args.prefix_threshold or args.threshold, args.sustain,
                    args.window, store, Banner(nft, wl, args.ban_seconds), rdap,
                    load, args.min_threshold, args.min_ban_seconds, watch, watch_file,
                    ignore_path, sites, args.ban_scope, args.observed_prefix, args.observed_escalate,
-                   args.observed_max_prefix, args.slow_threshold, args.slow_window)
+                   args.observed_max_prefix, args.slow_threshold, args.slow_window,
+                   trap_conf, trap_file)
     if det.observed:
         log.info("ban_scope observed: groups of IPs of at most /%d (IPv6 /%d), fallback to blocks "
                  "of %s if scattered or after %d partial bans", args.observed_prefix,
@@ -211,6 +228,7 @@ def cmd_run(args):
     except OSError as e:  # stdin or file unreadable
         log.error("cannot read: %s", e)
         return 1
+    det.save_traps()
     log.info("stopping")
     return 0
 
@@ -342,6 +360,62 @@ def cmd_watched(args):
         print(f"{ip:<40} {a['bans']:>4} {a['req']:>6}  {when:<16} {a['range']:<20} "
               f"{a['state']:<14} {a['path']}")
     print(f"\n{len(rows)} IP(s) over {args.since / 86400:g} d. To protect them all:\n  {cmd}")
+    return 0
+
+
+
+def trap_options(args):
+    return {"min_ips": args.trap_min_ips, "min_nets": args.trap_min_nets,
+            "window": args.trap_window, "template_min": args.trap_template_min}
+
+
+
+def cmd_traps(args):
+    """Trap paths learned from the 404/403 asked for by many IPs, and the shapes of the served
+    paths that protect against false positives. From logs (computed now) or from the daemon's
+    snapshot."""
+    if args.files:
+        sites = {}
+        for path in args.files:
+            learner = TrapLearner(**trap_options(args))
+            try:
+                with open(path, errors="replace") as f:
+                    for line in f:
+                        learner.feed_line(line)
+            except OSError as e:
+                print(f"cannot read {path}: {e}", file=sys.stderr)
+                return 1
+            sites[os.path.basename(path)] = learner.snapshot()
+    else:
+        path = traps_file_path(args)
+        try:
+            with open(path) as f:
+                sites = json.load(f)["sites"]
+        except (OSError, ValueError, KeyError) as e:
+            print(f"no snapshot in {path} ({e}): enable `traps = yes` in the daemon, or give logs",
+                  file=sys.stderr)
+            return 1
+    for name, snap in sorted(sites.items()):
+        print(f"== {name}: {snap['lines']} request(s) read, {snap['served']} served path(s), "
+              f"{snap['excused']} missing request(s) excused by a served path or shape")
+        if snap["templates"]:
+            print("  shapes of served paths (a 404 on these is not a trap):")
+            print(f"  {'VALUES':>7}  SHAPE")
+            for t in snap["templates"][:args.top]:
+                suffix = "+" if t["values"] >= MAX_VALUES else ""
+                print(f"  {str(t['values']) + suffix:>7}  {t['template']}")
+        if not snap["traps"]:
+            print(f"  no trap path: none asked for by at least {args.trap_min_ips} IP(s) from "
+                  f"{args.trap_min_nets} network(s)")
+            continue
+        print(f"  trap paths (404/403 asked for by >= {args.trap_min_ips} IP(s) from "
+              f">= {args.trap_min_nets} networks):")
+        print(f"  {'IPS':>5} {'NETS':>5} {'REQ':>6}  {'LAST':<16}  PATH")
+        for e in snap["traps"][:args.top]:
+            when = datetime.fromtimestamp(e["last"]).strftime("%Y-%m-%d %H:%M")
+            print(f"  {e['ips']:>5} {e['nets']:>5} {e['requests']:>6}  {when:<16}  {e['path']}")
+        if len(snap["traps"]) > args.top:
+            print(f"  … {len(snap['traps']) - args.top} more (--top)")
     return 0
 
 
@@ -574,6 +648,22 @@ def cmd_replay(args):
 
 
 
+def add_trap_options(parser):
+    parser.add_argument("--trap-min-ips", type=int, default=5, metavar="N",
+                        help="a missing path (404/403) is a trap when asked for by this many "
+                             "distinct IPs (default: 5)")
+    parser.add_argument("--trap-min-nets", type=int, default=3, metavar="N",
+                        help="... coming from at least this many networks (/16) (default: 3)")
+    parser.add_argument("--trap-window", type=parse_duration, default=6 * 3600, metavar="DURATION",
+                        help="period over which the IPs are counted (default: 6h)")
+    parser.add_argument("--trap-template-min", type=int, default=3, metavar="N",
+                        help="a shape of served paths (/post/{uuid}) protects a missing path once "
+                             "served with this many different values (default: 3)")
+    parser.add_argument("--traps-file", metavar="FILE",
+                        help="snapshot of what was learned (default: DIR/traps.json)")
+
+
+
 def main(argv=None):
     pre = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
     pre.add_argument("-f", "--config")
@@ -671,6 +761,10 @@ def main(argv=None):
                    help="budget of RDAP requests per hour (default: 100)")
     r.add_argument("--delay", type=float, default=2.0,
                    help="minimum seconds between two RDAP requests (default: 2)")
+    r.add_argument("--traps", action="store_true",
+                   help="learns the trap paths (404/403 asked for by many IPs); nothing is banned, "
+                        "see `fobots traps`")
+    add_trap_options(r)
     r.set_defaults(fn=cmd_run)
 
     sub.add_parser("setup", parents=[common],
@@ -781,6 +875,13 @@ def main(argv=None):
     wd.add_argument("--cmd", action="store_true",
                     help="only prints the corresponding `welcome add` command")
     wd.set_defaults(fn=cmd_watched)
+
+    tp = sub.add_parser("traps", parents=[common],
+                        help="trap paths learned from the 404/403 (from logs or from the daemon)")
+    tp.add_argument("files", nargs="*", help="logs to learn from; without: the daemon's snapshot")
+    tp.add_argument("--top", type=int, default=30, help="rows shown per table (default: 30)")
+    add_trap_options(tp)
+    tp.set_defaults(fn=cmd_traps)
 
     w = sub.add_parser("welcome", parents=[common], help="manages the welcome list")
     w.add_argument("action", choices=["add", "list"])

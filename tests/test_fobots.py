@@ -35,6 +35,7 @@ from fobots.replay import report as replay_report  # noqa: E402
 from fobots.record import LogTail, Recorder, episodes, read_records, read_sys, recorded_span, scan_procs  # noqa: E402
 from fobots.record import report as record_report  # noqa: E402
 from fobots.sites import Site  # noqa: E402
+from fobots.traps import TrapLearner, shape  # noqa: E402
 from fobots.util import fmt_range, parse_duration, parse_ts, prefix_of, range_nets, subtract  # noqa: E402
 from fobots.welcome import Banner, Welcome, welcome_add  # noqa: E402
 
@@ -1427,6 +1428,128 @@ class SiteTests(unittest.TestCase):
         self.assertEqual(Site("t", "/l", all=True).describe(), "everything is excluded")
 
 
+def req(addr, sec, path, status):
+    return line(addr, sec, path).replace('" 200 ', f'" {status} ')
+
+
+UID = "3f2a9c1e-5b7d-4e8a-9c0f-1a2b3c4d5e6f"
+
+
+class TrapShapes(unittest.TestCase):
+    def test_variable_segments_get_a_type(self):
+        self.assertEqual(shape(f"/Post/{UID}?x=1")[1], "/post/{uuid}")
+        self.assertEqual(shape("/user/42/")[1:], ("/user/{int}", ("42",)))
+        self.assertEqual(shape("/2026/10/26/hello-world-3")[1], "/{int}/{int}/{int}/{slug}")
+        self.assertEqual(shape("/img/0123456789abcdef.png")[1], "/img/{hex}.png")
+        self.assertEqual(shape("/n/01arz3ndektsv4rrffq69g5fav")[1], "/n/{ulid}")
+        self.assertEqual(shape("/api/12.json")[1], "/api/{int}.json")
+
+    def test_scanner_targets_are_never_variables(self):
+        for p in ("/wp-admin", "/.env", "/.git/config", "/a/../../etc/passwd",
+                  "/index.php", "/%2e%2e/x", "/wp-content/plugins/foo"):
+            self.assertEqual(shape(p)[1], shape(p)[0], p)
+            self.assertEqual(shape(p)[2], (), p)
+
+
+class TrapLearning(unittest.TestCase):
+    IPS = ["20.1.1.1", "30.1.1.1", "40.1.1.1", "50.1.1.1", "60.1.1.1"]
+
+    def learner(self, **kw):
+        return TrapLearner(**kw)
+
+    def scan(self, tl, path, ips=None, start=100, status=404):
+        for i, a in enumerate(ips or self.IPS):
+            tl.feed_line(req(a, start + i, path, status))
+
+    def test_many_ips_from_many_networks_make_a_trap(self):
+        tl = self.learner()
+        self.scan(tl, "/.env")
+        found = tl.found()
+        self.assertEqual([(e["path"], e["ips"], e["nets"]) for e in found], [("/.env", 5, 5)])
+
+    def test_one_noisy_client_or_one_network_is_not_enough(self):
+        tl = self.learner()
+        for s in range(50):
+            tl.feed_line(req("20.1.1.1", s, "/a", 404))
+        self.scan(tl, "/b", ["20.1.1.%d" % i for i in range(1, 6)])  # one /16
+        self.scan(tl, "/c", self.IPS[:4])                            # too few IPs
+        self.assertEqual(tl.found(), [])
+        self.assertEqual([e["path"] for e in tl.found(min_ips=4, min_nets=4)], ["/c"])
+
+    def test_private_addresses_do_not_count(self):
+        tl = self.learner()
+        self.scan(tl, "/.env", ["10.0.0.%d" % i for i in range(1, 9)])
+        self.assertEqual(tl.found(min_ips=1, min_nets=1), [])
+
+    def test_a_served_path_is_not_a_trap(self):
+        tl = self.learner()
+        self.scan(tl, "/wp-login.php")
+        self.assertEqual(len(tl.found()), 1)
+        tl.feed_line(req("70.1.1.1", 200, "/wp-login.php", 200))
+        self.assertEqual(tl.found(), [])
+        self.scan(tl, "/wp-login.php", start=300)  # still excused afterwards
+        self.assertEqual(tl.found(), [])
+
+    def test_authenticated_and_redirected_routes_exist(self):
+        tl = self.learner()
+        for i, st in enumerate((301, 401, 405)):
+            tl.feed_line(req("8.8.8.8", i, f"/r{st}", st))
+            self.scan(tl, f"/r{st}")
+        self.assertEqual(tl.found(), [])
+
+    def test_a_deleted_post_is_not_a_scan(self):
+        tl = self.learner()
+        for i in range(3):
+            tl.feed_line(req("8.8.8.8", i, f"/post/{UID[:-1]}{i}", 200))
+        self.scan(tl, f"/post/{UID}")            # same shape, never served: excused
+        self.scan(tl, "/post/../../etc/passwd")  # not a variable: stays a trap
+        self.assertEqual([e["path"] for e in tl.found()], ["/post/../../etc/passwd"])
+        self.assertEqual(tl.learned_templates(), [{"template": "/post/{uuid}", "values": 3}])
+        self.assertEqual(tl.excused, 5)
+
+    def test_a_shape_needs_enough_values(self):
+        tl = self.learner()
+        tl.feed_line(req("8.8.8.8", 1, f"/post/{UID}", 200))
+        self.scan(tl, "/post/aaaaaaaa-5b7d-4e8a-9c0f-1a2b3c4d5e6f")
+        self.assertEqual(len(tl.found()), 1)  # one example does not generalize
+        self.assertEqual(len(self.learner(template_min=1).templates), 0)
+
+    def test_window_forgets_old_requests(self):
+        tl = self.learner(window=3600)
+        for i, a in enumerate(self.IPS):
+            tl.feed(a, i, "/.env", 404)
+        tl.feed("8.8.8.8", 4000, "/", 200)
+        self.assertEqual(len(tl.found()), 0)  # 4000 s later, the window (3600 s) is over
+        self.assertEqual(tl.found(), [])
+
+    def test_snapshot_is_json(self):
+        tl = self.learner()
+        self.scan(tl, "/.env")
+        snap = json.loads(json.dumps(tl.snapshot()))
+        self.assertEqual(snap["traps"][0]["path"], "/.env")
+        self.assertEqual(snap["lines"], 5)
+
+
+class TrapDetector(DetectorBase):
+    def test_learning_is_per_target_and_writes_a_snapshot(self):
+        snap = self.path("traps.json")
+        det = self.detector(trap_conf={"min_ips": 2, "min_nets": 2}, trap_file=snap)
+        a, b = Site("a", "/l"), Site("b", "/l2")
+        for ipa in ("20.1.1.1", "30.1.1.1"):
+            det.feed_line(req(ipa, 1, "/.env", 404), a)
+        det.feed_line(req("20.1.1.1", 2, "/.env", 200), b)
+        det.save_traps()
+        with open(snap) as f:
+            sites = json.load(f)["sites"]
+        self.assertEqual([e["path"] for e in sites["a"]["traps"]], ["/.env"])
+        self.assertEqual(sites["b"]["traps"], [])
+
+    def test_disabled_by_default(self):
+        det = self.detector()
+        det.feed_line(req("20.1.1.1", 1, "/.env", 404))
+        self.assertEqual(det.learners, {})
+
+
 class ConfigTests(TmpDirCase):
     def conf(self, text):
         return load_config(self.write("fobots.conf", text))
@@ -1763,6 +1886,27 @@ class Commands(TmpDirCase):
             f.write("# mine\n")
         self.run_main("install", "--destdir", dest, "--yes")
         self.assertIn("# mine", self.read("root", "etc/fobots/fobots.conf"))
+
+    def test_traps_command_from_logs_and_snapshot(self):
+        text = "".join(req(a, i, "/.env", 404) for i, a in enumerate(TrapLearning.IPS))
+        text += "".join(req("8.8.8.8", 50 + i, f"/u/{i}", 200) for i in range(3))
+        log_path = self.write("a.log", text)
+        rc, out, _ = self.run_main("traps", log_path)
+        self.assertEqual(rc, 0)
+        self.assertIn("/.env", out)
+        self.assertIn("/u/{int}", out)
+        rc, _, err = self.run_main("traps", "--dir", self.path("nodir"))
+        self.assertEqual(rc, 1)
+        self.assertIn("no snapshot", err)
+        det = Detector(5, 5, 1, 60, RangeStore(None),
+                       Banner(FakeNft(), Welcome(self.write("w.txt", "")), 3600), NoRdap(),
+                       trap_conf={}, trap_file=self.path("traps.json"))
+        for raw in text.splitlines(True):
+            det.feed_line(raw)
+        det.save_traps()
+        rc, out, _ = self.run_main("traps", "--dir", self.dir)
+        self.assertEqual(rc, 0)
+        self.assertIn("/.env", out)
 
     def test_every_documented_conf_key_is_known(self):
         root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
