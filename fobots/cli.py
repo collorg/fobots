@@ -71,6 +71,13 @@ def paths(args):
 
 
 
+def trap_welcome_path(args):
+    """Welcome list of the traps, next to the configuration like welcome.txt."""
+    base = os.path.dirname(os.path.abspath(args.config)) if args.config else CONF_DIR
+    return args.trap_welcome or os.path.join(base, "trap_welcome.txt")
+
+
+
 def ensure_dir(path):
     """Creates the directory (0750) if missing; stops with a clear message otherwise."""
     try:
@@ -162,7 +169,7 @@ def cmd_run(args):
             log.error("invalid regular expression for ignore_path: %s", e)
             return 1
         log.info("requests excluded from the count (path): %r", args.ignore_path)
-    sites = [Site(d["name"], d["log"], d["regex"], d["all"], d.get("watch"))
+    sites = [Site(d["name"], d["log"], d["regex"], d["all"], d.get("watch"), d.get("trap_ignore"))
              for d in (getattr(args, "sites", None) or [])]
     if args.log:  # single log of [fobots] or --log: a target without rules of its own
         if any(x.log == args.log for x in sites):
@@ -191,20 +198,27 @@ def cmd_run(args):
     watch_file = watch_file_path(args) if watch or any(x.watch for x in sites) else None
     if watch_file:
         trim_events(watch_file)
-    trap_conf = trap_file = None
+    trap_conf = trap_file = trap_welcome = None
     if args.traps:
-        trap_conf = trap_options(args)
+        try:
+            trap_conf = trap_options(args)
+        except re.error as e:
+            log.error("invalid regular expression for trap_ignore: %s", e)
+            return 1
         trap_file = traps_file_path(args)
+        trap_welcome = Welcome(trap_welcome_path(args))
         ensure_dir(os.path.dirname(os.path.abspath(trap_file)))
-        log.info("learning trap paths (no ban): %d IP(s) from %d network(s) within %d s, "
-                 "snapshot in %s", args.trap_min_ips, args.trap_min_nets, args.trap_window,
-                 trap_file)
+        log.info("trap paths: %d IP(s) from %d network(s) within %d s make a trap, an IP asking "
+                 "for %d of them is %s, snapshot in %s", args.trap_min_ips, args.trap_min_nets,
+                 args.trap_window, args.trap_hits,
+                 f"banned for {args.trap_ban_seconds} s (doubled on each repeat)" if args.trap_ban
+                 else "only logged (trap_ban is off)", trap_file)
     det = Detector(args.threshold, args.prefix_threshold or args.threshold, args.sustain,
                    args.window, store, Banner(nft, wl, args.ban_seconds), rdap,
                    load, args.min_threshold, args.min_ban_seconds, watch, watch_file,
                    ignore_path, sites, args.ban_scope, args.observed_prefix, args.observed_escalate,
                    args.observed_max_prefix, args.slow_threshold, args.slow_window,
-                   trap_conf, trap_file)
+                   trap_conf, trap_file, args.trap_ban, args.trap_ban_seconds, trap_welcome)
     if det.observed:
         log.info("ban_scope observed: groups of IPs of at most /%d (IPv6 /%d), fallback to blocks "
                  "of %s if scattered or after %d partial bans", args.observed_prefix,
@@ -285,7 +299,7 @@ def cmd_analyse(args):
     if args.files:
         inputs = [(f, None) for f in args.files]
     else:
-        sites = [Site(d["name"], d["log"], d["regex"], d["all"], d.get("watch"))
+        sites = [Site(d["name"], d["log"], d["regex"], d["all"], d.get("watch"), d.get("trap_ignore"))
                  for d in (getattr(args, "sites", None) or [])]
         if getattr(args, "log", None):
             sites.insert(0, Site("default", args.log))
@@ -366,7 +380,9 @@ def cmd_watched(args):
 
 def trap_options(args):
     return {"min_ips": args.trap_min_ips, "min_nets": args.trap_min_nets,
-            "window": args.trap_window, "template_min": args.trap_template_min}
+            "window": args.trap_window, "template_min": args.trap_template_min,
+            "hits": args.trap_hits,
+            "ignore": re.compile(args.trap_ignore) if args.trap_ignore else None}
 
 
 
@@ -377,7 +393,11 @@ def cmd_traps(args):
     if args.files:
         sites = {}
         for path in args.files:
-            learner = TrapLearner(**trap_options(args))
+            try:
+                learner = TrapLearner(**trap_options(args))
+            except re.error as e:
+                print(f"invalid regular expression for trap_ignore: {e}", file=sys.stderr)
+                return 1
             try:
                 with open(path, errors="replace") as f:
                     for line in f:
@@ -404,6 +424,20 @@ def cmd_traps(args):
             for t in snap["templates"][:args.top]:
                 suffix = "+" if t["values"] >= MAX_VALUES else ""
                 print(f"  {str(t['values']) + suffix:>7}  {t['template']}")
+        offenders = snap.get("offenders", [])
+        if offenders:
+            print("  IPs that asked for several traps (banned only with trap_ban = yes):")
+            print(f"  {'WHEN':<16}  {'IP':<40} {'TIMES':>5} {'BAN':<12} PATHS")
+            for o in offenders[-args.top:]:
+                when = datetime.fromtimestamp(o["t"]).strftime("%Y-%m-%d %H:%M")
+                state = f"{o['seconds']} s" if o["banned"] else "not banned"
+                print(f"  {when:<16}  {o['ip']:<40} {o['strikes']:>5} {state:<12} "
+                      f"{', '.join(o['paths'][:4])}")
+        if offenders:
+            cmd = "fobots welcome add --traps " + " ".join(sorted({o["ip"] for o in offenders}))
+            if args.config:
+                cmd += f" -f {args.config}"
+            print(f"  to protect them all (security scanners you accept):\n    {cmd}")
         if not snap["traps"]:
             print(f"  no trap path: none asked for by at least {args.trap_min_ips} IP(s) from "
                   f"{args.trap_min_nets} network(s)")
@@ -428,6 +462,8 @@ def cmd_install(args):
 
 def cmd_welcome(args):
     _, wl_path = paths(args)
+    if args.traps:  # the welcome list of the traps only
+        wl_path = trap_welcome_path(args)
     if args.action == "list":
         for n in Welcome(wl_path).nets:
             print(n)
@@ -448,12 +484,12 @@ def cmd_welcome(args):
         return 1
     nft = Nft(args.nft_bin, args.dry_run)
     for net in nets:
-        try:
+        try:  # removes the bans on this range, whatever their cause
             deletes, adds = welcome_add(nft, net, args.ban_seconds)
         except NftError as e:
             print(f"{net} added to {wl_path}, but nft failed: {e}", file=sys.stderr)
             return 1
-        print(f"{net}: welcome list; {len(deletes)} ban(s) removed"
+        print(f"{net}: {'trap welcome list' if args.traps else 'welcome list'}; {len(deletes)} ban(s) removed"
               + (f", {len(adds)} piece(s) of the rest kept" if adds else ""))
     return 0
 
@@ -594,7 +630,7 @@ def cmd_replay(args):
     if args.files:
         logs = [(f, None) for f in args.files]
     else:  # the logs of the configuration, with the exclusion rules of each target
-        sites = [Site(d["name"], d["log"], d["regex"], d["all"], d.get("watch"))
+        sites = [Site(d["name"], d["log"], d["regex"], d["all"], d.get("watch"), d.get("trap_ignore"))
                  for d in (getattr(args, "sites", None) or [])]
         if getattr(args, "log", None):
             sites.insert(0, Site("default", args.log))
@@ -659,6 +695,21 @@ def add_trap_options(parser):
     parser.add_argument("--trap-template-min", type=int, default=3, metavar="N",
                         help="a shape of served paths (/post/{uuid}) protects a missing path once "
                              "served with this many different values (default: 3)")
+    parser.add_argument("--trap-hits", type=int, default=2, metavar="N",
+                        help="an IP is flagged once it asked for this many distinct traps "
+                             "(default: 2)")
+    parser.add_argument("--trap-ignore", metavar="REGEX",
+                        help="paths that are never traps (a [site:NAME] trap_ignore replaces it)")
+    parser.add_argument("--trap-ban", action="store_true",
+                        help="bans the flagged IPs (default: only logs them)")
+    parser.add_argument("--trap-ban-time", dest="trap_ban_seconds", type=parse_duration,
+                        default=3600, metavar="DURATION",
+                        help="first ban of a flagged IP, doubled each time it comes back, "
+                             "7d at most (default: 1h)")
+    parser.add_argument("--trap-welcome", metavar="FILE",
+                        help="welcome list of the traps: IPs that neither make a trap nor are "
+                             "flagged, whatever welcome.txt says (default: trap_welcome.txt "
+                             "next to the configuration)")
     parser.add_argument("--traps-file", metavar="FILE",
                         help="snapshot of what was learned (default: DIR/traps.json)")
 
@@ -886,6 +937,10 @@ def main(argv=None):
     w = sub.add_parser("welcome", parents=[common], help="manages the welcome list")
     w.add_argument("action", choices=["add", "list"])
     w.add_argument("nets", nargs="*", help="CIDRs to add (add)")
+    w.add_argument("--traps", action="store_true",
+                   help="the welcome list of the traps (trap_welcome.txt) instead of welcome.txt")
+    w.add_argument("--trap-welcome", metavar="FILE",
+                   help="with --traps: the file (default: trap_welcome.txt next to the configuration)")
     w.set_defaults(fn=cmd_welcome)
 
     for p in sub.choices.values():

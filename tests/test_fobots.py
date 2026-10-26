@@ -1522,6 +1522,55 @@ class TrapLearning(unittest.TestCase):
         self.assertEqual(len(tl.found()), 0)  # 4000 s later, the window (3600 s) is over
         self.assertEqual(tl.found(), [])
 
+    def test_flags_an_ip_asking_for_several_established_traps(self):
+        tl = self.learner()
+        self.scan(tl, "/.env")
+        self.assertEqual(tl.take_offenders(), [])  # one trap: nobody flagged
+        self.scan(tl, "/wp-login.php", start=200)
+        flagged = {o["ip"]: o for o in tl.take_offenders()}
+        self.assertEqual(sorted(flagged), sorted(self.IPS))  # those who made the traps too
+        self.assertEqual(flagged["20.1.1.1"]["paths"], ["/.env", "/wp-login.php"])
+        self.assertEqual(flagged["20.1.1.1"]["strikes"], 1)
+        # a newcomer is flagged at its second established trap, not at its first
+        tl.feed_line(req("90.1.1.1", 300, "/.env", 404))
+        self.assertEqual(tl.take_offenders(), [])
+        tl.feed_line(req("90.1.1.1", 301, "/wp-login.php", 404))
+        self.assertEqual([o["ip"] for o in tl.take_offenders()], ["90.1.1.1"])
+
+    def test_one_trap_repeated_does_not_flag(self):
+        tl = self.learner()
+        self.scan(tl, "/.env")
+        for s in range(10):
+            tl.feed_line(req("90.1.1.1", 300 + s, "/.env", 404))
+        self.assertEqual(tl.take_offenders(), [])
+
+    def test_a_muted_ip_is_not_flagged_again_until_then(self):
+        tl = self.learner(hits=1)
+        self.scan(tl, "/.env")
+        tl.take_offenders()
+        now = tl.latest
+        for o in tl.offenders:
+            tl.mute(o["ip"], now + 1000)
+        tl.feed("20.1.1.1", now + 500, "/.env", 404)
+        self.assertEqual(tl.take_offenders(), [])
+        tl.feed("20.1.1.1", now + 1001, "/.env", 404)
+        self.assertEqual([o["strikes"] for o in tl.take_offenders()], [2])
+
+    def test_a_trap_that_gets_served_stops_flagging(self):
+        tl = self.learner(hits=1)
+        self.scan(tl, "/login")
+        tl.take_offenders()
+        tl.feed_line(req("8.8.8.8", 400, "/login", 200))
+        tl.feed_line(req("91.1.1.1", 401, "/login", 404))
+        self.assertEqual(tl.take_offenders(), [])
+
+    def test_ignore_regex_protects_paths(self):
+        tl = self.learner(ignore=re.compile(r"^/legacy/"))
+        self.scan(tl, "/legacy/old")
+        self.scan(tl, "/.env")
+        self.assertEqual([e["path"] for e in tl.found()], ["/.env"])
+        self.assertEqual(tl.ignored, 5)
+
     def test_snapshot_is_json(self):
         tl = self.learner()
         self.scan(tl, "/.env")
@@ -1544,6 +1593,79 @@ class TrapDetector(DetectorBase):
         self.assertEqual([e["path"] for e in sites["a"]["traps"]], ["/.env"])
         self.assertEqual(sites["b"]["traps"], [])
 
+    def scan_two_traps(self, det, ips=TrapLearning.IPS, start=0):
+        for path in ("/.env", "/wp-login.php"):
+            for i, a in enumerate(ips):
+                det.feed_line(req(a, start + i, path, 404))
+            start += 20
+
+    def test_flagged_ips_are_banned_alone(self):
+        det = self.detector(trap_conf={}, trap_ban=True, trap_ban_seconds=600)
+        self.scan_two_traps(det)
+        self.assertEqual(self.nft.banned(), sorted(f"{a}/32" for a in TrapLearning.IPS))
+        self.assertEqual({e for _, e in self.nft.sets[4]}, {600})
+
+    def test_without_trap_ban_only_logs(self):
+        det = self.detector(trap_conf={})
+        with self.assertLogs("fobots", "WARNING") as cm:
+            self.scan_two_traps(det)
+        self.assertEqual(self.nft.banned(), [])
+        self.assertTrue(any("would be banned" in m for m in cm.output))
+        self.assertEqual(len(det.learners["default"].offenders), 5)
+
+    def test_welcome_list_does_not_protect_from_traps(self):
+        """welcome.txt holds trusted (often internal) networks: attacks come from inside too."""
+        det = self.detector(trap_conf={}, trap_ban=True, welcome="20.1.1.1\n")
+        self.scan_two_traps(det)
+        self.assertEqual(self.nft.banned(), sorted(f"{a}/32" for a in TrapLearning.IPS))
+
+    def test_trap_welcome_ips_neither_make_traps_nor_are_flagged(self):
+        det = self.detector(trap_conf={"hits": 1}, trap_ban=True,
+                            trap_welcome=Welcome(self.write("tw.txt", "20.0.0.0/8\n")))
+        for i, a in enumerate(TrapLearning.IPS):
+            det.feed_line(req(a, i, "/.env", 404))
+        learner = det.learners["default"]
+        self.assertEqual(learner.welcomed, 1)
+        self.assertEqual(len(learner.traps["/.env"][1]), 4)  # 4 IPs: below the 5 needed
+        self.assertEqual(self.nft.banned(), [])
+        det.feed_line(req("70.1.1.1", 9, "/.env", 404))  # 5th IP from outside: now a trap
+        self.assertEqual(self.nft.banned(), sorted(f"{a}/32" for a in TrapLearning.IPS[1:] + ["70.1.1.1"]))
+
+    def test_trap_welcome_list_is_reread(self):
+        path = self.write("tw.txt", "")
+        det = self.detector(trap_conf={"hits": 1}, trap_ban=True, trap_welcome=Welcome(path))
+        self.assertFalse(det.welcomed("20.1.1.1"))
+        time.sleep(0.02)
+        with open(path, "w") as f:
+            f.write("20.1.1.1\n")
+        os.utime(path, (time.time() + 5, time.time() + 5))
+        det.trap_welcome.reload()
+        self.assertTrue(det.welcomed("20.1.1.1"))
+
+    def test_a_repeat_offender_is_banned_longer(self):
+        det = self.detector(trap_conf={"hits": 1, "min_ips": 2, "min_nets": 2}, trap_ban=True,
+                            trap_ban_seconds=100)
+        for a in ("20.1.1.1", "30.1.1.1"):
+            det.feed_line(req(a, 10, "/.env", 404))
+        self.assertEqual({e for _, e in self.nft.sets[4]}, {100})
+        self.nft.sets[4] = []  # the bans have expired
+        det.feed_line(req("20.1.1.1", 500, "/.env", 404))  # back after the ban
+        self.assertEqual([e for _, e in self.nft.sets[4]], [200])
+
+    def test_ipv6_is_banned_by_64(self):
+        det = self.detector(trap_conf={"hits": 1, "min_ips": 2, "min_nets": 2}, trap_ban=True)
+        for a in ("2a01:e0a:1:2:3:4:5:6", "2a02:e0a:1:2:3:4:5:6"):
+            det.feed_line(req(a, 10, "/.env", 404))
+        self.assertEqual(self.nft.banned(6), ["2a01:e0a:1:2::/64", "2a02:e0a:1:2::/64"])
+
+    def test_a_site_trap_ignore_replaces_the_global_one(self):
+        det = self.detector(trap_conf={"hits": 1, "ignore": re.compile("^/global")}, trap_ban=True)
+        site = Site("s", "/l", trap_ignore="^/mine")
+        for i, a in enumerate(TrapLearning.IPS):
+            det.feed_line(req(a, i, "/global", 404), site)
+            det.feed_line(req(a, i, "/mine", 404), site)
+        self.assertEqual([e["path"] for e in det.learners["s"].found()], ["/global"])
+
     def test_disabled_by_default(self):
         det = self.detector()
         det.feed_line(req("20.1.1.1", 1, "/.env", 404))
@@ -1551,6 +1673,19 @@ class TrapDetector(DetectorBase):
 
 
 class ConfigTests(TmpDirCase):
+    def test_trap_options(self):
+        p = self.write("c.conf", "[fobots]\ntraps = yes\ntrap_ban = yes\ntrap_hits = 3\n"
+                       "trap_ban_time = 2h\ntrap_ignore = ^/x\n"
+                       "[site:a]\nlog = a.log\ntrap_ignore = ^/legacy/\n")
+        conf = load_config(p)
+        self.assertEqual((conf["traps"], conf["trap_ban"], conf["trap_hits"],
+                          conf["trap_ban_seconds"], conf["trap_ignore"]),
+                         (True, True, 3, 7200, "^/x"))
+        self.assertEqual(conf["sites"][0]["trap_ignore"], "^/legacy/")
+        bad = self.write("b.conf", "[fobots]\n[site:a]\nlog = a.log\ntrap_ignore = (\n")
+        with self.assertRaises(SystemExit):
+            load_config(bad)
+
     def conf(self, text):
         return load_config(self.write("fobots.conf", text))
 
@@ -1907,6 +2042,16 @@ class Commands(TmpDirCase):
         rc, out, _ = self.run_main("traps", "--dir", self.dir)
         self.assertEqual(rc, 0)
         self.assertIn("/.env", out)
+
+    def test_welcome_add_traps_writes_the_trap_list(self):
+        tw, w = self.path("trap_welcome.txt"), self.path("welcome.txt")
+        rc, out, _ = self.run_main("welcome", "add", "--traps", "--trap-welcome", tw,
+                                   "-w", w, "--dry-run", "198.51.100.0/24")
+        self.assertEqual(rc, 0)
+        self.assertIn("198.51.100.0/24", self.read("trap_welcome.txt"))
+        self.assertFalse(os.path.exists(w))
+        rc, out, _ = self.run_main("welcome", "list", "--traps", "--trap-welcome", tw)
+        self.assertIn("198.51.100.0/24", out)
 
     def test_every_documented_conf_key_is_known(self):
         root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")

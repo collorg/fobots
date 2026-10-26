@@ -33,16 +33,18 @@ CONF_KEYS = {  # file key -> (argparse destination, conversion)
     "traps": ("traps", lambda v: v.lower() in ("1", "true", "yes", "oui", "on")),
     "trap_min_ips": ("trap_min_ips", int), "trap_min_nets": ("trap_min_nets", int),
     "trap_window": ("trap_window", parse_duration), "trap_template_min": ("trap_template_min", int),
-    "traps_file": ("traps_file", str),
+    "traps_file": ("traps_file", str), "trap_welcome": ("trap_welcome", str), "trap_hits": ("trap_hits", int),
+    "trap_ignore": ("trap_ignore", str), "trap_ban_time": ("trap_ban_seconds", parse_duration),
+    "trap_ban": ("trap_ban", lambda v: v.lower() in ("1", "true", "yes", "oui", "on")),
     "from_start": ("from_start", lambda v: v.lower() in ("1", "true", "yes", "oui", "on")),
 }
 
-PATH_KEYS = {"dir", "cache", "welcome", "log", "watch_file", "traps_file"}
+PATH_KEYS = {"dir", "cache", "welcome", "log", "watch_file", "traps_file", "trap_welcome"}
 
 # /etc first: the result does not depend on the current directory (./fobots.conf is for development)
 CONF_SEARCH = (os.path.join(CONF_DIR, "fobots.conf"), "fobots.conf")
 
-SITE_KEYS = ("log", "ignore_path", "ignore_all", "watch_agent", "watch_path")
+SITE_KEYS = ("log", "ignore_path", "ignore_all", "watch_agent", "watch_path", "trap_ignore")
 
 TRUE_VALUES = ("1", "true", "yes", "oui", "on")
 
@@ -110,7 +112,13 @@ def load_config(path):
                     re.compile(watch[key])
                 except re.error as e:
                     sys.exit(f"{path}: [{section}] invalid {key}: {e}")
-        sites.append({"name": name, "log": log_file, "regex": regex,
+        trap_ignore = opts.get("trap_ignore", "").strip() or None
+        if trap_ignore:
+            try:
+                re.compile(trap_ignore)
+            except re.error as e:
+                sys.exit(f"{path}: [{section}] invalid trap_ignore: {e}")
+        sites.append({"name": name, "log": log_file, "regex": regex, "trap_ignore": trap_ignore,
                       "watch": (watch["watch_agent"], watch["watch_path"]),
                       "all": opts.get("ignore_all", "").strip().lower() in TRUE_VALUES})
     if out.get("log") in seen:

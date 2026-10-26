@@ -14,6 +14,7 @@ from .grouping import cluster_ips, pick_groups, wide_blocks
 from .load import LEVELS, NoLoad
 from .nft import NftError
 from .traps import TrapLearner
+from .welcome import NO_WELCOME
 from .util import fmt_range, parse_ts, prefix_of
 
 log = logging.getLogger("fobots")
@@ -47,6 +48,8 @@ OBSERVED_PREFIX6 = 48         # maximum width of a group in IPv6 (adjustable in 
 
 OBSERVED_WIDE6 = 32           # maximum width of a fallback ban in IPv6 (adjustable in IPv4)
 
+TRAP_BAN_MAX = 7 * 86400       # longest ban of a repeat offender (trap paths)
+
 TRAP_SAVE_EVERY = 300         # seconds (log time) between two snapshots of the learned traps
 
 SLOW_BUCKET = 10               # seconds per bucket of the average-rate window
@@ -60,7 +63,7 @@ class Detector:
                  load=None, min_threshold=1.0, min_ban_seconds=60, watch=None,
                  watch_file=None, ignore_path=None, sites=(), scope="allocation",
                  observed_prefix=20, escalate=4, wide_prefix=16, slow_threshold=0,
-                 slow_window=600, trap_conf=None, trap_file=None):
+                 slow_window=600, trap_conf=None, trap_file=None, trap_ban=False, trap_ban_seconds=3600, trap_welcome=None):
         self.base_threshold, self.base_prefix_threshold = threshold, prefix_threshold
         self.load, self.min_threshold, self.min_ban = load or NoLoad(), min_threshold, min_ban_seconds
         self.sustain, self.window = sustain, window
@@ -91,7 +94,10 @@ class Detector:
         self.watch_file = watch_file  # findings written here (reread by `fobots watched`)
         self.trap_conf = trap_conf    # TrapLearner options; None = no learning of trap paths
         self.trap_file = trap_file    # snapshot of what was learned (read by `fobots traps`)
+        self.trap_ban, self.trap_ban_seconds = trap_ban, trap_ban_seconds  # False: only logs
         self.learners = {}            # target name -> TrapLearner
+        self.trap_welcome = trap_welcome  # Welcome list of the traps only (not welcome.txt)
+        self.welcomed_memo, self.welcomed_version = {}, None
         self.last_trap_save = 0
 
     def watch_match(self, m, watch):
@@ -187,9 +193,57 @@ class Detector:
             name = site.name if site is not None else "default"
             learner = self.learners.get(name)
             if learner is None:
-                learner = self.learners[name] = TrapLearner(**self.trap_conf)
+                conf = dict(self.trap_conf, exempt=self.welcomed)
+                if site is not None and site.trap_ignore is not None:
+                    conf["ignore"] = site.trap_ignore  # the target's own wins
+                learner = self.learners[name] = TrapLearner(**conf)
             learner.feed_line(line)
+            if learner.pending:
+                self.react_traps(learner, name)
         self.feed(m.group(1), sec, tag)
+
+    def welcomed(self, ip):
+        """Is the IP in the trap welcome list (a security scanner you accept)? Such an IP neither
+        makes a trap nor is flagged. It is NOT the welcome list of the bans: that one holds
+        trusted networks, often internal ones, and attacks come from inside too. Memoized
+        until the list file changes."""
+        wl = self.trap_welcome
+        if wl is None:
+            return False
+        if wl.mtime != self.welcomed_version:
+            self.welcomed_memo.clear()
+            self.welcomed_version = wl.mtime
+        r = self.welcomed_memo.get(ip)
+        if r is None:
+            if len(self.welcomed_memo) > 100_000:
+                self.welcomed_memo.clear()
+            a = ipaddress.ip_address(ip)
+            r = self.welcomed_memo[ip] = any(a.version == n.version and a in n for n in wl.nets)
+        return r
+
+    def react_traps(self, learner, name):
+        """Bans (or, until trap_ban is on, only logs) the IPs flagged for asking for several
+        trap paths. The IP alone is banned (IPv6: its /64), never the allocation: the signal
+        is individual. Repeat offenders get twice the previous duration, up to TRAP_BAN_MAX."""
+        for off in learner.take_offenders():
+            ip, seconds = off["ip"], min(self.trap_ban_seconds * 2 ** (off["strikes"] - 1),
+                                         TRAP_BAN_MAX)
+            reason = (f"trap paths on {name}: {len(off['paths'])} distinct "
+                      f"({', '.join(off['paths'][:3])}), time {off['strikes']}")
+            addr = ipaddress.ip_address(ip)
+            net = ipaddress.ip_network((addr, 32 if addr.version == 4 else 64), strict=False)
+            if self.trap_ban:
+                try:
+                    off["banned"] = self.banner.ban(
+                        (addr.version, int(net.network_address), int(net.broadcast_address)),
+                        reason, seconds, welcome=self.trap_welcome or NO_WELCOME)
+                except NftError as e:
+                    log.error("cannot ban %s: %s", net, e)
+            else:
+                log.warning("TRAP %s would be banned for %d s (%s); trap_ban is off", net,
+                            seconds, reason)
+            off["seconds"] = seconds
+            learner.mute(ip, off["t"] + seconds)
 
     def save_traps(self):
         """Writes what was learned for each target (atomic), for `fobots traps`."""
@@ -350,6 +404,8 @@ class Detector:
             keep = self.latest - self.banner.ban_seconds
             self.partial = {k: v for k, v in
                             ((k, [t for t in v if t >= keep]) for k, v in self.partial.items()) if v}
+        if self.learners and self.trap_welcome is not None:
+            self.trap_welcome.reload()  # the list may have changed (welcome add --traps)
         if self.trap_file and self.learners and self.latest - self.last_trap_save >= TRAP_SAVE_EVERY:
             self.save_traps()
         old = self.latest - WATCH_RETENTION

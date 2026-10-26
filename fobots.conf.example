@@ -62,16 +62,23 @@ ban_time = 1h        # duration of a ban: 30m, 1h, 1d…
 # watch_file = watched.jsonl   # findings recorded (default: <dir>/watched.jsonl), reread by
 #                              `fobots watched`; pruned beyond 30 days at startup
 
-# Trap paths (learning only, nothing is banned): a path that gets a 404/403 and is asked for by
-# many distinct IPs from different networks is a scanner's target. What the site really serves
-# (2xx/3xx) protects: an exact path that answered, or a path of the same shape (/post/{uuid},
-# {int}, {ulid}, {hex}, {slug}) once served with trap_template_min different values.
-# `fobots traps` lists the traps and the shapes learned (from the daemon's snapshot, or from logs).
+# Trap paths: a path that gets a 404/403 and is asked for by many distinct IPs from different
+# networks is a scanner's target. What the site really serves (2xx/3xx) protects: an exact path
+# that answered, or a path of the same shape (/post/{uuid}, {int}, {ulid}, {hex}, {slug}) once
+# served with trap_template_min different values. An IP that asks for trap_hits distinct traps
+# is flagged: logged (TRAP line) and listed by `fobots traps`, and banned alone (IPv6: its /64)
+# only with trap_ban = yes. Try it with trap_ban = no first and read `fobots traps`.
 # traps = no
+# trap_ban = no
+# trap_hits = 2           # distinct traps asked for before an IP is flagged
+# trap_ban_time = 1h      # first ban of an IP, doubled each time it comes back (7d at most)
 # trap_min_ips = 5        # distinct IPs asking for the same missing path
 # trap_min_nets = 3       # ... from at least this many /16 networks
 # trap_window = 6h        # period over which the IPs are counted
 # trap_template_min = 3   # values served before a shape protects a missing path
+# trap_ignore = ^/(legacy|old)/   # paths that are never traps (a [site:NAME] one replaces it)
+# trap_welcome = trap_welcome.txt  # IPs that neither make a trap nor are flagged (security
+#                         # scanners you accept); NOT welcome.txt, see `welcome add --traps`
 # traps_file = traps.json # snapshot (default: <dir>/traps.json)
 
 # Tight bans: instead of banning the whole RDAP allocation, ban the groups of IPs seen inside

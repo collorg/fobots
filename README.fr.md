@@ -285,7 +285,7 @@ ignore_all = yes
 [site:api]                           # aucune règle propre : tout est compté
 log = /var/log/nginx/api.access.log
 ```
-- `log` (obligatoire), `ignore_path` (regex sur le chemin), `ignore_all` (rien n'est compté pour cette cible), `watch_agent` / `watch_path` (surveillance, voir plus bas ; remplacent celles de `[fobots]` pour cette cible).
+- `log` (obligatoire), `ignore_path` (regex sur le chemin), `ignore_all` (rien n'est compté pour cette cible), `watch_agent` / `watch_path` (surveillance, voir plus bas ; remplacent celles de `[fobots]` pour cette cible), `trap_ignore` (chemins qui ne sont jamais des pièges, voir plus bas ; remplace celle de `[fobots]`).
 - Les règles propres **s'ajoutent** à l'`ignore_path` global de `[fobots]`.
 - Les alias CNAME d'un hôte n'ont aucun effet : ils aboutissent dans le même log, donc
   dans la même cible. Le nom d'hôte n'est jamais lu dans les lignes.
@@ -363,10 +363,10 @@ calme se vérifie avant usage.
 
 ## Chemins pièges : ce que seuls les scanners demandent (`traps`)
 
-Apprentissage seulement, **rien n'est banni**. Un chemin qui reçoit un 404 ou un 403 et que
-demandent beaucoup d'IP distinctes de réseaux différents (par défaut : 5 IP de 3 réseaux /16 en
-6 h) est un piège candidat : `/.env`, `/wp-login.php` sur un site qui n'est pas WordPress… On
-compte des IP et non des requêtes : un seul client qui boucle sur un lien mort n'en fabrique pas.
+Un chemin qui reçoit un 404 ou un 403 et que demandent beaucoup d'IP distinctes de réseaux
+différents (par défaut : 5 IP de 3 réseaux /16 en 6 h) est un piège : `/.env`, `/wp-login.php`
+sur un site qui n'est pas WordPress… On compte des IP et non des requêtes : un seul client qui
+boucle sur un lien mort n'en fabrique pas.
 
 Ce que le site sert réellement protège des faux positifs :
 
@@ -375,16 +375,42 @@ Ce que le site sert réellement protège des faux positifs :
   fixe (`{uuid}`, `{int}`, `{ulid}`, `{hex}`, `{slug}`) : un `/post/<uuid>` supprimé n'est pas pris
   pour un scan dès que le site a servi `/post/{uuid}` avec `trap_template_min` (3) valeurs
   différentes. Un segment avec `..`, `%`, `.env`, `.git`, `wp-admin`… ne correspond jamais à un
-  type, et un slug doit contenir un chiffre.
+  type, et un slug doit contenir un chiffre ;
+- `trap_ignore` (regex, globale ou dans une section `[site:NOM]`, qui la remplace) liste des
+  chemins qui ne sont jamais des pièges.
+
+**Réaction.** Une IP qui a demandé `trap_hits` (2) pièges distincts est signalée, y compris
+celles qui ont fabriqué les pièges. Le signal est individuel, le ban aussi : l'IP seule (IPv6 :
+son /64), jamais son allocation RDAP, pendant `trap_ban_time` (1 h), doublé à chaque retour
+(7 j au plus). **Une IP, pas son réseau.** Une requête sur un piège renseigne sur une machine, la sanction est
+donc individuelle : une machine d'un réseau autorisé qui scanne est bannie seule et le reste du
+réseau reste joignable. En IPv6 l'unité est le /64, car un scanner change d'adresse à volonté à
+l'intérieur ; une IP de la liste welcome des pièges située dans ce /64 est exclue du ban. Les
+bans de débit sont l'inverse, volontairement : leur raison d'être est une charge répartie sur
+beaucoup d'IP d'une plage, que le ban par IP ne verrait pas (`ban_scope = observed` les restreint
+aux groupes d'IP réellement vus).
+
+**`welcome.txt` ne protège pas des pièges** : elle contient des réseaux de confiance, souvent internes, et les attaques viennent aussi de l'intérieur. Les pièges ont leur propre liste, `trap_welcome.txt` à côté de la configuration (`trap_welcome` pour la déplacer) : ses IP ne fabriquent pas de piège et ne sont jamais signalées. À réserver aux scanners de sécurité que l'on accepte (audit, supervision, test d'intrusion) :
+
+```
+fobots welcome add --traps 198.51.100.0/24   # lève aussi les bans de cette plage
+fobots welcome list --traps
+```
+`fobots traps` affiche cette commande pour les IP signalées. Tant que `trap_ban = yes` n'est pas posé, une IP
+signalée est seulement journalisée (`TRAP … would be banned`) et listée par `fobots traps` :
+**commencer par là** et lire la liste sur son propre trafic.
 
 ```
 traps = yes          # dans [fobots] : le démon apprend, par cible, et écrit <dir>/traps.json
-fobots traps         # pièges et formes, d'après l'instantané du démon
+trap_ban = no        # yes : bannit les IP signalées (sinon, journal seulement)
+fobots traps         # pièges, formes et IP signalées, d'après l'instantané du démon
 fobots traps access.log autre.log   # idem, calculé maintenant depuis des logs (ni nft, ni root)
 ```
-Options : `trap_min_ips`, `trap_min_nets`, `trap_window`, `trap_template_min`, `traps_file`.
-Vérifier la liste sur ses propres logs avant de s'y fier : un robot d'indexation qui suit des
-liens morts depuis plusieurs réseaux ressemble à un scanner (le mettre dans la liste welcome).
+Options : `trap_min_ips`, `trap_min_nets`, `trap_window`, `trap_template_min`, `trap_hits`,
+`trap_ban_time`, `trap_ignore`, `traps_file`. Un robot d'indexation qui suit des liens morts
+depuis plusieurs réseaux ressemble à un scanner (le mettre dans la liste welcome ou dans
+`trap_ignore`). Pas encore couvert : un site qui répond 200 à tout, et le premier scanner (un
+piège n'existe qu'une fois que d'autres l'ont demandé).
 
 ## Repérer des IP légitimes prises dans un ban (gitlab-runner…)
 
@@ -464,7 +490,8 @@ conf.** Voir `fobots.conf.example` pour toutes les clés :
 | `threshold` | 5 | req/s d'une plage au-delà desquelles on bannit |
 | `prefix_threshold` | = `threshold` | req/s d'un `/16` non résolu qui autorisent RDAP |
 | `sustain`, `window` | 5, 60 | secondes consécutives au-dessus du seuil exigées ; fenêtre de suivi (s) |
-| `traps`, `trap_min_ips`, `trap_min_nets`, `trap_window`, `trap_template_min`, `traps_file` | non, 5, 3, 6h, 3, `<dir>/traps.json` | apprend les chemins pièges (404/403 demandés par beaucoup d'IP) ; rien n'est banni, voir `fobots traps` |
+| `traps`, `trap_ban` | non, non | apprend les chemins pièges (404/403 demandés par beaucoup d'IP) et signale les IP qui en demandent `trap_hits` ; avec `trap_ban` elles sont bannies, sinon seulement journalisées ; voir `fobots traps` |
+| `trap_hits`, `trap_ban_time`, `trap_min_ips`, `trap_min_nets`, `trap_window`, `trap_template_min`, `trap_ignore`, `trap_welcome`, `traps_file` | 2, 1h, 5, 3, 6h, 3, aucun, `trap_welcome.txt` à côté de la configuration, `<dir>/traps.json` | réglages de ce qui précède |
 | `slow_threshold`, `slow_window` | 0, 10m | bannit une plage dont le débit **moyen** sur la fenêtre dépasse cette valeur (req/s) ; `0` = désactivé |
 | `ban_time` | 1h | durée d'un ban (`30m`, `1h`, `1d`) |
 | `ban_scope` | `allocation` | `allocation` : on bannit la plage RDAP entière ; `observed` : seulement les groupes d'IP vues dedans |

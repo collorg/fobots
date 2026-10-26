@@ -9,7 +9,9 @@ replaces the variable segments by a type (`/post/{uuid}`), so that a deleted pos
 for a vulnerability scan. Only fixed types are learned (no free regular expression): a segment
 with `..`, `%`, `.env`, `.git`… never matches one.
 
-Nothing is banned here: this module only observes (see `fobots traps`)."""
+This module only observes and decides who deserves a ban; the Detector acts (or only logs, until
+`trap_ban` is on). An IP is flagged once it has asked for `hits` distinct established traps.
+`fobots traps` shows what was learned and who was flagged."""
 import ipaddress
 import re
 from functools import lru_cache
@@ -29,6 +31,9 @@ MAX_VALUES = 50          # distinct values kept per shape
 MAX_TRAPS = 20_000       # candidate paths followed
 MAX_TRAP_IPS = 200       # IPs followed per candidate
 PURGE_EVERY = 600        # seconds (log time) between two purges
+MAX_SCORES = 50_000      # IPs followed for the traps they asked for
+MAX_OFFENDERS = 100      # flagged IPs kept in the snapshot
+STRIKES_KEEP = 7 * 86400 # seconds (log time) during which a flagged IP is remembered (recidive)
 
 UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 INT_RE = re.compile(r"[0-9]+")
@@ -86,13 +91,23 @@ def net_of(ip):
 class TrapLearner:
     """The routes of one site: what it serves, and which missing routes many IPs ask for."""
 
-    def __init__(self, min_ips=5, min_nets=3, window=6 * 3600, template_min=3):
+    def __init__(self, min_ips=5, min_nets=3, window=6 * 3600, template_min=3, hits=2,
+                 ignore=None, exempt=None):
         self.min_ips, self.min_nets = min_ips, min_nets
         self.window, self.template_min = window, template_min
+        self.hits = hits        # distinct established traps asked for before an IP is flagged
+        self.ignore = ignore    # regex: matching paths are never traps (written by hand)
+        self.exempt = exempt    # ip -> bool: welcome list, never counted nor flagged
+        self.established = set()  # trap paths that meet the thresholds now
+        self.scores = {}        # ip -> {trap path: last second}
+        self.muted = {}         # ip -> second until which it is not flagged again
+        self.strikes = {}       # ip -> [times flagged, last second]
+        self.pending = []       # offenders to deal with (the Detector drains it)
+        self.offenders = []     # last flagged IPs, for the snapshot
         self.ok = set()         # literal paths that answered
         self.templates = {}     # template -> set of the values that answered
         self.traps = {}         # path -> [requests, {ip: last second}]
-        self.lines = self.excused = 0
+        self.lines = self.excused = self.ignored = self.welcomed = 0
         self.latest = self.last_purge = 0
 
     def feed_line(self, line):
@@ -120,6 +135,7 @@ class TrapLearner:
             if len(self.ok) < MAX_OK:
                 self.ok.add(p)
             self.traps.pop(p, None)
+            self.established.discard(p)
             return
         seen = self.templates.get(tpl)
         if seen is None:
@@ -137,17 +153,66 @@ class TrapLearner:
         return bool(seen) and (vals in seen or len(seen) >= self.template_min)
 
     def learn_missing(self, ip, sec, p, tpl, vals):
+        if self.ignore is not None and self.ignore.search(p):
+            self.ignored += 1
+            return
         if self.is_served(p, tpl, vals):
             self.excused += 1
             return
+        if net_of(ip) is None:
+            return
+        if self.exempt is not None and self.exempt(ip):
+            self.welcomed += 1
+            return
         t = self.traps.get(p)
         if t is None:
-            if len(self.traps) >= MAX_TRAPS or net_of(ip) is None:
+            if len(self.traps) >= MAX_TRAPS:
                 return
             t = self.traps[p] = [0, {}]
         t[0] += 1
-        if ip in t[1] or (len(t[1]) < MAX_TRAP_IPS and net_of(ip) is not None):
+        if ip in t[1] or len(t[1]) < MAX_TRAP_IPS:
             t[1][ip] = sec
+        if p in self.established:
+            self.credit(ip, sec, p)
+        elif len(t[1]) >= self.min_ips and self.qualifies(t[1], sec - self.window):
+            self.established.add(p)  # the IPs that made it a trap are credited too
+            for other, s in list(t[1].items()):
+                if s >= sec - self.window:
+                    self.credit(other, s, p)
+
+    def qualifies(self, ips, cutoff):
+        """Enough recent IPs, from enough networks?"""
+        recent = [ip for ip, s in ips.items() if s >= cutoff]
+        return len(recent) >= self.min_ips and len({net_of(ip) for ip in recent}) >= self.min_nets
+
+    def credit(self, ip, sec, p):
+        """The IP asked for the established trap `p`: flagged once it has asked for `hits`."""
+        if self.muted.get(ip, 0) > sec:
+            return
+        h = self.scores.get(ip)
+        if h is None:
+            if len(self.scores) >= MAX_SCORES:
+                return
+            h = self.scores[ip] = {}
+        h[p] = max(sec, h.get(p, 0))
+        cutoff = sec - self.window
+        recent = sorted(q for q, s in h.items() if s >= cutoff)
+        if len(recent) >= self.hits:
+            n = self.strikes.get(ip, [0, 0])[0] + 1
+            self.strikes[ip] = [n, sec]
+            del self.scores[ip]
+            off = {"ip": ip, "paths": recent, "t": sec, "strikes": n, "banned": False,
+                   "seconds": 0}
+            self.pending.append(off)
+            self.offenders = (self.offenders + [off])[-MAX_OFFENDERS:]
+
+    def take_offenders(self):
+        out, self.pending = self.pending, []
+        return out
+
+    def mute(self, ip, until):
+        """Not flagged again before `until` (the ban, or the one that would have been)."""
+        self.muted[ip] = until
 
     def purge(self):
         self.last_purge = self.latest
@@ -157,6 +222,15 @@ class TrapLearner:
             t[1] = {ip: s for ip, s in t[1].items() if s >= cutoff}
             if not t[1]:
                 del self.traps[p]
+        self.established = {p for p in self.established
+                            if p in self.traps and self.qualifies(self.traps[p][1], cutoff)}
+        for ip in list(self.scores):
+            h = self.scores[ip] = {q: s for q, s in self.scores[ip].items() if s >= cutoff}
+            if not h:
+                del self.scores[ip]
+        self.muted = {ip: u for ip, u in self.muted.items() if u > self.latest}
+        keep = self.latest - STRIKES_KEEP
+        self.strikes = {ip: v for ip, v in self.strikes.items() if v[1] >= keep}
 
     def found(self, min_ips=None, min_nets=None):
         """Candidate traps over the window: [{path, ips, nets, requests, last}], the most
@@ -185,5 +259,6 @@ class TrapLearner:
 
     def snapshot(self):
         return {"lines": self.lines, "excused": self.excused, "served": len(self.ok),
-                "latest": self.latest, "traps": self.found(),
+                "ignored": self.ignored, "welcomed": self.welcomed, "latest": self.latest, "traps": self.found(),
+                "offenders": self.offenders,
                 "templates": self.learned_templates()}

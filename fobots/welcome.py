@@ -49,18 +49,32 @@ class Welcome:
 
 
 
+class NoWelcome:
+    """An empty list: nothing is protected."""
+    nets = ()
+
+    def reload(self):
+        pass
+
+
+NO_WELCOME = NoWelcome()
+
+
+
 class Banner:
     def __init__(self, nft, welcome, ban_seconds):
         self.nft, self.welcome, self.ban_seconds = nft, welcome, ban_seconds
 
-    def ban(self, rng, reason, seconds=None):
-        """Bans the range (outside the welcome list, without duplicates or nft conflicts)."""
+    def ban(self, rng, reason, seconds=None, welcome=None):
+        """Bans the range (outside the welcome list, without duplicates or nft conflicts).
+        `welcome`: another list than the usual one (trap bans have their own)."""
         seconds = seconds or self.ban_seconds
-        self.welcome.reload()
+        welcome = welcome or self.welcome
+        welcome.reload()
         ver = rng[0]
         pieces = []
         for n in range_nets(rng):
-            pieces += subtract(n, self.welcome.nets)
+            pieces += subtract(n, welcome.nets)
         pieces = list(ipaddress.collapse_addresses(pieces))
         if not pieces:
             log.info("%s: entirely in the welcome list, no ban", fmt_range(rng))

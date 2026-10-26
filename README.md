@@ -274,7 +274,8 @@ log = /var/log/nginx/api.access.log
 ```
 - `log` (required), `ignore_path` (regex on the path),
   `ignore_all` (nothing is counted for this target), `watch_agent` / `watch_path` (monitoring,
-  see below; they replace the `[fobots]` ones for this target).
+  see below; they replace the `[fobots]` ones for this target), `trap_ignore` (paths that are
+  never trap paths, see below; replaces the `[fobots]` one).
 - Its own rules **add to** the global `ignore_path` of `[fobots]`.
 - CNAME aliases of a host have no effect: they end up in the same log, hence in the same
   target. The host name is never read from the lines.
@@ -347,10 +348,10 @@ should be checked before use.
 
 ## Trap paths: what only scanners ask for (`traps`)
 
-Learning only, **nothing is banned**. A path that gets a 404 or a 403 and is asked for by many
-distinct IPs from different networks (default: 5 IPs from 3 /16 networks within 6 h) is a
-candidate trap: `/.env`, `/wp-login.php` on a site that is not WordPress… Counting IPs, not
-requests, keeps a single client looping on a dead link from creating one.
+A path that gets a 404 or a 403 and is asked for by many distinct IPs from different networks
+(default: 5 IPs from 3 /16 networks within 6 h) is a trap: `/.env`, `/wp-login.php` on a site
+that is not WordPress… Counting IPs, not requests, keeps a single client looping on a dead link
+from creating one.
 
 What the site really serves protects against false positives:
 
@@ -359,16 +360,40 @@ What the site really serves protects against false positives:
   (`{uuid}`, `{int}`, `{ulid}`, `{hex}`, `{slug}`), so a deleted `/post/<uuid>` is not taken for
   a scan once the site has served `/post/{uuid}` with `trap_template_min` (3) different values.
   Segments with `..`, `%`, `.env`, `.git`, `wp-admin`… never match a type, and a slug needs a
-  digit.
+  digit;
+- `trap_ignore` (regex, global or in a `[site:NAME]` section, which then replaces it) lists
+  paths that are never traps.
+
+**Reaction.** An IP that asked for `trap_hits` (2) distinct traps is flagged, including the ones
+that made the traps. The first signal is individual, so the ban is too: the IP alone (IPv6: its
+/64), never its RDAP allocation, for `trap_ban_time` (1 h), doubled each time it comes back
+(7 d at most). **One IP, not its network.** A trap hit says something about one machine, so the sanction is
+individual: a machine of an authorised network that scans is banned alone and the rest of its
+network stays reachable. In IPv6 the unit is the /64, because a scanner changes address freely
+inside it; an IP of the trap welcome list inside that /64 is left out of the ban. The rate bans
+are the opposite on purpose: their point is a load spread over many IPs of a range, which a ban
+per IP would not see (`ban_scope = observed` narrows them to the groups of IPs actually seen).
+
+**`welcome.txt` does not protect from traps**: it holds trusted networks, often internal ones, and attacks come from inside too. The traps have their own list, `trap_welcome.txt` next to the configuration (`trap_welcome` to move it): its IPs neither make a trap nor are flagged. Use it for the security scanners you accept (audit, monitoring, a pentest):
+
+```
+fobots welcome add --traps 198.51.100.0/24   # also lifts the bans on this range
+fobots welcome list --traps
+```
+`fobots traps` prints this command for the flagged IPs. Until `trap_ban = yes`, a flagged IP is only
+logged (`TRAP … would be banned`) and listed by `fobots traps`: **start there** and read the
+list on your own traffic.
 
 ```
 traps = yes          # in [fobots]: the daemon learns, per target, and writes <dir>/traps.json
-fobots traps         # traps and shapes from the daemon's snapshot
+trap_ban = no        # yes: ban the flagged IPs (otherwise only logged)
+fobots traps         # traps, shapes and flagged IPs from the daemon's snapshot
 fobots traps access.log other.log   # same, computed now from logs (no nft, no root)
 ```
-Options: `trap_min_ips`, `trap_min_nets`, `trap_window`, `trap_template_min`, `traps_file`.
-Check the list on your own logs before relying on it: a crawler following dead links from many
-networks looks like a scanner (put it in the welcome list).
+Options: `trap_min_ips`, `trap_min_nets`, `trap_window`, `trap_template_min`, `trap_hits`,
+`trap_ban_time`, `trap_ignore`, `traps_file`. A crawler following dead links from many networks
+looks like a scanner (put it in the welcome list or in `trap_ignore`). Not covered yet: a site
+that answers 200 to anything, and a first scanner (a trap exists only once others asked for it).
 
 ## Spotting legitimate IPs caught in a ban (gitlab-runner…)
 
@@ -446,7 +471,8 @@ the configuration file. **The command line overrides the configuration.** See
 | `threshold` | 5 | req/s of a range above which it is banned |
 | `prefix_threshold` | = `threshold` | req/s of an unresolved `/16` that allow RDAP |
 | `sustain`, `window` | 5, 60 | consecutive seconds above the threshold required; tracking window (s) |
-| `traps`, `trap_min_ips`, `trap_min_nets`, `trap_window`, `trap_template_min`, `traps_file` | no, 5, 3, 6h, 3, `<dir>/traps.json` | learns trap paths (404/403 asked for by many IPs); nothing is banned, see `fobots traps` |
+| `traps`, `trap_ban` | no, no | learns trap paths (404/403 asked for by many IPs) and flags the IPs asking for `trap_hits`; with `trap_ban` they are banned, otherwise only logged; see `fobots traps` |
+| `trap_hits`, `trap_ban_time`, `trap_min_ips`, `trap_min_nets`, `trap_window`, `trap_template_min`, `trap_ignore`, `trap_welcome`, `traps_file` | 2, 1h, 5, 3, 6h, 3, none, `trap_welcome.txt` next to the configuration, `<dir>/traps.json` | tuning of the above |
 | `slow_threshold`, `slow_window` | 0, 10m | bans a range whose **average** rate over the window exceeds this (req/s); `0` = disabled |
 | `ban_time` | 1h | duration of a ban (`30m`, `1h`, `1d`) |
 | `ban_scope` | `allocation` | `allocation`: ban the whole RDAP range; `observed`: only the groups of IPs seen inside it |
