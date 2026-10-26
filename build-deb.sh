@@ -103,7 +103,7 @@ Depends: python3 (>= 3.7), nftables
 Section: net
 Priority: optional
 Description: nftables bans of overly aggressive IP ranges
- Reads an access log (nginx, Apache, GitLab), counts requests per IP range
+ Reads an access log (nginx, Apache), counts requests per IP range
  and adds the ranges that exceed the threshold to an nftables set. Bans
  expire by themselves. The service is neither enabled nor started by the
  installation: adapt /etc/fobots/fobots.conf, fill in /etc/fobots/welcome.txt,

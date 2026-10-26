@@ -2,12 +2,12 @@
 # Copyright (C) 2026 Joël Maizi
 """fobots: daemon that bans (nftables) overly aggressive IP ranges.
 
-Continuously reads an access log in "combined" format (nginx / Apache / GitLab),
+Continuously reads an access log in "combined" format (nginx / Apache),
 counts requests per IP range and per second, and adds the offending range to the
 nftables set as soon as the threshold is exceeded. Bans expire by themselves (nft timeout).
 
   fobots run                         # follows the log given in fobots.conf
-  tail -F /var/log/gitlab/nginx/gitlab_access.log | fobots run -t 5 -
+  tail -F /var/log/nginx/access.log | fobots run -t 5 -
   fobots setup                       # creates nft table, sets and rules (idempotent)
   fobots probe                       # response time of the load probe URL(s)
   fobots stress LOG --base URL       # replays a log at 2, 5, 10… req/s: costs, capacity
@@ -791,9 +791,9 @@ def main(argv=None):
                         "(cheap static pages, e.g. ^/(assets|uploads)/)")
     r.add_argument("--watch-agent", metavar="REGEX",
                    help="opt-in: logs (WATCH) the IPs whose user agent matches when "
-                        "their range is banned (e.g. ^gitlab-runner); does not change the count")
+                        "their range is banned (e.g. ^ci-runner); does not change the count")
     r.add_argument("--watch-path", metavar="REGEX",
-                   help="restricts --watch-agent to the matching paths (e.g. ^/api/v4/); "
+                   help="restricts --watch-agent to the matching paths (e.g. ^/api/); "
                         "if both are given, both must match")
     r.add_argument("--ban-scope", choices=SCOPES, default="allocation",
                    help="allocation: the whole RDAP range is banned (default); observed: only "

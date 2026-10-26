@@ -27,8 +27,8 @@ ReloadPropagatedFrom=nftables.service
 [Service]
 Type=simple
 User=fobots
-# The log must be readable by this user: adapt the group (adm, root, gitlab-www…)
-# or grant access with setfacl. Check: sudo -u fobots head -1 /var/log/gitlab/nginx/gitlab_access.log
+# The log must be readable by this user: adapt the group (adm, root, www-data…)
+# or grant access with setfacl. Check: sudo -u fobots head -1 /var/log/nginx/access.log
 SupplementaryGroups=adm
 ConfigurationDirectory=fobots
 StateDirectory=fobots

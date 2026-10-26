@@ -2,7 +2,7 @@
 # Relative paths are relative to this file. The command line overrides it.
 [fobots]
 # Log to follow continuously (rotation handled). Without this option: stdin.
-log = /var/log/gitlab/nginx/gitlab_access.log
+log = /var/log/nginx/access.log
 # State directory (created if missing): RDAP cache and monitoring findings.
 # dir = /var/lib/fobots
 # cache = ip_ranges.json        # RDAP ranges found (default: <dir>/ip_ranges.json)
@@ -36,16 +36,16 @@ ban_time = 1h        # duration of a ban: 30m, 1h, 1d…
 # rules (in addition to ignore_path below). A host with several names (CNAME) has a single
 # section: its log is unique. The log of [fobots] and those of the sites must differ;
 # to use sections only, remove the `log =` line of [fobots].
-# [site:gitlab]
-# log = /var/log/gitlab/nginx/gitlab_access.log
+# [site:app]
+# log = /var/log/nginx/access.log
 # ignore_path = ^/(assets/|favicon\.ico|robots\.txt)
 # [site:showcase]
 # log = /var/log/nginx/showcase.access.log
 # ignore_all = yes
 
 # Cheap static pages not to count (regex on the request path). Anchor on prefixes of static
-# directories, NOT on extensions (\.js, \.css would also exempt the repository files served by
-# GitLab, which are dynamic and expensive). This is not an authorisation: a banned range is
+# directories, NOT on extensions (\.js, \.css would also exempt dynamic files served by the
+# application, e.g. repository files, which are expensive). This is not an authorisation: a banned range is
 # dropped by the firewall before nginx, static pages included.
 # ignore_path = ^/(assets/|favicon|robots\.txt)
 
@@ -54,11 +54,11 @@ ban_time = 1h        # duration of a ban: 30m, 1h, 1d…
 # command to protect them. Regular expressions; if both are given, both must match.
 # The route belongs to a host: put them in its [site:NAME] section (they replace these
 # global values for that target):
-#   [site:gitlab]
-#   watch_agent = ^gitlab-runner
-#   watch_path = ^/api/v4/
-# watch_agent = ^gitlab-runner
-# watch_path = ^/api/v4/
+#   [site:app]
+#   watch_agent = ^ci-runner
+#   watch_path = ^/api/
+# watch_agent = ^ci-runner
+# watch_path = ^/api/
 # watch_file = watched.jsonl   # findings recorded (default: <dir>/watched.jsonl), reread by
 #                              `fobots watched`; pruned beyond 30 days at startup
 

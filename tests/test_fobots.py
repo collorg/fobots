@@ -534,7 +534,7 @@ class DetectorAllocation(DetectorBase):
 
     def test_ignore_path_and_site_rules(self):
         import re
-        site = Site("gitlab", "/x.log", regex="^/assets/")
+        site = Site("app", "/x.log", regex="^/assets/")
         self.detector([self.ALLOC], threshold=2, ignore_path=re.compile(r"^/favicon"), sites=[site])
         for p in ("/assets/a.js", "/assets/b.js", "/favicon.ico", "/favicon.png"):
             for _ in range(3):
@@ -571,7 +571,7 @@ class DetectorAllocation(DetectorBase):
         self.detector([self.ALLOC], threshold=2, watch=(re.compile("^runner"), None), watch_file=wf)
         with self.assertLogs("fobots", "WARNING") as cm:
             for _ in range(3):
-                self.det.feed_line(line("43.1.1.1", 0, "/api/v4/jobs", agent="runner/1"))
+                self.det.feed_line(line("43.1.1.1", 0, "/api/jobs", agent="runner/1"))
         self.assertTrue(any("WATCH 43.0.0.0/9 banned" in m for m in cm.output))
         events = read_events(wf, 0)
         self.assertEqual(events[0]["ips"][0][0], "43.1.1.1")
@@ -579,17 +579,17 @@ class DetectorAllocation(DetectorBase):
 
     def test_site_watch_overrides_the_global_one(self):
         wf = self.path("watched.jsonl")
-        site = Site("gitlab", "/x.log", watch=("^runner", "^/api/v4/"))
+        site = Site("app", "/x.log", watch=("^runner", "^/api/"))
         self.detector([self.ALLOC], threshold=2, watch_file=wf)  # no global watch
         with self.assertLogs("fobots", "WARNING") as cm:
             for _ in range(3):
-                self.det.feed_line(line("43.1.1.1", 0, "/api/v4/jobs", agent="runner/1"), site)
+                self.det.feed_line(line("43.1.1.1", 0, "/api/jobs", agent="runner/1"), site)
         self.assertTrue(any("WATCH 43.0.0.0/9 banned" in m for m in cm.output))
         self.assertEqual(read_events(wf, 0)[0]["ips"][0][0], "43.1.1.1")
 
     def test_site_watch_requires_its_own_path(self):
         wf = self.path("watched.jsonl")
-        site = Site("gitlab", "/x.log", watch=("^runner", "^/api/v4/"))
+        site = Site("app", "/x.log", watch=("^runner", "^/api/"))
         self.detector([self.ALLOC], threshold=2, watch_file=wf)
         with self.assertLogs("fobots", "INFO") as cm:
             for _ in range(3):
@@ -1701,14 +1701,14 @@ class ConfigTests(TmpDirCase):
         self.assertEqual(c["welcome"], self.path("w.txt"))
 
     def test_sites(self):
-        c = self.conf("[fobots]\n[site:gitlab]\nlog = /var/log/g.log\nignore_path = ^/(assets/|favicon)\n"
+        c = self.conf("[fobots]\n[site:app]\nlog = /var/log/g.log\nignore_path = ^/(assets/|favicon)\n"
                       "\n[site:static]\nlog = s.log\nignore_all = yes\n")
         g, s = c["sites"]
-        self.assertEqual((g["name"], g["regex"], g["all"]), ("gitlab", "^/(assets/|favicon)", False))
+        self.assertEqual((g["name"], g["regex"], g["all"]), ("app", "^/(assets/|favicon)", False))
         self.assertEqual((s["name"], s["log"], s["all"]), ("static", self.path("s.log"), True))
 
     def test_site_watch_options(self):
-        c = self.conf("[fobots]\n[site:gitlab]\nlog = g.log\nwatch_agent = ^runner\nwatch_path = ^/api/\n"
+        c = self.conf("[fobots]\n[site:app]\nlog = g.log\nwatch_agent = ^runner\nwatch_path = ^/api/\n"
                       "[site:other]\nlog = o.log\n")
         self.assertEqual(c["sites"][0]["watch"], ("^runner", "^/api/"))
         self.assertEqual(c["sites"][1]["watch"], (None, None))
@@ -1984,7 +1984,7 @@ class Commands(TmpDirCase):
     def test_watched_table_and_cmd(self):
         append_event(self.path("watched.jsonl"), {
             "t": int(time.time()), "range": "40.0.0.0/12", "seconds": 3600,
-            "ips": [["40.2.2.2", 2, "/api/v4/jobs/7"], ["20.1.1.1", 6, "/api/v4/jobs/request"]]})
+            "ips": [["40.2.2.2", 2, "/api/jobs/7"], ["20.1.1.1", 6, "/api/jobs/request"]]})
         rc, out, err = self.run_main("watched", "--dry-run", "--dir", self.dir)
         self.assertEqual(rc, 0)
         self.assertIn("LAST BAN", out)
