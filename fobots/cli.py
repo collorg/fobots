@@ -242,7 +242,8 @@ def cmd_run(args):
     except OSError as e:  # stdin or file unreadable
         log.error("cannot read: %s", e)
         return 1
-    det.save_traps()
+    finally:  # also on SIGTERM (sys.exit): a restart must not forget what was learned
+        det.save_traps()
     log.info("stopping")
     return 0
 

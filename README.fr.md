@@ -377,7 +377,10 @@ Ce que le site sert réellement protège des faux positifs :
   pour un scan dès que le site a servi `/post/{uuid}` avec `trap_template_min` (3) valeurs
   différentes. Un segment avec `..`, `%`, `.env`, `.git`, `wp-admin`… ne correspond jamais à un
   type, et un slug doit contenir un chiffre ;
-- `trap_ignore` (regex, globale ou dans une section `[site:NOM]`, qui la remplace) liste des
+- `/favicon.ico`, `/robots.txt`, `/sitemap*.xml`, `/apple-touch-icon*`, `/.well-known/…` et
+  quelques fichiers semblables ne sont jamais des pièges : tout navigateur ou robot les demande,
+  qu'ils existent ou non ;
+- `trap_ignore` (regex, globale ou dans une section `[site:NOM]`, qui la remplace) ajoute des
   chemins qui ne sont jamais des pièges.
 
 **Réaction.** Une IP qui a demandé `trap_hits` (2) pièges distincts est signalée, y compris
@@ -397,7 +400,11 @@ aux groupes d'IP réellement vus).
 fobots welcome add --traps 198.51.100.0/24   # lève aussi les bans de cette plage
 fobots welcome list --traps
 ```
-`fobots traps` affiche cette commande pour les IP signalées. Tant que `trap_ban = yes` n'est pas posé, une IP
+`fobots traps` affiche cette commande pour les IP signalées.
+
+Ce qui a été appris (chemins et formes servis, candidats, IP signalées et récidivistes) est
+enregistré dans `traps.json` toutes les 5 minutes de temps de log et à l'arrêt du démon, puis
+relu au démarrage : redémarrer le service n'oublie rien. Supprimer le fichier pour repartir de zéro. Tant que `trap_ban = yes` n'est pas posé, une IP
 signalée est seulement journalisée (`TRAP … would be banned`) et listée par `fobots traps` :
 **commencer par là** et lire la liste sur son propre trafic.
 

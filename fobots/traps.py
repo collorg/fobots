@@ -35,6 +35,12 @@ MAX_SCORES = 50_000      # IPs followed for the traps they asked for
 MAX_OFFENDERS = 100      # flagged IPs kept in the snapshot
 STRIKES_KEEP = 7 * 86400 # seconds (log time) during which a flagged IP is remembered (recidive)
 
+# Requests every browser, crawler or tool makes whether the site has the file or not: a 404 on
+# them says nothing (trap_ignore adds to this, it does not replace it).
+DEFAULT_IGNORE = re.compile(
+    r"^/(favicon\.ico|robots\.txt|humans\.txt|ads\.txt|security\.txt|browserconfig\.xml|"
+    r"sitemap[^/]*\.xml(\.gz)?|apple-touch-icon[^/]*|\.well-known/.*)$")
+
 UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
 INT_RE = re.compile(r"[0-9]+")
 ULID_RE = re.compile(r"(?=.*[0-9])[0-9a-hjkmnp-tv-z]{26}")  # Crockford alphabet, lowercase
@@ -153,7 +159,7 @@ class TrapLearner:
         return bool(seen) and (vals in seen or len(seen) >= self.template_min)
 
     def learn_missing(self, ip, sec, p, tpl, vals):
-        if self.ignore is not None and self.ignore.search(p):
+        if DEFAULT_IGNORE.match(p) or (self.ignore is not None and self.ignore.search(p)):
             self.ignored += 1
             return
         if self.is_served(p, tpl, vals):
@@ -256,6 +262,35 @@ class TrapLearner:
                if len(v) >= self.template_min]
         out.sort(key=lambda e: (-e["values"], e["template"]))
         return out
+
+    def state(self):
+        """Everything learned, as JSON-able data, to survive a restart (see `restore`)."""
+        return {"ok": sorted(self.ok),
+                "templates": {t: [list(v) for v in vals] for t, vals in self.templates.items()},
+                "traps": self.traps, "scores": self.scores, "muted": self.muted,
+                "strikes": self.strikes, "offenders": self.offenders,
+                "counts": [self.lines, self.excused, self.ignored, self.welcomed],
+                "latest": self.latest, "last_purge": self.last_purge}
+
+    def restore(self, st):
+        """Takes back what `state` returned. Raises (KeyError, TypeError, ValueError) if the
+        data is not what was written: the caller starts again from nothing."""
+        ok = set(st["ok"])
+        templates = {t: {tuple(v) for v in vals} for t, vals in st["templates"].items()}
+        traps = {p: [int(n), {ip: int(s) for ip, s in ips.items()}]
+                 for p, (n, ips) in st["traps"].items()}
+        scores = {ip: {p: int(s) for p, s in h.items()} for ip, h in st["scores"].items()}
+        muted = {ip: int(u) for ip, u in st["muted"].items()}
+        strikes = {ip: [int(n), int(s)] for ip, (n, s) in st["strikes"].items()}
+        offenders = list(st["offenders"])[-MAX_OFFENDERS:]
+        lines, excused, ignored, welcomed = (int(x) for x in st["counts"])
+        latest, last_purge = int(st["latest"]), int(st["last_purge"])
+        (self.ok, self.templates, self.traps, self.scores, self.muted, self.strikes,
+         self.offenders, self.lines, self.excused, self.ignored, self.welcomed,
+         self.latest, self.last_purge) = (ok, templates, traps, scores, muted, strikes, offenders,
+                                          lines, excused, ignored, welcomed, latest, last_purge)
+        self.established = {p for p, t in self.traps.items()
+                            if self.qualifies(t[1], self.latest - self.window)}
 
     def snapshot(self):
         return {"lines": self.lines, "excused": self.excused, "served": len(self.ok),

@@ -1522,6 +1522,38 @@ class TrapLearning(unittest.TestCase):
         self.assertEqual(len(tl.found()), 0)  # 4000 s later, the window (3600 s) is over
         self.assertEqual(tl.found(), [])
 
+    def test_browser_requests_are_never_traps(self):
+        tl = self.learner()
+        for path in ("/favicon.ico", "/robots.txt", "/apple-touch-icon.png", "/sitemap.xml",
+                     "/.well-known/security.txt"):
+            self.scan(tl, path)
+        self.scan(tl, "/favicon.ico.bak")  # only the exact names
+        self.assertEqual([e["path"] for e in tl.found()], ["/favicon.ico.bak"])
+        self.assertEqual(tl.ignored, 25)
+
+    def test_state_survives_json_and_a_restart(self):
+        tl = self.learner(hits=2)
+        for i in range(3):
+            tl.feed_line(req("8.8.8.8", i, f"/post/{UID[:-1]}{i}", 200))
+        tl.feed_line(req("8.8.8.8", 9, "/about", 200))
+        self.scan(tl, "/.env")
+        self.scan(tl, "/wp-login.php", start=200)
+        tl.take_offenders()
+        again = self.learner(hits=2)
+        again.restore(json.loads(json.dumps(tl.state())))
+        self.assertEqual(again.found(), tl.found())
+        self.assertEqual(again.learned_templates(), tl.learned_templates())
+        self.assertEqual(again.ok, tl.ok)
+        self.assertEqual(again.strikes, tl.strikes)
+        self.assertEqual(again.established, {"/.env", "/wp-login.php"})
+        self.assertEqual(again.lines, tl.lines)
+        self.scan(again, f"/post/{UID}")  # the shape is still known after the restart
+        self.assertEqual([e["path"] for e in again.found()], ["/.env", "/wp-login.php"])
+
+    def test_restore_rejects_garbage(self):
+        with self.assertRaises((KeyError, TypeError, ValueError)):
+            self.learner().restore({"ok": 1})
+
     def test_flags_an_ip_asking_for_several_established_traps(self):
         tl = self.learner()
         self.scan(tl, "/.env")
@@ -1665,6 +1697,42 @@ class TrapDetector(DetectorBase):
             det.feed_line(req(a, i, "/global", 404), site)
             det.feed_line(req(a, i, "/mine", 404), site)
         self.assertEqual([e["path"] for e in det.learners["s"].found()], ["/global"])
+
+    def restarted(self, snap, **kw):
+        """A new daemon on the same snapshot file."""
+        return self.detector(trap_conf={"min_ips": 2, "min_nets": 2}, trap_file=snap, **kw)
+
+    def test_a_restart_keeps_what_was_learned(self):
+        snap = self.path("traps.json")
+        det = self.restarted(snap)
+        for i in range(3):
+            det.feed_line(req("8.8.8.8", i, f"/post/{UID[:-1]}{i}", 200))
+        for a in ("20.1.1.1", "30.1.1.1"):
+            det.feed_line(req(a, 5, "/.env", 404))
+        det.save_traps()
+        det2 = self.restarted(snap)
+        with self.assertLogs("fobots", "INFO") as cm:
+            det2.feed_line(req("8.8.8.8", 99, "/about", 200))
+        self.assertTrue(any("restored" in m for m in cm.output))
+        learner = det2.learners["default"]
+        self.assertEqual([e["path"] for e in learner.found()], ["/.env"])
+        self.assertEqual(learner.learned_templates()[0]["template"], "/post/{uuid}")
+        # the sites not seen yet in this run keep their saved state at the next save
+        det3 = self.restarted(snap)
+        det3.save_traps()
+        with open(snap) as f:
+            self.assertIn("state", json.load(f)["sites"]["default"])
+
+    def test_unusable_saved_state_starts_again(self):
+        snap = self.write("traps.json", "not json")
+        with self.assertLogs("fobots", "WARNING"):
+            det = self.restarted(snap)
+        det.feed_line(req("8.8.8.8", 1, "/", 200))
+        self.write("traps.json", json.dumps({"sites": {"default": {"state": {"ok": 3}}}}))
+        det = self.restarted(snap)
+        with self.assertLogs("fobots", "WARNING"):
+            det.feed_line(req("8.8.8.8", 1, "/", 200))
+        self.assertEqual(det.learners["default"].lines, 1)
 
     def test_disabled_by_default(self):
         det = self.detector()
@@ -1929,6 +1997,17 @@ class Commands(TmpDirCase):
         self.assertEqual(rc, 0)
         self.assertIn("add element inet fobots banned4 { 43.0.0.0/9 timeout 3600s }", out)
         self.assertIn("BAN 43.0.0.0/9 for 3600 s", err)
+
+    def test_run_saves_the_traps_state_at_the_end(self):
+        log_path = self.write("access.log", "".join(
+            req(a, i, "/.env", 404) for i, a in enumerate(TrapLearning.IPS)))
+        rc, _, _ = self.run_main("run", "--dry-run", "--dir", self.dir, "-w", self.path("w.txt"),
+                                 "--traps", log_path)
+        self.assertEqual(rc, 0)
+        with open(self.path("traps.json")) as f:
+            site = json.load(f)["sites"]["default"]
+        self.assertEqual([e["path"] for e in site["traps"]], ["/.env"])
+        self.assertIn("/.env", site["state"]["traps"])
 
     def test_run_observed_replay(self):
         log_path = self.write("access.log", "".join(line(f"43.1.1.{i}", 0) for i in range(8)))

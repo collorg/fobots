@@ -362,7 +362,9 @@ What the site really serves protects against false positives:
   a scan once the site has served `/post/{uuid}` with `trap_template_min` (3) different values.
   Segments with `..`, `%`, `.env`, `.git`, `wp-admin`… never match a type, and a slug needs a
   digit;
-- `trap_ignore` (regex, global or in a `[site:NAME]` section, which then replaces it) lists
+- `/favicon.ico`, `/robots.txt`, `/sitemap*.xml`, `/apple-touch-icon*`, `/.well-known/…` and a
+  few similar files are never traps: every browser or crawler asks for them, present or not;
+- `trap_ignore` (regex, global or in a `[site:NAME]` section, which then replaces it) adds
   paths that are never traps.
 
 **Reaction.** An IP that asked for `trap_hits` (2) distinct traps is flagged, including the ones
@@ -381,7 +383,11 @@ per IP would not see (`ban_scope = observed` narrows them to the groups of IPs a
 fobots welcome add --traps 198.51.100.0/24   # also lifts the bans on this range
 fobots welcome list --traps
 ```
-`fobots traps` prints this command for the flagged IPs. Until `trap_ban = yes`, a flagged IP is only
+`fobots traps` prints this command for the flagged IPs.
+
+What was learned (served paths and shapes, candidates, flagged IPs and repeat offenders) is
+saved in `traps.json` every 5 minutes of log time and when the daemon stops, and read back at
+start: restarting the service forgets nothing. Delete the file to start again. Until `trap_ban = yes`, a flagged IP is only
 logged (`TRAP … would be banned`) and listed by `fobots traps`: **start there** and read the
 list on your own traffic.
 

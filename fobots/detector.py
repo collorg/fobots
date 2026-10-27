@@ -96,6 +96,7 @@ class Detector:
         self.trap_file = trap_file    # snapshot of what was learned (read by `fobots traps`)
         self.trap_ban, self.trap_ban_seconds = trap_ban, trap_ban_seconds  # False: only logs
         self.learners = {}            # target name -> TrapLearner
+        self.trap_state = self.load_traps() if trap_conf is not None else {}  # target -> saved
         self.trap_welcome = trap_welcome  # Welcome list of the traps only (not welcome.txt)
         self.welcomed_memo, self.welcomed_version = {}, None
         self.last_trap_save = 0
@@ -197,6 +198,15 @@ class Detector:
                 if site is not None and site.trap_ignore is not None:
                     conf["ignore"] = site.trap_ignore  # the target's own wins
                 learner = self.learners[name] = TrapLearner(**conf)
+                saved = self.trap_state.get(name, {}).get("state")
+                if saved is not None:  # what the previous run had learned
+                    try:
+                        learner.restore(saved)
+                        log.info("traps: %s restored (%d served path(s), %d candidate(s))",
+                                 name, len(learner.ok), len(learner.traps))
+                    except (KeyError, TypeError, ValueError, AttributeError) as e:
+                        log.warning("traps: %s: saved state unusable (%s), starting again", name, e)
+                        learner.__init__(**conf)
             learner.feed_line(line)
             if learner.pending:
                 self.react_traps(learner, name)
@@ -245,13 +255,31 @@ class Detector:
             off["seconds"] = seconds
             learner.mute(ip, off["t"] + seconds)
 
+    def load_traps(self):
+        """What the previous run saved, per target ({} if nothing usable)."""
+        if not self.trap_file:
+            return {}
+        try:
+            with open(self.trap_file) as f:
+                sites = json.load(f)["sites"]
+            if not isinstance(sites, dict):
+                raise ValueError("sites is not a dictionary")
+            return sites
+        except FileNotFoundError:
+            return {}
+        except (OSError, ValueError, KeyError, TypeError) as e:
+            log.warning("traps: %s unusable (%s), starting again", self.trap_file, e)
+            return {}
+
     def save_traps(self):
-        """Writes what was learned for each target (atomic), for `fobots traps`."""
+        """Writes what was learned for each target (atomic): `fobots traps` shows it, and the
+        next run starts from it. A target not seen yet in this run keeps its saved state."""
         if not self.trap_file:
             return
         self.last_trap_save = self.latest
-        data = {"t": int(time.time()),
-                "sites": {n: l.snapshot() for n, l in self.learners.items()}}
+        sites = {n: s for n, s in self.trap_state.items() if n not in self.learners}
+        sites.update({n: dict(l.snapshot(), state=l.state()) for n, l in self.learners.items()})
+        data = {"t": int(time.time()), "sites": sites}
         tmp = self.trap_file + ".tmp"
         try:
             with open(tmp, "w") as f:

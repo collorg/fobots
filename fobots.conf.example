@@ -77,6 +77,8 @@ ban_time = 1h        # duration of a ban: 30m, 1h, 1d…
 # trap_window = 6h        # period over which the IPs are counted
 # trap_template_min = 3   # values served before a shape protects a missing path
 # trap_ignore = ^/(legacy|old)/   # paths that are never traps (a [site:NAME] one replaces it)
+# (/favicon.ico, /robots.txt, /sitemap*.xml, /apple-touch-icon*, /.well-known/ are never traps.)
+# What was learned is saved in traps_file and read back at start.
 # trap_welcome = trap_welcome.txt  # IPs that neither make a trap nor are flagged (security
 #                         # scanners you accept); NOT welcome.txt, see `welcome add --traps`
 # traps_file = traps.json # snapshot (default: <dir>/traps.json)
