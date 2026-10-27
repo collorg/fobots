@@ -87,15 +87,16 @@ ban_time = 1h        # duration of a ban: 30m, 1h, 1d…
 #                         # scanners you accept); NOT welcome.txt, see `welcome add --traps`
 # traps_file = traps.json # snapshot (default: <dir>/traps.json)
 
-# Tight bans: instead of banning the whole RDAP allocation, ban the groups of IPs seen inside
-# it; fall back to wide blocks if the traffic is scattered or after several partial bans.
 # Slow scrapers: a range that stays at about one request per second for hours never exceeds
 # `threshold`. This bans a range whose AVERAGE rate over slow_window exceeds slow_threshold
 # (req/s); 0 = disabled. Measure it first: `fobots analyse` (table "Slow scrapers").
 # slow_threshold = 0.5
 # slow_window = 10m
 
-# ban_scope = allocation   # allocation | observed (try it with --dry-run first)
+# Tight bans (default): instead of banning the whole RDAP allocation, ban the groups of IPs seen
+# inside it; fall back to wide blocks if the traffic is scattered or after several partial bans.
+# `allocation` bans the whole allocation (up to a /8): one client then cuts off all its neighbours.
+# ban_scope = observed     # observed | allocation
 # observed_prefix = 20     # maximum extent of a group (IPv4 prefix; IPv6: /48)
 # observed_escalate = 4    # partial bans of an allocation before falling back to wide blocks
 # observed_max_prefix = 16 # fallback (scattered traffic): /16 blocks instead of the allocation; 0 = whole allocation

@@ -819,9 +819,9 @@ def main(argv=None):
     r.add_argument("--watch-path", metavar="REGEX",
                    help="restricts --watch-agent to the matching paths (e.g. ^/api/); "
                         "if both are given, both must match")
-    r.add_argument("--ban-scope", choices=SCOPES, default="allocation",
-                   help="allocation: the whole RDAP range is banned (default); observed: only "
-                        "the groups of IPs seen, inside the allocation")
+    r.add_argument("--ban-scope", choices=SCOPES, default="observed",
+                   help="observed: only the groups of IPs seen, inside the allocation (default); "
+                        "allocation: the whole RDAP range is banned")
     r.add_argument("--observed-prefix", type=int, default=20,
                    help="ban_scope=observed: maximum width of a group of IPs, as an IPv4 prefix "
                         "(default: 20, i.e. 4096 addresses; IPv6: /48)")

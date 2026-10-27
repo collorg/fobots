@@ -2153,6 +2153,12 @@ class Commands(TmpDirCase):
         rc_file = self.write("ranges.json", json.dumps([[4, ip("43.0.0.0"), ip("43.127.255.255")]]))
         rc, out, err = self.run_main("run", "--dry-run", "--dir", self.dir, "-c", rc_file,
                                      "-w", self.path("w.txt"), "-t", "5", "--sustain", "1", log_path)
+        self.assertEqual(rc, 0)  # default ban_scope = observed: the IPs seen, not the /9
+        self.assertIn("add element inet fobots banned4 { 43.1.1.0/30 timeout 3600s, "
+                      "43.1.1.4/31 timeout 3600s }", out)
+        rc, out, err = self.run_main("run", "--dry-run", "--dir", self.dir, "-c", rc_file,
+                                     "-w", self.path("w.txt"), "-t", "5", "--sustain", "1",
+                                     "--ban-scope", "allocation", log_path)
         self.assertEqual(rc, 0)
         self.assertIn("add element inet fobots banned4 { 43.0.0.0/9 timeout 3600s }", out)
         self.assertIn("BAN 43.0.0.0/9 for 3600 s", err)

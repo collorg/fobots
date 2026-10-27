@@ -95,7 +95,8 @@ json.dump([[ipaddress.ip_address(s).version, int(ipaddress.ip_address(s)), int(i
            for s, e in ranges], open(sys.argv[1], "w"))
 PY
 : > "$W/welcome.txt"
-run() { fobots run --dir "$W" --cache "$W/ranges.json" -w "$W/welcome.txt" --sustain 1 "$@" 2>"$W/err"; }  # one burst is enough here
+# one burst is enough here; the scenarios ban whole allocations unless they say --ban-scope observed
+run() { fobots run --dir "$W" --cache "$W/ranges.json" -w "$W/welcome.txt" --sustain 1 --ban-scope allocation "$@" 2>"$W/err"; }
 reset() { "$NFT" flush set inet fobots banned4; "$NFT" flush set inet fobots banned6; }
 
 echo "nft: $("$NFT" --version)   kernel: $(uname -r)"
@@ -113,7 +114,7 @@ PY
 )
 case $sel in "(True,"*) ok "nft handles interval sets with timeouts ($sel)" ;; *) bad "nft self-test: $sel" ;; esac
 
-section "ban of the whole allocation (default scope)"
+section "ban of the whole allocation (ban_scope = allocation)"
 mklog "$W/log" $(seq_ips 43.1.1. 1 8)
 run -t 5 "$W/log"
 equal "exit status" $? 0

@@ -60,7 +60,7 @@ SCOPES = ("allocation", "observed")
 class Detector:
     def __init__(self, threshold, prefix_threshold, sustain, window, store, banner, rdap,
                  load=None, min_threshold=1.0, min_ban_seconds=60, watch=None,
-                 watch_file=None, ignore_path=None, sites=(), scope="allocation",
+                 watch_file=None, ignore_path=None, sites=(), scope="observed",
                  observed_prefix=20, escalate=4, wide_prefix=16, slow_threshold=0,
                  slow_window=600, trap_conf=None, trap_file=None, trap_ban=False, trap_ban_seconds=3600, trap_welcome=None):
         self.base_threshold, self.base_prefix_threshold = threshold, prefix_threshold

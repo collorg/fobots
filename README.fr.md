@@ -38,8 +38,9 @@ Python 3.7+ standard (aucune dépendance), nftables, Linux.
    `prefix_threshold` req/s, avec un budget horaire, un délai entre requêtes et
    une pause sur HTTP 429. Les plages trouvées sont enregistrées sur disque
    (`ip_ranges.json`) et réutilisées.
-4. Par défaut le ban couvre **toute l'allocation**. Avec `ban_scope = observed`, il se
-   resserre sur les IP réellement vues : voir « Ban resserré » plus bas.
+4. Par défaut (`ban_scope = observed`), le ban se resserre sur les IP réellement vues dans
+   l'allocation : voir « Ban resserré » plus bas. Avec `ban_scope = allocation`, il couvre
+   **toute l'allocation**.
 5. Le ban est une transaction nft unique. Une plage déjà couverte par un ban plus
    large est ignorée ; une plage qui en englobe d'autres les remplace.
 6. L'état des bans est **dans nft** (lu au démarrage) : le démon peut être
@@ -517,7 +518,7 @@ conf.** Voir `fobots.conf.example` pour toutes les clés :
 | `trap_hits`, `trap_scan_paths`, `trap_scan_segments`, `trap_scan_window`, `trap_ban_time`, `trap_min_ips`, `trap_min_nets`, `trap_window`, `trap_template_min`, `trap_ignore`, `trap_welcome`, `traps_file` | 2, 20, 5, 5m, 1h, 5, 3, 6h, 3, aucun, `trap_welcome.txt` à côté de la configuration, `<dir>/traps.json` | réglages de ce qui précède |
 | `slow_threshold`, `slow_window` | 0, 10m | bannit une plage dont le débit **moyen** sur la fenêtre dépasse cette valeur (req/s) ; `0` = désactivé |
 | `ban_time` | 1h | durée d'un ban (`30m`, `1h`, `1d`) |
-| `ban_scope` | `allocation` | `allocation` : on bannit la plage RDAP entière ; `observed` : seulement les groupes d'IP vues dedans |
+| `ban_scope` | `observed` | `observed` : seulement les groupes d'IP vues dans la plage RDAP ; `allocation` : on bannit la plage entière |
 | `observed_prefix` | 20 | `observed` : étendue maximale d'un groupe d'IP (préfixe IPv4 ; IPv6 : `/48`) |
 | `observed_escalate` | 4 | `observed` : bans partiels d'une allocation, pendant la durée d'un ban, avant le repli en blocs larges |
 | `observed_max_prefix` | 16 | `observed` : largeur des blocs bannis en repli (préfixe IPv4 ; IPv6 : `/32`) ; `0` = allocation entière |
@@ -612,7 +613,8 @@ faux positifs avec `welcome add`. Il n'est pas modulé par le niveau de charge.
 
 ## Ban resserré (`ban_scope = observed`)
 
-Désactivé par défaut : le comportement reste celui décrit plus haut. RDAP continue de
+C'est le défaut. Avec `ban_scope = allocation`, toute l'allocation est bannie : un seul client
+au-dessus du seuil coupe alors tous les visiteurs de son fournisseur (jusqu'à un `/8`). RDAP continue de
 fournir la **frontière** (l'allocation) et de décider *quand* bannir (même seuil, même
 comptage par allocation). Ce qui change, c'est *quoi* : au lieu de l'allocation entière,
 on bannit les IP vues pendant la fenêtre `window`, regroupées ainsi :
@@ -645,7 +647,7 @@ Mémoire : au plus 200 000 IP suivies. Les IPv4 et IPv6 sont traitées de la mê
 - **Temps de ban restant avec un vieux nftables.** Avec nftables 0.9.x, `nft list set`
   n'affiche que `timeout 1h` et jamais `expires` : `bans` et `watched` n'indiquent alors pas le
   temps restant. Les versions plus récentes affichent `expires`, que ces commandes utilisent.
-- **Plage = allocation RIR** par défaut (voir `ban_scope = observed` pour resserrer), souvent très large (`17.0.0.0/8`, `43.0.0.0/9`,
+- **Plage = allocation RIR** avec `ban_scope = allocation` (le défaut, `observed`, la resserre), souvent très large (`17.0.0.0/8`, `43.0.0.0/9`,
   `36.128.0.0/10`). Un ban frappe toute l'allocation, y compris des visiteurs
   légitimes. Garde-fou : le ban expire, la liste welcome corrige. Les réponses
   RDAP plus larges que `/8` (IPv4) ou `/16` (IPv6) sont rejetées.
