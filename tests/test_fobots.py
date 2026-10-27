@@ -28,7 +28,7 @@ from fobots.events import append_event, read_events, trim_events  # noqa: E402
 from fobots.follow import follow  # noqa: E402
 from fobots.grouping import cluster_ips, pick_groups, wide_blocks  # noqa: E402
 from fobots.load import LoadMonitor, Probe, parse_probe_urls, read_psi, summarize  # noqa: E402
-from fobots.nft import Nft, NftError, parse_elems, val_nets  # noqa: E402
+from fobots.nft import NFT_SETUP, Nft, NftError, parse_elems, val_nets  # noqa: E402
 from fobots.rdap import label, RangeStore  # noqa: E402
 from fobots.replay import Replay, make_fetcher, parse_rates, read_requests, schedule, select_requests  # noqa: E402
 from fobots.replay import report as replay_report  # noqa: E402
@@ -64,23 +64,25 @@ class FakeNft:
     """Stands for Nft: a set of (network, remaining seconds) per version, with a call log."""
 
     def __init__(self, elems=None, fail_adds=0):
-        self.sets = {4: list(elems or []), 6: []}
+        self.sets = {4: list(elems or []), 6: []}  # web ports
+        self.all = {4: [], 6: []}                   # every port (trap_scope = all)
         self.calls = []
         self.fail_adds = fail_adds
 
-    def elements(self, ver):
-        return list(self.sets[ver])
+    def elements(self, ver, scope="web"):
+        return list((self.sets if scope == "web" else self.all)[ver])
 
-    def apply(self, ver, deletes, adds, restore=()):
-        self.calls.append((ver, list(deletes), list(adds)))
+    def apply(self, ver, deletes, adds, restore=(), scope="web"):
+        self.calls.append((ver, list(deletes), list(adds)) if scope == "web"
+                          else (ver, list(deletes), list(adds), scope))
         if self.fail_adds:
             self.fail_adds -= 1
             raise NftError("interval overlaps with an existing one")
-        gone = set(deletes)
-        self.sets[ver] = [(n, e) for n, e in self.sets[ver] if n not in gone] + list(adds)
+        gone, sets = set(deletes), self.sets if scope == "web" else self.all
+        sets[ver] = [(n, e) for n, e in sets[ver] if n not in gone] + list(adds)
 
-    def banned(self, ver=4):
-        return sorted(str(n) for n, _ in self.sets[ver])
+    def banned(self, ver=4, scope="web"):
+        return sorted(str(n) for n, _ in (self.sets if scope == "web" else self.all)[ver])
 
 
 class NoRdap:
@@ -321,14 +323,42 @@ class NftDryRun(unittest.TestCase):
             nft.apply(*a, **k)
         return out.getvalue()
 
+    def test_scope_all_uses_the_every_port_set(self):
+        nft = Nft(dry_run=True)
+        out = self.apply(nft, 6, [], [(net("2001:db8::/64"), 60)], scope="all")
+        self.assertEqual(out, "add element inet fobots trapped6 { 2001:db8::/64 timeout 60s }\n")
+        self.assertEqual(nft.elements(6, "all"), [(net("2001:db8::/64"), 60)])
+        self.assertEqual(nft.elements(6), [])
+
+    def test_setup_blocks_http3_and_refills_the_chain(self):
+        lines = NFT_SETUP.splitlines()
+        self.assertIn("add rule inet fobots input udp dport 443 ip saddr @banned4 drop", lines)
+        self.assertIn("add rule inet fobots input ip6 saddr @trapped6 drop", lines)
+        # an existing table: the chain is emptied before its rules are added again, no duplicates
+        self.assertLess(lines.index("flush chain inet fobots input"),
+                        min(i for i, x in enumerate(lines) if x.startswith("add rule")))
+
+    def test_an_older_table_is_not_up_to_date(self):
+        old = ("table inet fobots {\n set banned4 {...}\n set banned6 {...}\n chain input {\n"
+               "  tcp dport { 80, 443 } ip saddr @banned4 drop\n"
+               "  tcp dport { 80, 443 } ip6 saddr @banned6 drop\n }\n}\n")
+        new = old + " udp dport 443 ip saddr @banned4 drop\n ip saddr @trapped4 drop\n" \
+                    " ip6 saddr @trapped6 drop\n"
+        nft = Nft()
+        for text, expected in ((old, False), (new, True)):
+            with mock.patch.object(nft, "_run", return_value=subprocess.CompletedProcess([], 0, text, "")):
+                self.assertEqual(nft.table_up_to_date(), expected)
+        with mock.patch.object(nft, "_run", return_value=subprocess.CompletedProcess([], 1, "", "")):
+            self.assertFalse(nft.table_up_to_date())
+
     def test_delete_and_add_are_two_transactions_in_order(self):
         nft = Nft(dry_run=True)
-        nft.sim[4] = [(net("34.66.63.27/32"), 100)]
+        nft.sim["banned4"] = [(net("34.66.63.27/32"), 100)]
         out = self.apply(nft, 4, [net("34.66.63.27/32")], [(net("34.64.0.0/10"), 3600)])
         lines = out.strip().splitlines()
         self.assertEqual(lines[0], "delete element inet fobots banned4 { 34.66.63.27/32 }")
         self.assertEqual(lines[1], "add element inet fobots banned4 { 34.64.0.0/10 timeout 3600s }")
-        self.assertEqual(nft.sim[4], [(net("34.64.0.0/10"), 3600)])
+        self.assertEqual(nft.sim["banned4"], [(net("34.64.0.0/10"), 3600)])
 
     def test_add_only_and_timeout_floor(self):
         nft = Nft(dry_run=True)
@@ -337,7 +367,7 @@ class NftDryRun(unittest.TestCase):
 
     def test_restore_when_add_fails(self):
         nft = Nft(dry_run=True)
-        nft.sim[4] = [(net("1.1.1.1/32"), 50)]
+        nft.sim["banned4"] = [(net("1.1.1.1/32"), 50)]
         calls = []
         orig = nft._add
 
@@ -351,7 +381,7 @@ class NftDryRun(unittest.TestCase):
             with self.assertRaises(NftError):
                 nft.apply(4, [net("1.1.1.1/32")], [(net("1.1.0.0/16"), 3600)], restore=[(net("1.1.1.1/32"), 50)])
         self.assertEqual(calls[1], [(net("1.1.1.1/32"), 50)])
-        self.assertEqual(nft.sim[4], [(net("1.1.1.1/32"), 50)])
+        self.assertEqual(nft.sim["banned4"], [(net("1.1.1.1/32"), 50)])
 
 
 class BannerTests(TmpDirCase):
@@ -400,12 +430,20 @@ class BannerTests(TmpDirCase):
         seen = {}
 
         class Spy(FakeNft):
-            def apply(self, ver, deletes, adds, restore=()):
+            def apply(self, ver, deletes, adds, restore=(), scope="web"):
                 seen["restore"] = list(restore)
-                super().apply(ver, deletes, adds, restore)
+                super().apply(ver, deletes, adds, restore, scope)
         nft = Spy([(net("1.1.1.1/32"), 42), (net("1.1.2.2/32"), None)])
         self.banner(nft).ban(rng("1.1.0.0", "1.1.255.255"), "t")
         self.assertEqual(sorted(seen["restore"]), [(net("1.1.1.1/32"), 42), (net("1.1.2.2/32"), 3600)])
+
+    def test_welcome_add_also_clears_the_every_port_set(self):
+        nft = FakeNft([(net("17.0.0.0/8"), 100)])
+        nft.all[4] = [(net("17.1.2.3/32"), 50), (net("18.1.1.1/32"), 50)]
+        deletes, _ = welcome_add(nft, net("17.1.0.0/16"), 3600)
+        self.assertEqual(sorted(map(str, deletes)), ["17.0.0.0/8", "17.1.2.3/32"])
+        self.assertEqual(nft.banned(scope="all"), ["18.1.1.1/32"])
+        self.assertNotIn("17.0.0.0/8", nft.banned())
 
     def test_welcome_add_removes_and_keeps_the_rest(self):
         nft = FakeNft([(net("17.0.0.0/8"), 500)])
@@ -1737,6 +1775,27 @@ class TrapDetector(DetectorBase):
         self.scan_two_traps(det)
         self.assertEqual(self.nft.banned(), sorted(f"{a}/32" for a in TrapLearning.IPS))
 
+    def test_trap_scope_all_closes_every_port_except_for_welcome_ips(self):
+        """trap_scope = all: the flagged IPs go to the every-port set, from the first time; an
+        IP of welcome.txt is still banned, but on the web ports only (an administrator keeps SSH)."""
+        det = self.detector(trap_conf={}, trap_ban=True, trap_scope="all", welcome="20.1.1.1\n")
+        with self.assertLogs("fobots", "INFO") as cm:
+            self.scan_two_traps(det)
+        self.assertEqual(self.nft.banned(), ["20.1.1.1/32"])
+        self.assertEqual(self.nft.banned(scope="all"),
+                         sorted(f"{a}/32" for a in TrapLearning.IPS[1:]))
+        self.assertTrue(any("all ports" in m for m in cm.output))
+        self.assertTrue(any("web ports only: in welcome.txt" in m for m in cm.output))
+        scopes = {o["ip"]: o["scope"] for o in det.learners["default"].offenders}
+        self.assertEqual(scopes["20.1.1.1"], "web")
+        self.assertEqual(scopes["30.1.1.1"], "all")
+
+    def test_trap_scope_defaults_to_web_ports(self):
+        det = self.detector(trap_conf={}, trap_ban=True)
+        self.scan_two_traps(det)
+        self.assertEqual(self.nft.banned(scope="all"), [])
+        self.assertEqual(len(self.nft.banned()), 5)
+
     def test_trap_welcome_ips_neither_make_traps_nor_are_flagged(self):
         det = self.detector(trap_conf={"hits": 1}, trap_ban=True,
                             trap_welcome=Welcome(self.write("tw.txt", "20.0.0.0/8\n")))
@@ -1901,13 +1960,14 @@ class ConfigLookup(TmpDirCase):
 
 class ConfigTests(TmpDirCase):
     def test_trap_options(self):
-        p = self.write("c.conf", "[fobots]\ntraps = yes\ntrap_ban = yes\ntrap_hits = 3\n"
+        p = self.write("c.conf", "[fobots]\ntraps = yes\ntrap_ban = yes\ntrap_hits = 3\ntrap_scope = all\n"
                        "trap_ban_time = 2h\ntrap_ignore = ^/x\n"
                        "[site:a]\nlog = a.log\ntrap_ignore = ^/legacy/\n")
         conf = load_config(p)
         self.assertEqual((conf["traps"], conf["trap_ban"], conf["trap_hits"],
                           conf["trap_ban_seconds"], conf["trap_ignore"]),
                          (True, True, 3, 7200, "^/x"))
+        self.assertEqual(conf["trap_scope"], "all")
         self.assertEqual(conf["sites"][0]["trap_ignore"], "^/legacy/")
         bad = self.write("b.conf", "[fobots]\n[site:a]\nlog = a.log\ntrap_ignore = (\n")
         with self.assertRaises(SystemExit):
@@ -2098,13 +2158,15 @@ class Commands(TmpDirCase):
         store = RangeStore(cache)
         store.add(rng("10.0.0.0", "10.255.255.255"), "ACME-NET")
         net = ipaddress.ip_network("10.1.0.0/16")
+        trapped = ipaddress.ip_network("10.2.3.4/32")
         with mock.patch("fobots.cli.Nft.elements",
-                        lambda self, ver: [(net, 3000)] if ver == 4 else []):
+                        lambda self, ver, scope="web": [] if ver == 6 else
+                        [(net, 3000)] if scope == "web" else [(trapped, 500)]):
             rc, out, _ = self.run_main("bans", "-c", cache)
         self.assertEqual(rc, 0)
-        self.assertIn("10.1.0.0/16", out)
-        self.assertIn("3000 s left", out)
-        self.assertIn("ACME-NET", out)
+        lines = out.splitlines()
+        self.assertRegex(lines[0], r"^10\.1\.0\.0/16 +3000 s left +web +ACME-NET$")
+        self.assertRegex(lines[1], r"^10\.2\.3\.4/32 +500 s left +all ports +ACME-NET$")
 
     def test_probe_report_command(self):
         path = self.write("rec.jsonl", json.dumps({"t": 1000.0, "kind": "base", "rt": 0.1, "level": 0,

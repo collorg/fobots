@@ -70,6 +70,8 @@ ban_time = 1h        # duration of a ban: 30m, 1h, 1d…
 # only with trap_ban = yes. Try it with trap_ban = no first and read `fobots traps`.
 # traps = no
 # trap_ban = no
+# trap_scope = web        # ports closed to a banned IP: web (TCP 80/443, UDP 443) or all (every
+#                         # port, from the first time, except for the IPs of welcome.txt)
 # trap_scan_paths = 20    # an IP asking for this many different missing paths, almost none
 #                         # answered, ... (0 = no scan detection)
 # trap_scan_segments = 5  # ... under at least this many top-level directories, ...

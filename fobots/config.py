@@ -38,6 +38,7 @@ CONF_KEYS = {  # file key -> (argparse destination, conversion)
     "trap_scan_paths": ("trap_scan_paths", int), "trap_scan_segments": ("trap_scan_segments", int),
     "trap_scan_window": ("trap_scan_window", parse_duration),
     "trap_ignore": ("trap_ignore", str), "trap_ban_time": ("trap_ban_seconds", parse_duration),
+    "trap_scope": ("trap_scope", str),
     "trap_ban": ("trap_ban", lambda v: v.lower() in ("1", "true", "yes", "oui", "on")),
     "from_start": ("from_start", lambda v: v.lower() in ("1", "true", "yes", "oui", "on")),
 }

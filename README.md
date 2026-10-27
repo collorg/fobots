@@ -282,7 +282,7 @@ log = /var/log/nginx/api.access.log
 - CNAME aliases of a host have no effect: they end up in the same log, hence in the same
   target. The host name is never read from the lines.
 - **Counting stays global per IP range**: requests from all targets add up, since the
-  firewall bans a range for all hosts (ports 80/443).
+  firewall bans a range for all hosts (TCP 80/443 and UDP 443, HTTP/3).
 - One thread follows each log (rotation handled); formats may differ from one log to another
   (the IP, the timestamp and the request line are needed).
 - The single `log` of `[fobots]` still works (a "default" target with no rules of its own),
@@ -390,6 +390,14 @@ inside it; an IP of the trap welcome list inside that /64 is left out of the ban
 are the opposite on purpose: their point is a load spread over many IPs of a range, which a ban
 per IP would not see (`ban_scope = observed` narrows them to the groups of IPs actually seen).
 
+**Ports.** A trap ban closes the web ports (TCP 80/443, UDP 443), like the rate bans. With
+`trap_scope = all`, it closes **every port** (SSH, mail…) from the first time, in sets of their
+own (`trapped4`, `trapped6`): a machine that scans the site will try the other services next.
+Except for the IPs of `welcome.txt`: they are banned on the web ports only, so that an
+administrator scanning their own site keeps SSH. Mind the shared addresses (carrier-grade NAT, a
+company or university NAT, a VPN exit): one infected machine behind them closes the whole server
+to all their users for the duration of the ban.
+
 **`welcome.txt` does not protect from traps**: it holds trusted networks, often internal ones, and attacks come from inside too. The traps have their own list, `trap_welcome.txt` next to the configuration (`trap_welcome` to move it): its IPs neither make a trap nor are flagged. Use it for the security scanners you accept (audit, monitoring, a pentest):
 
 ```
@@ -407,11 +415,12 @@ list on your own traffic.
 ```
 traps = yes          # in [fobots]: the daemon learns, per target, and writes <dir>/traps.json
 trap_ban = no        # yes: ban the flagged IPs (otherwise only logged)
+trap_scope = web     # all: every port, except for the IPs of welcome.txt
 fobots traps         # traps, shapes and flagged IPs from the daemon's snapshot
 fobots traps access.log other.log   # same, computed now from logs (no nft, no root)
 ```
 Options: `trap_min_ips`, `trap_min_nets`, `trap_window`, `trap_template_min`, `trap_hits`,
-`trap_scan_paths`, `trap_scan_segments`, `trap_scan_window`, `trap_ban_time`, `trap_ignore`, `trap_welcome`, `traps_file`. A crawler following dead links from many networks
+`trap_scan_paths`, `trap_scan_segments`, `trap_scan_window`, `trap_ban_time`, `trap_scope`, `trap_ignore`, `trap_welcome`, `traps_file`. A crawler following dead links from many networks
 looks like a scanner (put it in the welcome list or in `trap_ignore`). Not covered yet: a site
 that answers 200 to anything, and a scanner that stays under the scan thresholds (fewer than 20 paths in 5 minutes, or interleaved with answered requests).
 
@@ -494,6 +503,7 @@ the configuration file. **The command line overrides the configuration.** See
 | `prefix_threshold` | = `threshold` | req/s of an unresolved `/16` that allow RDAP |
 | `sustain`, `window` | 5, 60 | consecutive seconds above the threshold required; tracking window (s) |
 | `traps`, `trap_ban` | no, no | learns trap paths (404/403 asked for by many IPs) and flags the IPs asking for `trap_hits`; with `trap_ban` they are banned, otherwise only logged; see `fobots traps` |
+| `trap_scope` | `web` | ports closed to an IP banned by the traps: `web` (TCP 80/443, UDP 443) or `all` (every port, except for the IPs of `welcome.txt`) |
 | `trap_hits`, `trap_scan_paths`, `trap_scan_segments`, `trap_scan_window`, `trap_ban_time`, `trap_min_ips`, `trap_min_nets`, `trap_window`, `trap_template_min`, `trap_ignore`, `trap_welcome`, `traps_file` | 2, 20, 5, 5m, 1h, 5, 3, 6h, 3, none, `trap_welcome.txt` next to the configuration, `<dir>/traps.json` | tuning of the above |
 | `slow_threshold`, `slow_window` | 0, 10m | bans a range whose **average** rate over the window exceeds this (req/s); `0` = disabled |
 | `ban_time` | 1h | duration of a ban (`30m`, `1h`, `1d`) |
@@ -550,11 +560,13 @@ protected part.
 ## Reset
 
 ```
-nft flush set inet fobots banned4        # and banned6: all the bans, immediately
+nft flush set inet fobots banned4        # and banned6, trapped4, trapped6: all the bans, immediately
 nft list set inet fobots banned4         # see what is banned
 nft delete element inet fobots banned4 { 47.74.0.0/15 }
 nft delete table inet fobots             # remove everything (run `setup` again)
 ```
+`setup` also brings a table created by an older version up to date (UDP 443, the every-port
+sets) without losing its bans; the service runs it at each start and reload.
 The RDAP cache (`ip_ranges.json`) is independent: deleting it only forces the RDAP requests
 to be redone.
 

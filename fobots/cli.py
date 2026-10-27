@@ -43,7 +43,7 @@ from datetime import datetime
 from .analyse import Analysis, report
 from .config import find_config, load_config
 from .constants import CONF_DIR, STATE_DIR
-from .detector import OBSERVED_PREFIX6, OBSERVED_WIDE6, SCOPES, Detector
+from .detector import OBSERVED_PREFIX6, OBSERVED_WIDE6, SCOPES, TRAP_SCOPES, Detector
 from .events import read_events, trim_events
 from .follow import log_lines, run_sites, stdin_is_feed
 from .install import Installer
@@ -107,7 +107,8 @@ def cmd_run(args):
     nft = Nft(args.nft_bin, args.dry_run)
     try:
         for ver in (4, 6):
-            log.info("IPv%d: %d range(s) already banned", ver, len(nft.elements(ver)))
+            log.info("IPv%d: %d range(s) already banned, %d on every port", ver,
+                     len(nft.elements(ver)), len(nft.elements(ver, "all")))
     except NftError as e:
         log.error("nft: %s", e)
         return 1
@@ -181,6 +182,9 @@ def cmd_run(args):
         sites = []  # files given as arguments: read once, not followed
     for x in sites:
         log.info("target %s: following %s (%s)", x.name, x.log, x.describe())
+    if args.trap_scope not in TRAP_SCOPES:
+        log.error("invalid trap_scope: %r (%s)", args.trap_scope, " or ".join(TRAP_SCOPES))
+        return 1
     if args.ban_scope not in SCOPES:
         log.error("invalid ban_scope: %r (%s)", args.ban_scope, " or ".join(SCOPES))
         return 1
@@ -212,14 +216,17 @@ def cmd_run(args):
         log.info("trap paths: %d IP(s) from %d network(s) within %d s make a trap, an IP asking "
                  "for %d of them is %s, snapshot in %s", args.trap_min_ips, args.trap_min_nets,
                  args.trap_window, args.trap_hits,
-                 f"banned for {args.trap_ban_seconds} s (doubled on each repeat)" if args.trap_ban
+                 f"banned for {args.trap_ban_seconds} s (doubled on each repeat"
+                 + (", every port unless in welcome.txt)" if args.trap_scope == "all" else ", web ports)")
+                 if args.trap_ban
                  else "only logged (trap_ban is off)", trap_file)
     det = Detector(args.threshold, args.prefix_threshold or args.threshold, args.sustain,
                    args.window, store, Banner(nft, wl, args.ban_seconds), rdap,
                    load, args.min_threshold, args.min_ban_seconds, watch, watch_file,
                    ignore_path, sites, args.ban_scope, args.observed_prefix, args.observed_escalate,
                    args.observed_max_prefix, args.slow_threshold, args.slow_window,
-                   trap_conf, trap_file, args.trap_ban, args.trap_ban_seconds, trap_welcome)
+                   trap_conf, trap_file, args.trap_ban, args.trap_ban_seconds, trap_welcome,
+                   args.trap_scope)
     if det.observed:
         log.info("ban_scope observed: groups of IPs of at most /%d (IPv6 /%d), fallback to blocks "
                  "of %s if scattered or after %d partial bans", args.observed_prefix,
@@ -254,11 +261,12 @@ def cmd_setup(args):
     nft = Nft(args.nft_bin, args.dry_run)
     if args.dry_run:
         print(NFT_SETUP, end="")
-    elif nft.table_exists():
+    elif nft.table_up_to_date():
         print("table inet fobots already in place")
     else:
-        nft.setup()
-        print("table inet fobots created")
+        existed = nft.table_exists()
+        nft.setup()  # an older table gets its missing sets and rules, its bans are kept
+        print("table inet fobots updated (bans kept)" if existed else "table inet fobots created")
     return 0
 
 
@@ -267,10 +275,10 @@ def cmd_bans(args):
     nft = Nft(args.nft_bin, args.dry_run)
     cache, _ = paths(args)
     store = RangeStore(cache)
-    rows = [(n, exp) for ver in (4, 6)
-            for n, exp in sorted(nft.elements(ver), key=lambda e: e[0].network_address)]
+    rows = [(n, exp, scope) for scope in ("web", "all") for ver in (4, 6)
+            for n, exp in sorted(nft.elements(ver, scope), key=lambda e: e[0].network_address)]
     names = []
-    for n, _ in rows:
+    for n, _, _ in rows:
         r = store.find(n.network_address)
         if r and args.lookup and not store.name(r):
             try:
@@ -280,9 +288,10 @@ def cmd_bans(args):
             except (RdapError, ValueError) as e:
                 print(f"RDAP {n}: {e}", file=sys.stderr)
         names.append(store.name(r) if r else "")
-    for (n, exp), name in zip(rows, names):
+    for (n, exp, scope), name in zip(rows, names):
         left = "" if exp is None else f"{exp} s left"
-        print(f"{str(n):<24} {left:<12} {name}".rstrip())
+        ports = "all ports" if scope == "all" else "web"
+        print(f"{str(n):<24} {left:<12} {ports:<9} {name}".rstrip())
     return 0
 
 
@@ -337,7 +346,8 @@ def cmd_watched(args):
     if not args.dry_run:
         try:
             nft = Nft(args.nft_bin)
-            active = [(n, e) for ver in (4, 6) for n, e in nft.elements(ver)]
+            active = [(n, e) for scope in ("web", "all") for ver in (4, 6)
+                      for n, e in nft.elements(ver, scope)]
             known = True
         except NftError as e:
             print(f"ban state unavailable ({e}): STATE column unknown", file=sys.stderr)
@@ -434,6 +444,8 @@ def cmd_traps(args):
             for o in offenders[-args.top:]:
                 when = datetime.fromtimestamp(o["t"]).strftime("%Y-%m-%d %H:%M")
                 state = f"{o['seconds']} s" if o["banned"] else "not banned"
+                if o["banned"] and o.get("scope") == "all":
+                    state += " all"
                 what = f"scan, {o['rate']} paths: " if o.get("kind") == "scan" else ""
                 print(f"  {when:<16}  {o['ip']:<40} {o['strikes']:>5} {state:<12} "
                       f"{what}{', '.join(o['paths'][:4])}")
@@ -726,6 +738,10 @@ def add_trap_options(parser):
                         help="paths that are never traps (a [site:NAME] trap_ignore replaces it)")
     parser.add_argument("--trap-ban", action="store_true",
                         help="bans the flagged IPs (default: only logs them)")
+    parser.add_argument("--trap-scope", choices=TRAP_SCOPES, default="web",
+                        help="ports closed to a banned IP: web (TCP 80/443, UDP 443, default) or "
+                             "all (every port, from the first time, except for the IPs of "
+                             "welcome.txt, which keep the other ports)")
     parser.add_argument("--trap-ban-time", dest="trap_ban_seconds", type=parse_duration,
                         default=3600, metavar="DURATION",
                         help="first ban of a flagged IP, doubled each time it comes back, "
@@ -843,7 +859,7 @@ def main(argv=None):
     r.set_defaults(fn=cmd_run)
 
     sub.add_parser("setup", parents=[common],
-                   help="creates the nft table if absent").set_defaults(fn=cmd_setup)
+                   help="creates the nft table, or completes an older one (idempotent)").set_defaults(fn=cmd_setup)
     b = sub.add_parser("bans", parents=[common], help="lists the active bans, with the organisation")
     b.add_argument("--no-lookup", dest="lookup", action="store_false",
                    help="does not ask RDAP for the organisation of ranges missing from the cache "

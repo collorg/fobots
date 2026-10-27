@@ -45,8 +45,10 @@ section() { echo; echo "== $1"; }
 fobots() { "$ROOT/fobots.py" "$@" -f "$W/fobots.conf" --nft-bin "$NFT"; }
 
 # Elements of the real set, as CIDRs, one per line (read with the program's own parser).
+# Arg 1: 4 or 6 (banned4/6, web ports), or the name of a set (trapped4…).
 elems() {
-    "$NFT" -j list set inet fobots "banned$1" | python3 -c "
+    case $1 in [46]) set -- "banned$1" ;; esac
+    "$NFT" -j list set inet fobots "$1" | python3 -c "
 import json, sys
 sys.path.insert(0, '$ROOT')
 from fobots.nft import parse_elems
@@ -97,9 +99,32 @@ PY
 : > "$W/welcome.txt"
 # one burst is enough here; the scenarios ban whole allocations unless they say --ban-scope observed
 run() { fobots run --dir "$W" --cache "$W/ranges.json" -w "$W/welcome.txt" --sustain 1 --ban-scope allocation "$@" 2>"$W/err"; }
-reset() { "$NFT" flush set inet fobots banned4; "$NFT" flush set inet fobots banned6; }
+reset() { local s; for s in banned4 banned6 trapped4 trapped6; do "$NFT" flush set inet fobots $s; done; }
+drops() { "$NFT" list chain inet fobots input | grep -c ' drop$'; }
 
 echo "nft: $("$NFT" --version)   kernel: $(uname -r)"
+
+section "setup completes a table of an older version (bans kept)"
+"$NFT" -f - <<'NFT'
+add table inet fobots
+add set inet fobots banned4 { type ipv4_addr; flags interval,timeout; }
+add set inet fobots banned6 { type ipv6_addr; flags interval,timeout; }
+add chain inet fobots input { type filter hook input priority -10; policy accept; }
+add rule inet fobots input tcp dport { 80, 443 } ip saddr @banned4 drop
+add rule inet fobots input tcp dport { 80, 443 } ip6 saddr @banned6 drop
+add element inet fobots banned4 { 43.9.9.0/24 timeout 1h }
+NFT
+out=$(fobots setup --dir "$W" 2>&1)
+case $out in *"updated (bans kept)"*) ok "setup updates it" ;; *) bad "setup updates it ($out)" ;; esac
+has "the ban of the older table is kept" 43.9.9.0/24
+chain=$("$NFT" list chain inet fobots input)
+case $chain in *"udp dport 443 ip saddr @banned4 drop"*) ok "HTTP/3 (UDP 443) is blocked" ;; *) bad "HTTP/3 (UDP 443) is blocked ($chain)" ;; esac
+case $chain in *"ip saddr @trapped4 drop"*) ok "the every-port set is wired" ;; *) bad "the every-port set is wired ($chain)" ;; esac
+equal "6 rules, none duplicated" "$(drops)" 6
+out=$(fobots setup --dir "$W" 2>&1)
+case $out in *"already in place"*) ok "setup is then idempotent" ;; *) bad "setup is then idempotent ($out)" ;; esac
+equal "still 6 rules" "$(drops)" 6
+"$NFT" delete table inet fobots
 
 section "setup"
 fobots setup --dir "$W" >/dev/null 2>&1 && ok "setup creates the table" || bad "setup creates the table"
@@ -178,6 +203,28 @@ mklog "$W/log" $(seq_ips 2a00:1450::1: 1 8 | sed 's/::1:\([0-9]*\)/::\1/')
 run -t 5 "$W/log"
 equal "exit status" $? 0
 has "the IPv6 allocation is banned" 2a00:1450::/32 6
+
+section "trap_scope = all: every port, except for the IPs of welcome.txt"
+reset
+python3 - "$W/log" <<'PY'
+import sys
+with open(sys.argv[1], "w") as f:
+    for s, path in enumerate(("/.env", "/wp-login.php")):
+        for ip in ("20.1.1.1", "30.1.1.1", "40.1.1.1", "50.1.1.1", "60.1.1.1"):
+            f.write(f'{ip} - - [14/Oct/2026:10:00:0{s} +0000] "GET {path} HTTP/1.1" 404 10 "-" "it"\n')
+PY
+echo 20.1.1.1 > "$W/welcome-traps.txt"
+fobots run --dir "$W" --cache "$W/ranges.json" -w "$W/welcome-traps.txt" -t 1000 \
+    --traps --trap-ban --trap-scope all "$W/log" 2>"$W/err"
+equal "exit status" $? 0
+has "a flagged IP is banned on every port" 30.1.1.1/32 trapped4
+has "... and the others too" 60.1.1.1/32 trapped4
+has "the IP of welcome.txt is banned on the web ports only" 20.1.1.1/32 4
+hasnt "... and keeps the other ports" 20.1.1.1/32 trapped4
+out=$(fobots bans --dir "$W" --no-lookup 2>&1)
+case $out in *"30.1.1.1/32"*"all ports"*) ok "fobots bans shows the scope" ;; *) bad "fobots bans shows the scope ($out)" ;; esac
+fobots welcome add 30.1.1.1 --dir "$W" -w "$W/welcome-traps.txt" >/dev/null 2>&1
+hasnt "welcome add clears the every-port set" 30.1.1.1/32 trapped4
 
 section "expiry (real kernel timeout)"
 reset

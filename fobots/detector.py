@@ -55,6 +55,8 @@ SLOW_BUCKET = 10               # seconds per bucket of the average-rate window
 
 SCOPES = ("allocation", "observed")
 
+TRAP_SCOPES = ("web", "all")  # ports closed to an IP flagged by the traps
+
 
 
 class Detector:
@@ -62,7 +64,7 @@ class Detector:
                  load=None, min_threshold=1.0, min_ban_seconds=60, watch=None,
                  watch_file=None, ignore_path=None, sites=(), scope="observed",
                  observed_prefix=20, escalate=4, wide_prefix=16, slow_threshold=0,
-                 slow_window=600, trap_conf=None, trap_file=None, trap_ban=False, trap_ban_seconds=3600, trap_welcome=None):
+                 slow_window=600, trap_conf=None, trap_file=None, trap_ban=False, trap_ban_seconds=3600, trap_welcome=None, trap_scope="web"):
         self.base_threshold, self.base_prefix_threshold = threshold, prefix_threshold
         self.load, self.min_threshold, self.min_ban = load or NoLoad(), min_threshold, min_ban_seconds
         self.sustain, self.window = sustain, window
@@ -97,6 +99,7 @@ class Detector:
         self.learners = {}            # target name -> TrapLearner
         self.trap_state = self.load_traps() if trap_conf is not None else {}  # target -> saved
         self.trap_welcome = trap_welcome  # Welcome list of the traps only (not welcome.txt)
+        self.trap_scope = trap_scope      # "web": HTTP ports only; "all": every port (see react_traps)
         self.welcomed_memo, self.welcomed_version = {}, None
         self.last_trap_save = 0
 
@@ -245,7 +248,9 @@ class Detector:
     def react_traps(self, learner, name):
         """Bans (or, until trap_ban is on, only logs) the IPs flagged for asking for several
         trap paths. The IP alone is banned (IPv6: its /64), never the allocation: the signal
-        is individual. Repeat offenders get twice the previous duration, up to TRAP_BAN_MAX."""
+        is individual. Repeat offenders get twice the previous duration, up to TRAP_BAN_MAX.
+        With trap_scope = all, every port is closed to it, from the first time, unless it is in
+        welcome.txt: an administrator scanning their own site must keep SSH (web ports only)."""
         for off in learner.take_offenders():
             ip, seconds = off["ip"], min(self.trap_ban_seconds * 2 ** (off["strikes"] - 1),
                                          TRAP_BAN_MAX)
@@ -257,18 +262,28 @@ class Detector:
                           f"({', '.join(off['paths'][:3])}), time {off['strikes']}")
             addr = ipaddress.ip_address(ip)
             net = ipaddress.ip_network((addr, 32 if addr.version == 4 else 64), strict=False)
+            scope = self.trap_scope
+            if scope == "all" and self.in_welcome(net):
+                scope = "web"
+                reason += ", web ports only: in welcome.txt"
             if self.trap_ban:
                 try:
                     off["banned"] = self.banner.ban(
                         (addr.version, int(net.network_address), int(net.broadcast_address)),
-                        reason, seconds, welcome=self.trap_welcome or NO_WELCOME)
+                        reason, seconds, welcome=self.trap_welcome or NO_WELCOME, scope=scope)
                 except NftError as e:
                     log.error("cannot ban %s: %s", net, e)
             else:
-                log.warning("TRAP %s would be banned for %d s (%s); trap_ban is off", net,
-                            seconds, reason)
-            off["seconds"] = seconds
+                log.warning("TRAP %s would be banned for %d s%s (%s); trap_ban is off", net,
+                            seconds, ", all ports" if scope == "all" else "", reason)
+            off["seconds"], off["scope"] = seconds, scope
             learner.mute(ip, off["t"] + seconds)
+
+    def in_welcome(self, net):
+        """Does `net` touch welcome.txt (the welcome list of the bans)?"""
+        wl = self.banner.welcome
+        wl.reload()
+        return any(w.version == net.version and net.overlaps(w) for w in wl.nets)
 
     def load_traps(self):
         """What the previous run saved, per target ({} if nothing usable)."""

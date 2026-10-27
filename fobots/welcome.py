@@ -65,9 +65,10 @@ class Banner:
     def __init__(self, nft, welcome, ban_seconds):
         self.nft, self.welcome, self.ban_seconds = nft, welcome, ban_seconds
 
-    def ban(self, rng, reason, seconds=None, welcome=None):
+    def ban(self, rng, reason, seconds=None, welcome=None, scope="web"):
         """Bans the range (outside the welcome list, without duplicates or nft conflicts).
-        `welcome`: another list than the usual one (trap bans have their own)."""
+        `welcome`: another list than the usual one (trap bans have their own).
+        `scope`: "web" (HTTP ports) or "all" (every port, a set of its own)."""
         seconds = seconds or self.ban_seconds
         welcome = welcome or self.welcome
         welcome.reload()
@@ -80,7 +81,7 @@ class Banner:
             log.info("%s: entirely in the welcome list, no ban", fmt_range(rng))
             return False
         for attempt in (1, 2):
-            elems = self.nft.elements(ver)
+            elems = self.nft.elements(ver, scope)
             existing = [n for n, _ in elems]
             adds, deletes = [], set()
             for p in pieces:
@@ -93,32 +94,37 @@ class Banner:
                 return False
             try:
                 restore = [(n, e or seconds) for n, e in elems if n in deletes]
-                self.nft.apply(ver, sorted(deletes, key=lambda n: n.network_address), adds, restore)
+                self.nft.apply(ver, sorted(deletes, key=lambda n: n.network_address), adds, restore,
+                               scope)
                 break
             except NftError as e:
                 # often an element expired between the read and the removal: read again
                 log.warning("nft refused (attempt %d): %s", attempt, e)
                 if attempt == 2:
                     raise
-        log.info("BAN %s for %d s (%s)%s", ", ".join(str(a) for a, _ in adds),
-                 seconds, reason,
+        log.info("BAN %s for %d s%s (%s)%s", ", ".join(str(a) for a, _ in adds),
+                 seconds, ", all ports" if scope == "all" else "", reason,
                  f", {len(deletes)} included ban(s) replaced" if deletes else "")
         return True
 
 
 
 def welcome_add(nft, net, ban_seconds):
-    """Removes from the sets the bans that touch `net`; keeps the rest of the wider ones."""
+    """Removes from the sets (web and all ports) the bans that touch `net`; keeps the rest of
+    the wider ones."""
     ver = net.version
-    existing = nft.elements(ver)
-    deletes, adds, restore = [], [], []
-    for e, exp in existing:
-        if not e.overlaps(net):
-            continue
-        deletes.append(e)
-        restore.append((e, exp or ban_seconds))
-        if not e.subnet_of(net):  # `net` is strictly inside e: look at the rest
-            adds += [(p, exp or ban_seconds) for p in e.address_exclude(net)]
-    if deletes:
-        nft.apply(ver, deletes, adds, restore)
-    return deletes, adds
+    all_deletes, all_adds = [], []
+    for scope in ("web", "all"):
+        deletes, adds, restore = [], [], []
+        for e, exp in nft.elements(ver, scope):
+            if not e.overlaps(net):
+                continue
+            deletes.append(e)
+            restore.append((e, exp or ban_seconds))
+            if not e.subnet_of(net):  # `net` is strictly inside e: look at the rest
+                adds += [(p, exp or ban_seconds) for p in e.address_exclude(net)]
+        if deletes:
+            nft.apply(ver, deletes, adds, restore, scope)
+        all_deletes += deletes
+        all_adds += adds
+    return all_deletes, all_adds

@@ -292,7 +292,7 @@ log = /var/log/nginx/api.access.log
 - Les alias CNAME d'un hôte n'ont aucun effet : ils aboutissent dans le même log, donc
   dans la même cible. Le nom d'hôte n'est jamais lu dans les lignes.
 - Le **comptage reste global par plage d'IP** : les requêtes de toutes les cibles
-  s'additionnent, puisque le pare-feu bannit une plage pour tous les hôtes (ports 80/443).
+  s'additionnent, puisque le pare-feu bannit une plage pour tous les hôtes (TCP 80/443 et UDP 443, HTTP/3).
 - Un thread suit chaque log (rotation gérée) ; les formats peuvent différer d'un log à
   l'autre (il faut l'IP, l'horodatage et la ligne de requête).
 - Le `log` unique de `[fobots]` fonctionne toujours (cible « default » sans règle propre),
@@ -408,6 +408,14 @@ bans de débit sont l'inverse, volontairement : leur raison d'être est une char
 beaucoup d'IP d'une plage, que le ban par IP ne verrait pas (`ban_scope = observed` les restreint
 aux groupes d'IP réellement vus).
 
+**Ports.** Un ban de piège ferme les ports web (TCP 80/443, UDP 443), comme les bans de débit.
+Avec `trap_scope = all`, il ferme **tous les ports** (SSH, mail…) dès la première fois, dans des
+sets à part (`trapped4`, `trapped6`) : une machine qui scanne le site essaiera ensuite les autres
+services. Sauf pour les IP de `welcome.txt` : elles ne sont bannies que sur les ports web, pour
+qu'un administrateur qui scanne son propre site garde SSH. Attention aux adresses partagées (CGNAT,
+NAT d'entreprise ou d'université, sortie de VPN) : une seule machine infectée derrière ferme tout
+le serveur à tous leurs utilisateurs pendant la durée du ban.
+
 **`welcome.txt` ne protège pas des pièges** : elle contient des réseaux de confiance, souvent internes, et les attaques viennent aussi de l'intérieur. Les pièges ont leur propre liste, `trap_welcome.txt` à côté de la configuration (`trap_welcome` pour la déplacer) : ses IP ne fabriquent pas de piège et ne sont jamais signalées. À réserver aux scanners de sécurité que l'on accepte (audit, supervision, test d'intrusion) :
 
 ```
@@ -425,11 +433,12 @@ signalée est seulement journalisée (`TRAP … would be banned`) et listée par
 ```
 traps = yes          # dans [fobots] : le démon apprend, par cible, et écrit <dir>/traps.json
 trap_ban = no        # yes : bannit les IP signalées (sinon, journal seulement)
+trap_scope = web     # all : tous les ports, sauf pour les IP de welcome.txt
 fobots traps         # pièges, formes et IP signalées, d'après l'instantané du démon
 fobots traps access.log autre.log   # idem, calculé maintenant depuis des logs (ni nft, ni root)
 ```
 Options : `trap_min_ips`, `trap_min_nets`, `trap_window`, `trap_template_min`, `trap_hits`,
-`trap_scan_paths`, `trap_scan_segments`, `trap_scan_window`, `trap_ban_time`, `trap_ignore`, `trap_welcome`, `traps_file`. Un robot d'indexation qui suit des liens morts
+`trap_scan_paths`, `trap_scan_segments`, `trap_scan_window`, `trap_ban_time`, `trap_scope`, `trap_ignore`, `trap_welcome`, `traps_file`. Un robot d'indexation qui suit des liens morts
 depuis plusieurs réseaux ressemble à un scanner (le mettre dans la liste welcome ou dans
 `trap_ignore`). Pas encore couvert : un site qui répond 200 à tout, et un scanner qui reste sous les
 seuils du scan (moins de 20 chemins en 5 minutes, ou mêlés de requêtes répondues).
@@ -515,6 +524,7 @@ conf.** Voir `fobots.conf.example` pour toutes les clés :
 | `prefix_threshold` | = `threshold` | req/s d'un `/16` non résolu qui autorisent RDAP |
 | `sustain`, `window` | 5, 60 | secondes consécutives au-dessus du seuil exigées ; fenêtre de suivi (s) |
 | `traps`, `trap_ban` | non, non | apprend les chemins pièges (404/403 demandés par beaucoup d'IP) et signale les IP qui en demandent `trap_hits` ; avec `trap_ban` elles sont bannies, sinon seulement journalisées ; voir `fobots traps` |
+| `trap_scope` | `web` | ports fermés à une IP bannie par les pièges : `web` (TCP 80/443, UDP 443) ou `all` (tous les ports, sauf pour les IP de `welcome.txt`) |
 | `trap_hits`, `trap_scan_paths`, `trap_scan_segments`, `trap_scan_window`, `trap_ban_time`, `trap_min_ips`, `trap_min_nets`, `trap_window`, `trap_template_min`, `trap_ignore`, `trap_welcome`, `traps_file` | 2, 20, 5, 5m, 1h, 5, 3, 6h, 3, aucun, `trap_welcome.txt` à côté de la configuration, `<dir>/traps.json` | réglages de ce qui précède |
 | `slow_threshold`, `slow_window` | 0, 10m | bannit une plage dont le débit **moyen** sur la fenêtre dépasse cette valeur (req/s) ; `0` = désactivé |
 | `ban_time` | 1h | durée d'un ban (`30m`, `1h`, `1d`) |
@@ -573,11 +583,13 @@ Une plage bannie qui recoupe la liste welcome l'est sans la partie protégée.
 ## Remise à zéro
 
 ```
-nft flush set inet fobots banned4        # et banned6 : tous les bans, immédiat
+nft flush set inet fobots banned4        # et banned6, trapped4, trapped6 : tous les bans, immédiat
 nft list set inet fobots banned4         # voir ce qui est banni
 nft delete element inet fobots banned4 { 47.74.0.0/15 }
 nft delete table inet fobots             # tout retirer (refaire `setup`)
 ```
+`setup` met aussi à jour une table créée par une version précédente (UDP 443, les sets tous ports)
+sans perdre ses bans ; le service le lance à chaque démarrage et rechargement.
 Le cache RDAP (`ip_ranges.json`) est indépendant : le supprimer force à refaire
 les requêtes RDAP, rien de plus.
 
