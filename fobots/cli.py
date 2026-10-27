@@ -382,7 +382,8 @@ def cmd_watched(args):
 def trap_options(args):
     return {"min_ips": args.trap_min_ips, "min_nets": args.trap_min_nets,
             "window": args.trap_window, "template_min": args.trap_template_min,
-            "hits": args.trap_hits,
+            "hits": args.trap_hits, "burst": args.trap_burst,
+            "burst_sustain": args.trap_burst_sustain,
             "ignore": re.compile(args.trap_ignore) if args.trap_ignore else None}
 
 
@@ -432,8 +433,9 @@ def cmd_traps(args):
             for o in offenders[-args.top:]:
                 when = datetime.fromtimestamp(o["t"]).strftime("%Y-%m-%d %H:%M")
                 state = f"{o['seconds']} s" if o["banned"] else "not banned"
+                what = f"burst {o['rate']}/s: " if o.get("kind") == "burst" else ""
                 print(f"  {when:<16}  {o['ip']:<40} {o['strikes']:>5} {state:<12} "
-                      f"{', '.join(o['paths'][:4])}")
+                      f"{what}{', '.join(o['paths'][:4])}")
         if offenders:
             cmd = "fobots welcome add --traps " + " ".join(sorted({o["ip"] for o in offenders}))
             if args.config:
@@ -711,6 +713,11 @@ def add_trap_options(parser):
     parser.add_argument("--trap-hits", type=int, default=2, metavar="N",
                         help="an IP is flagged once it asked for this many distinct traps "
                              "(default: 2)")
+    parser.add_argument("--trap-burst", type=float, default=5, metavar="REQ_PER_S",
+                        help="an IP asking for more than this many missing paths per second, "
+                             "none answered, is flagged (0 = off, default: 5)")
+    parser.add_argument("--trap-burst-sustain", type=int, default=3, metavar="SECONDS",
+                        help="... for this many consecutive seconds (default: 3)")
     parser.add_argument("--trap-ignore", metavar="REGEX",
                         help="paths that are never traps (a [site:NAME] trap_ignore replaces it)")
     parser.add_argument("--trap-ban", action="store_true",

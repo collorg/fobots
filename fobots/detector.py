@@ -238,8 +238,12 @@ class Detector:
         for off in learner.take_offenders():
             ip, seconds = off["ip"], min(self.trap_ban_seconds * 2 ** (off["strikes"] - 1),
                                          TRAP_BAN_MAX)
-            reason = (f"trap paths on {name}: {len(off['paths'])} distinct "
-                      f"({', '.join(off['paths'][:3])}), time {off['strikes']}")
+            if off.get("kind") == "burst":
+                reason = (f"burst of missing paths on {name}: {off['rate']} req/s, none "
+                          f"answered ({', '.join(off['paths'][:3])}), time {off['strikes']}")
+            else:
+                reason = (f"trap paths on {name}: {len(off['paths'])} distinct "
+                          f"({', '.join(off['paths'][:3])}), time {off['strikes']}")
             addr = ipaddress.ip_address(ip)
             net = ipaddress.ip_network((addr, 32 if addr.version == 4 else 64), strict=False)
             if self.trap_ban:

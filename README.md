@@ -367,6 +367,15 @@ What the site really serves protects against false positives:
 - `trap_ignore` (regex, global or in a `[site:NAME]` section, which then replaces it) adds
   paths that are never traps.
 
+**Second signal: a burst of missing paths.** A scanner walking a dictionary sends a stream of
+requests that all get a 404/403. An IP that asks for more than `trap_burst` (5) missing paths
+per second for `trap_burst_sustain` (3) consecutive seconds, **without a single answered
+request** in those seconds, is flagged at once, from the very first scanner (no need for other
+IPs to have asked for the same paths). The sustain and the "no answer" rule keep out a page
+whose assets are broken (the HTML was answered, and it is over in a second). Requests that
+are never traps (favicon…, shapes the site serves, `trap_ignore`) and the trap welcome list do
+not count. `trap_burst = 0` turns it off.
+
 **Reaction.** An IP that asked for `trap_hits` (2) distinct traps is flagged, including the ones
 that made the traps. The first signal is individual, so the ban is too: the IP alone (IPv6: its
 /64), never its RDAP allocation, for `trap_ban_time` (1 h), doubled each time it comes back
@@ -398,9 +407,9 @@ fobots traps         # traps, shapes and flagged IPs from the daemon's snapshot
 fobots traps access.log other.log   # same, computed now from logs (no nft, no root)
 ```
 Options: `trap_min_ips`, `trap_min_nets`, `trap_window`, `trap_template_min`, `trap_hits`,
-`trap_ban_time`, `trap_ignore`, `traps_file`. A crawler following dead links from many networks
+`trap_burst`, `trap_burst_sustain`, `trap_ban_time`, `trap_ignore`, `trap_welcome`, `traps_file`. A crawler following dead links from many networks
 looks like a scanner (put it in the welcome list or in `trap_ignore`). Not covered yet: a site
-that answers 200 to anything, and a first scanner (a trap exists only once others asked for it).
+that answers 200 to anything, and a slow scanner: a trap exists only once other IPs asked for it, and the burst only sees the fast ones.
 
 ## Spotting legitimate IPs caught in a ban (CI runners…)
 
@@ -479,7 +488,7 @@ the configuration file. **The command line overrides the configuration.** See
 | `prefix_threshold` | = `threshold` | req/s of an unresolved `/16` that allow RDAP |
 | `sustain`, `window` | 5, 60 | consecutive seconds above the threshold required; tracking window (s) |
 | `traps`, `trap_ban` | no, no | learns trap paths (404/403 asked for by many IPs) and flags the IPs asking for `trap_hits`; with `trap_ban` they are banned, otherwise only logged; see `fobots traps` |
-| `trap_hits`, `trap_ban_time`, `trap_min_ips`, `trap_min_nets`, `trap_window`, `trap_template_min`, `trap_ignore`, `trap_welcome`, `traps_file` | 2, 1h, 5, 3, 6h, 3, none, `trap_welcome.txt` next to the configuration, `<dir>/traps.json` | tuning of the above |
+| `trap_hits`, `trap_burst`, `trap_burst_sustain`, `trap_ban_time`, `trap_min_ips`, `trap_min_nets`, `trap_window`, `trap_template_min`, `trap_ignore`, `trap_welcome`, `traps_file` | 2, 5, 3, 1h, 5, 3, 6h, 3, none, `trap_welcome.txt` next to the configuration, `<dir>/traps.json` | tuning of the above |
 | `slow_threshold`, `slow_window` | 0, 10m | bans a range whose **average** rate over the window exceeds this (req/s); `0` = disabled |
 | `ban_time` | 1h | duration of a ban (`30m`, `1h`, `1d`) |
 | `ban_scope` | `allocation` | `allocation`: ban the whole RDAP range; `observed`: only the groups of IPs seen inside it |

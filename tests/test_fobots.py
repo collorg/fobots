@@ -1531,6 +1531,57 @@ class TrapLearning(unittest.TestCase):
         self.assertEqual([e["path"] for e in tl.found()], ["/favicon.ico.bak"])
         self.assertEqual(tl.ignored, 25)
 
+    def burst(self, tl, ip, secs, per_sec, status=404, start=1000):
+        for s in range(secs):
+            for i in range(per_sec):
+                tl.feed(ip, start + s, f"/p{s}-{i}", status)
+
+    def test_a_sustained_burst_of_missing_paths_flags_the_ip(self):
+        tl = self.learner()
+        self.burst(tl, "20.1.1.1", 2, 8)
+        self.assertEqual(tl.take_offenders(), [])  # 2 s: could be a page with broken assets
+        self.burst(tl, "20.1.1.1", 1, 5, start=1002)
+        self.assertEqual(tl.take_offenders(), [])  # the 3rd second has not passed 5 yet
+        tl.feed("20.1.1.1", 1002, "/one-more", 404)
+        off = tl.take_offenders()
+        self.assertEqual([(o["ip"], o["kind"], o["strikes"]) for o in off],
+                         [("20.1.1.1", "burst", 1)])
+        self.assertEqual(off[0]["rate"], 6)
+        self.assertEqual(len(off[0]["paths"]), 3)
+
+    def test_a_burst_needs_more_than_the_rate_and_no_answer(self):
+        tl = self.learner()
+        self.burst(tl, "20.1.1.1", 6, 5)   # exactly 5/s is not "more than 5"
+        for s in range(6):                  # an answered request in each second
+            tl.feed("30.1.1.1", 2000 + s, "/", 200)
+            for i in range(8):
+                tl.feed("30.1.1.1", 2000 + s, f"/m{s}-{i}", 404)
+        self.assertEqual(tl.take_offenders(), [])
+        self.burst(tl, "40.1.1.1", 3, 8, start=3000)
+        self.assertEqual([o["ip"] for o in tl.take_offenders()], ["40.1.1.1"])
+        tl2 = self.learner()
+        for s in (3000, 3002, 3004, 3006):
+            for i in range(8):
+                tl2.feed("50.1.1.1", s, f"/g{s}-{i}", 404)
+        self.assertEqual(tl2.take_offenders(), [])  # not consecutive seconds
+
+    def test_burst_ignores_excused_welcome_and_private_requests(self):
+        tl = self.learner(exempt=lambda ip: ip == "20.1.1.1")
+        for i in range(3):
+            tl.feed("8.8.8.8", i, f"/post/{UID[:-1]}{i}", 200)
+        for s in range(5):
+            for i in range(8):
+                tl.feed("30.1.1.1", 1000 + s, f"/post/{UID[:-2]}{i:02d}", 404)  # deleted posts
+                tl.feed("30.1.1.1", 1000 + s, "/favicon.ico", 404)
+                tl.feed("20.1.1.1", 1000 + s, f"/w{s}-{i}", 404)                # welcome list
+                tl.feed("10.0.0.5", 1000 + s, f"/q{s}-{i}", 404)                # private
+        self.assertEqual(tl.take_offenders(), [])
+
+    def test_burst_can_be_switched_off(self):
+        tl = self.learner(burst=0)
+        self.burst(tl, "20.1.1.1", 6, 20)
+        self.assertEqual(tl.take_offenders(), [])
+
     def test_state_survives_json_and_a_restart(self):
         tl = self.learner(hits=2)
         for i in range(3):
@@ -1733,6 +1784,14 @@ class TrapDetector(DetectorBase):
         with self.assertLogs("fobots", "WARNING"):
             det.feed_line(req("8.8.8.8", 1, "/", 200))
         self.assertEqual(det.learners["default"].lines, 1)
+
+    def test_a_burst_gets_the_ip_banned_alone(self):
+        det = self.detector(trap_conf={}, trap_ban=True, trap_ban_seconds=300)
+        for s in range(3):
+            for i in range(8):
+                det.feed_line(req("20.1.1.1", s, f"/p{s}-{i}", 404))
+        self.assertEqual(self.nft.banned(), ["20.1.1.1/32"])
+        self.assertEqual([e for _, e in self.nft.sets[4]], [300])
 
     def test_disabled_by_default(self):
         det = self.detector()

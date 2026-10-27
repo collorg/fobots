@@ -9,6 +9,10 @@ replaces the variable segments by a type (`/post/{uuid}`), so that a deleted pos
 for a vulnerability scan. Only fixed types are learned (no free regular expression): a segment
 with `..`, `%`, `.env`, `.git`… never matches one.
 
+A second, independent signal: a burst of missing paths (more than `burst` per second, for
+`burst_sustain` consecutive seconds, none of them answered) is what a scanner walking a
+dictionary looks like, from the very first one.
+
 This module only observes and decides who deserves a ban; the Detector acts (or only logs, until
 `trap_ban` is on). An IP is flagged once it has asked for `hits` distinct established traps.
 `fobots traps` shows what was learned and who was flagged."""
@@ -98,12 +102,14 @@ class TrapLearner:
     """The routes of one site: what it serves, and which missing routes many IPs ask for."""
 
     def __init__(self, min_ips=5, min_nets=3, window=6 * 3600, template_min=3, hits=2,
-                 ignore=None, exempt=None):
+                 ignore=None, exempt=None, burst=5, burst_sustain=3):
         self.min_ips, self.min_nets = min_ips, min_nets
         self.window, self.template_min = window, template_min
         self.hits = hits        # distinct established traps asked for before an IP is flagged
         self.ignore = ignore    # regex: matching paths are never traps (written by hand)
         self.exempt = exempt    # ip -> bool: welcome list, never counted nor flagged
+        self.burst, self.burst_sustain = burst, burst_sustain  # 0 = no burst detection
+        self.bursts = {}        # ip -> [second, failures that second, answered?, streak, paths]
         self.established = set()  # trap paths that meet the thresholds now
         self.scores = {}        # ip -> {trap path: last second}
         self.muted = {}         # ip -> second until which it is not flagged again
@@ -133,6 +139,10 @@ class TrapLearner:
                 self.purge()
         if status < 400 or status in EXTRA_EXISTS:
             self.learn_served(*shape(path))
+            b = self.bursts.get(ip)
+            if b is not None:  # an answered request voids the second: a page, not a scan
+                self.roll(b, sec)
+                b[2] = True
         elif status in FAILED:
             self.learn_missing(ip, sec, *shape(path))
 
@@ -170,6 +180,8 @@ class TrapLearner:
         if self.exempt is not None and self.exempt(ip):
             self.welcomed += 1
             return
+        if self.burst:
+            self.note_burst(ip, sec, p)
         t = self.traps.get(p)
         if t is None:
             if len(self.traps) >= MAX_TRAPS:
@@ -185,6 +197,40 @@ class TrapLearner:
             for other, s in list(t[1].items()):
                 if s >= sec - self.window:
                     self.credit(other, s, p)
+
+    def roll(self, b, sec):
+        """Moves the IP's counters to second `sec`: the streak goes on only if the second just
+        ended had more than `burst` failures and no answered request, right before."""
+        if sec > b[0]:  # (a line a second late, out of order in the log, changes nothing)
+            qualified = b[1] > self.burst and not b[2]
+            b[3] = b[3] + 1 if qualified and sec == b[0] + 1 else 0
+            b[0], b[1], b[2] = sec, 0, False
+
+    def note_burst(self, ip, sec, p):
+        """A missing path (not excused, not ignored) asked for by `ip`."""
+        if self.muted.get(ip, 0) > sec:
+            return
+        b = self.bursts.get(ip)
+        if b is None:
+            if len(self.bursts) >= MAX_SCORES:
+                return
+            b = self.bursts[ip] = [sec, 0, False, 0, []]
+        self.roll(b, sec)
+        b[1] += 1
+        if len(b[4]) < 3 and p not in b[4]:
+            b[4].append(p)
+        if b[1] > self.burst and not b[2] and b[3] + 1 >= self.burst_sustain:
+            self.flag(ip, sec, list(b[4]), "burst", rate=b[1])
+            del self.bursts[ip]
+
+    def flag(self, ip, sec, paths, kind, rate=0):
+        """The IP deserves a ban: the Detector decides (see `take_offenders`)."""
+        n = self.strikes.get(ip, [0, 0])[0] + 1
+        self.strikes[ip] = [n, sec]
+        off = {"ip": ip, "paths": paths, "t": sec, "strikes": n, "banned": False,
+               "seconds": 0, "kind": kind, "rate": rate}
+        self.pending.append(off)
+        self.offenders = (self.offenders + [off])[-MAX_OFFENDERS:]
 
     def qualifies(self, ips, cutoff):
         """Enough recent IPs, from enough networks?"""
@@ -204,13 +250,8 @@ class TrapLearner:
         cutoff = sec - self.window
         recent = sorted(q for q, s in h.items() if s >= cutoff)
         if len(recent) >= self.hits:
-            n = self.strikes.get(ip, [0, 0])[0] + 1
-            self.strikes[ip] = [n, sec]
             del self.scores[ip]
-            off = {"ip": ip, "paths": recent, "t": sec, "strikes": n, "banned": False,
-                   "seconds": 0}
-            self.pending.append(off)
-            self.offenders = (self.offenders + [off])[-MAX_OFFENDERS:]
+            self.flag(ip, sec, recent, "traps")
 
     def take_offenders(self):
         out, self.pending = self.pending, []
@@ -230,6 +271,7 @@ class TrapLearner:
                 del self.traps[p]
         self.established = {p for p in self.established
                             if p in self.traps and self.qualifies(self.traps[p][1], cutoff)}
+        self.bursts = {ip: b for ip, b in self.bursts.items() if b[0] >= self.latest - 60}
         for ip in list(self.scores):
             h = self.scores[ip] = {q: s for q, s in self.scores[ip].items() if s >= cutoff}
             if not h:

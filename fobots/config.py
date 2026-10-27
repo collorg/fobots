@@ -34,6 +34,7 @@ CONF_KEYS = {  # file key -> (argparse destination, conversion)
     "trap_min_ips": ("trap_min_ips", int), "trap_min_nets": ("trap_min_nets", int),
     "trap_window": ("trap_window", parse_duration), "trap_template_min": ("trap_template_min", int),
     "traps_file": ("traps_file", str), "trap_welcome": ("trap_welcome", str), "trap_hits": ("trap_hits", int),
+    "trap_burst": ("trap_burst", float), "trap_burst_sustain": ("trap_burst_sustain", int),
     "trap_ignore": ("trap_ignore", str), "trap_ban_time": ("trap_ban_seconds", parse_duration),
     "trap_ban": ("trap_ban", lambda v: v.lower() in ("1", "true", "yes", "oui", "on")),
     "from_start": ("from_start", lambda v: v.lower() in ("1", "true", "yes", "oui", "on")),
