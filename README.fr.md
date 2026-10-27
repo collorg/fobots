@@ -81,7 +81,7 @@ un préfixe sans toucher au système (tests, empaquetage).
 ./fobots.py setup                          # crée la table nft (idempotent)
 cp fobots.conf.example fobots.conf         # puis adapter log, seuils
 ./fobots.py run --dry-run -v               # affiche les bans sans toucher à nft
-./fobots.py run                            # le vrai démon
+sudo ./fobots.py run -f fobots.conf        # le vrai démon (en root : -f, voir Configuration)
 ```
 
 Pour un service permanent, voir `fobots.service.example` (utilisateur dédié,
@@ -498,7 +498,9 @@ elles lisent ou modifient nft, et `welcome add` écrit dans `/etc/fobots/`.
 ## Configuration
 
 `fobots.conf` (section `[fobots]`), cherché d'abord dans `/etc/fobots/`, puis dans le
-dossier courant (pratique pour le développement), ou donné par `-f`. Les chemins
+dossier courant (pratique pour le développement : seulement si le fichier appartient à
+l'utilisateur qui lance la commande et que personne d'autre ne peut le modifier, ni lui ni son
+dossier ; avec `sudo` dans votre propre clone, donnez-le par `-f`), ou donné par `-f`. Les chemins
 relatifs y sont relatifs au fichier de conf. **La ligne de commande l'emporte sur la
 conf.** Voir `fobots.conf.example` pour toutes les clés :
 

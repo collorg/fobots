@@ -22,7 +22,7 @@ from unittest import mock
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 from fobots.analyse import Analysis, average_rate, dir_key, report, short_agent, sustained_rate  # noqa: E402
 from fobots.cli import main  # noqa: E402
-from fobots.config import CONF_KEYS, SITE_KEYS, load_config  # noqa: E402
+from fobots.config import CONF_KEYS, SITE_KEYS, find_config, load_config  # noqa: E402
 from fobots.detector import Detector  # noqa: E402
 from fobots.events import append_event, read_events, trim_events  # noqa: E402
 from fobots.follow import follow  # noqa: E402
@@ -36,7 +36,7 @@ from fobots.record import LogTail, Recorder, episodes, read_records, read_sys, r
 from fobots.record import report as record_report  # noqa: E402
 from fobots.sites import Site  # noqa: E402
 from fobots.traps import TrapLearner, shape  # noqa: E402
-from fobots.util import fmt_range, parse_duration, parse_ts, prefix_of, range_nets, subtract  # noqa: E402
+from fobots.util import append_text, fmt_range, parse_duration, parse_ts, prefix_of, range_nets, subtract, write_atomic  # noqa: E402
 from fobots.welcome import Banner, Welcome, welcome_add  # noqa: E402
 
 # main() calls logging.basicConfig; with a handler already on the root logger it does nothing,
@@ -447,6 +447,15 @@ class DetectorAllocation(DetectorBase):
             self.feed(["43.2.2.2"], 0)
         self.assertEqual(self.nft.banned(), ["43.0.0.0/9"])
         self.assertIn("req/s > 5", cm.output[0])
+
+    def test_unexpected_error_skips_the_line_not_the_daemon(self):
+        self.detector([self.ALLOC], threshold=5)
+        with mock.patch.object(self.det, "feed", side_effect=[RuntimeError("bug"), None]), \
+                self.assertLogs("fobots", "ERROR") as cm:
+            self.det.feed_line_safe(line("43.1.1.1", 0))
+            self.det.feed_line_safe(line("43.1.1.1", 0))
+        self.assertEqual(self.det.errors, 1)
+        self.assertIn("unexpected error", cm.output[0])
 
     def test_rate_is_per_second(self):
         self.detector([self.ALLOC], threshold=5)
@@ -1452,6 +1461,13 @@ class TrapShapes(unittest.TestCase):
 
 
 class TrapLearning(unittest.TestCase):
+    def test_scan_with_targets_without_slash(self):
+        """CONNECT host:443 or "*" answered 404/403 used to crash the daemon (IndexError)."""
+        tl = TrapLearner(scan_paths=5, scan_segments=2)
+        for i, p in enumerate(["/a/1", "/b/2", "/c/3", "/d/4", "example.com:443", "*"]):
+            tl.feed_line(req("20.1.1.1", 100 + i, p, 404))
+        self.assertEqual([o["kind"] for o in tl.take_offenders()], ["scan"])
+
     IPS = ["20.1.1.1", "30.1.1.1", "40.1.1.1", "50.1.1.1", "60.1.1.1"]
 
     def learner(self, **kw):
@@ -1815,6 +1831,72 @@ class TrapDetector(DetectorBase):
         det = self.detector()
         det.feed_line(req("20.1.1.1", 1, "/.env", 404))
         self.assertEqual(det.learners, {})
+
+
+class LinkSafeWrites(TmpDirCase):
+    """The state directory belongs to `fobots`, the administration commands run as root: a link
+    planted there must never redirect a write."""
+
+    def victim(self):
+        return self.write("victim", "precious\n")
+
+    def test_write_atomic_ignores_a_planted_tmp_link(self):
+        v, p = self.victim(), self.path("ip_ranges.json")
+        os.symlink(v, p + ".tmp")
+        write_atomic(p, "[]")
+        self.assertEqual(self.read("victim"), "precious\n")
+        self.assertEqual(self.read("ip_ranges.json"), "[]")
+        self.assertEqual(os.stat(p).st_mode & 0o777, 0o644)
+        self.assertEqual(sorted(os.listdir(self.dir)), ["ip_ranges.json", "ip_ranges.json.tmp", "victim"])
+
+    def test_range_store_and_traps_go_through_it(self):
+        v, p = self.victim(), self.path("ip_ranges.json")
+        os.symlink(v, p + ".tmp")
+        RangeStore(p).add((4, 1, 2), "X")
+        self.assertEqual(self.read("victim"), "precious\n")
+        self.assertEqual(RangeStore(p).ranges, ((4, 1, 2),))
+
+    def test_append_refuses_a_link(self):
+        v, p = self.victim(), self.path("watched.jsonl")
+        os.symlink(v, p)
+        with self.assertRaises(OSError):
+            append_text(p, "x\n")
+        append_event(p, {"t": 1})  # logged, not raised
+        trim_events(p)             # replaces the link itself, never writes through it
+        self.assertEqual(self.read("victim"), "precious\n")
+
+
+class ConfigLookup(TmpDirCase):
+    def lookup(self, mode=0o644, dir_mode=0o755, uid=None):
+        p = self.write("fobots.conf", "[fobots]\n")
+        os.chmod(p, mode)
+        os.chmod(self.dir, dir_mode)
+        self.addCleanup(os.chmod, self.dir, 0o755)
+        cwd = os.getcwd()
+        os.chdir(self.dir)
+        self.addCleanup(os.chdir, cwd)
+        with mock.patch("fobots.config.CONF_SEARCH", (self.path("absent.conf"), "fobots.conf")), \
+                mock.patch("os.geteuid", return_value=os.geteuid() if uid is None else uid), \
+                contextlib.redirect_stderr(io.StringIO()) as err:
+            return find_config(), err.getvalue()
+
+    def test_own_file_in_a_private_directory(self):
+        self.assertEqual(self.lookup(), ("fobots.conf", ""))
+
+    def test_untrusted_files_are_ignored(self):
+        for kw in ({"uid": os.geteuid() + 1}, {"mode": 0o664}, {"mode": 0o646},
+                   {"dir_mode": 0o777}):
+            found, err = self.lookup(**kw)
+            self.assertIsNone(found, kw)
+            self.assertIn("give it with -f", err)
+
+    def test_sticky_shared_directory_is_fine_for_ones_own_file(self):
+        self.assertEqual(self.lookup(dir_mode=0o1777)[0], "fobots.conf")
+
+    def test_system_configuration_first(self):
+        system = self.write("system.conf", "[fobots]\n")
+        with mock.patch("fobots.config.CONF_SEARCH", (system, "fobots.conf")):
+            self.assertEqual(find_config(), system)
 
 
 class ConfigTests(TmpDirCase):

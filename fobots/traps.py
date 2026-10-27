@@ -228,7 +228,8 @@ class TrapLearner:
                 paths.append(q)
         if len(paths) < self.scan_paths:
             return
-        if len({q.split("/", 2)[1] for q in paths}) >= self.scan_segments:
+        # [1:2]: a target without "/" (CONNECT host:443, "*") has no directory
+        if len({tuple(q.split("/", 2)[1:2]) for q in paths}) >= self.scan_segments:
             del self.scans[ip]
             self.flag(ip, sec, paths[:3], "scan", rate=len(paths))
 

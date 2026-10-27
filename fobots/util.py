@@ -3,7 +3,9 @@
 """Small helpers: timestamps, durations, address ranges, welcome-list arithmetic."""
 import argparse
 import ipaddress
+import os
 import re
+import tempfile
 from datetime import datetime
 from functools import lru_cache
 
@@ -57,3 +59,31 @@ def subtract(net, welcome):
                 pieces += subtract(piece, welcome)
             return pieces
     return [net]
+
+
+
+def write_atomic(path, text):
+    """Writes `text` to `path` through a temporary file of the same directory, then a rename.
+    The temporary file is created exclusively (mkstemp): it never follows a link planted in the
+    state directory, which belongs to `fobots` while the administration commands run as root."""
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(os.path.abspath(path)),
+                               prefix=os.path.basename(path) + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            os.fchmod(f.fileno(), 0o644)
+            f.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+
+def append_text(path, text):
+    """Appends `text` to `path`, refusing to follow a symbolic link (same reason as write_atomic)."""
+    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o644)
+    with os.fdopen(fd, "a") as f:
+        f.write(text)

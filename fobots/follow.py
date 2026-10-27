@@ -94,4 +94,4 @@ def run_sites(det, sites, from_start, queue_size=200_000):
             site, line = q.get(timeout=1)  # timeout: lets signals through
         except queue.Empty:
             continue
-        det.feed_line(line, site)
+        det.feed_line_safe(line, site)

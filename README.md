@@ -76,7 +76,7 @@ By hand, without `install`:
 ./fobots.py setup                          # creates the nft table (idempotent)
 cp fobots.conf.example fobots.conf         # then adapt log, thresholds
 ./fobots.py run --dry-run -v               # shows the bans without touching nft
-./fobots.py run                            # the real daemon
+sudo ./fobots.py run -f fobots.conf        # the real daemon (as root: -f, see Configuration)
 ```
 
 For a permanent service, see `fobots.service.example` (dedicated user, `CAP_NET_ADMIN`
@@ -477,7 +477,9 @@ capability (see `fobots.service.example`). The administration commands (`setup`,
 ## Configuration
 
 `fobots.conf` (section `[fobots]`), looked up first in `/etc/fobots/`, then in the current
-directory (handy for development), or given with `-f`. Relative paths in it are relative to
+directory (handy for development: only if the file belongs to the user running the command and
+nobody else can modify it or its directory; with `sudo` in your own clone, give it with `-f`),
+or given with `-f`. Relative paths in it are relative to
 the configuration file. **The command line overrides the configuration.** See
 `fobots.conf.example` for all the keys:
 

@@ -6,6 +6,8 @@ import logging
 import os
 import time
 
+from .util import append_text, write_atomic
+
 log = logging.getLogger("fobots")
 
 
@@ -15,8 +17,7 @@ WATCH_FILE_KEEP = 30 * 86400  # the findings file is pruned beyond this (at star
 
 def append_event(path, event):
     try:
-        with open(path, "a") as f:
-            f.write(json.dumps(event, ensure_ascii=False) + "\n")
+        append_text(path, json.dumps(event, ensure_ascii=False) + "\n")
     except OSError as e:
         log.warning("cannot write %s: %s", path, e)
 
@@ -46,11 +47,7 @@ def trim_events(path, keep=WATCH_FILE_KEEP):
     if not os.path.exists(path):
         return
     events = read_events(path, time.time() - keep)
-    tmp = path + ".tmp"
     try:
-        with open(tmp, "w") as f:
-            for ev in events:
-                f.write(json.dumps(ev, ensure_ascii=False) + "\n")
-        os.replace(tmp, path)
+        write_atomic(path, "".join(json.dumps(ev, ensure_ascii=False) + "\n" for ev in events))
     except OSError as e:
         log.warning("cannot prune %s: %s", path, e)

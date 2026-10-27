@@ -21,8 +21,9 @@ Ranges come from RDAP (the successor of whois), queried in the background only f
 /16 prefix (IPv6: /32) that already exceeds --prefix-threshold, with an hourly budget.
 The ranges found are kept on disk. The ban state is read from nft: the daemon can be
 restarted without losing anything.
-Configuration: fobots.conf (see fobots.conf.example), looked up in the current directory
-then in /etc/fobots/, or given with -f. The command line overrides it.
+Configuration: fobots.conf (see fobots.conf.example), looked up in /etc/fobots/, then in the
+current directory (only if it is yours and nobody else can modify it), or given with -f. The
+command line overrides it.
 Signals: SIGUSR1 prints the most active ranges, SIGTERM/SIGINT stop the daemon.
 """
 import argparse
@@ -40,7 +41,7 @@ import time
 from datetime import datetime
 
 from .analyse import Analysis, report
-from .config import CONF_SEARCH, load_config
+from .config import find_config, load_config
 from .constants import CONF_DIR, STATE_DIR
 from .detector import OBSERVED_PREFIX6, OBSERVED_WIDE6, SCOPES, Detector
 from .events import read_events, trim_events
@@ -236,7 +237,7 @@ def cmd_run(args):
             run_sites(det, sites, args.from_start)
         else:  # files (read once) or stdin
             for line in log_lines(args):
-                det.feed_line(line)
+                det.feed_line_safe(line)
     except KeyboardInterrupt:
         pass
     except OSError as e:  # stdin or file unreadable
@@ -743,7 +744,7 @@ def main(argv=None):
     pre.add_argument("-f", "--config")
     conf_path = pre.parse_known_args(argv)[0].config
     if conf_path is None:
-        conf_path = next((c for c in CONF_SEARCH if os.path.exists(c)), None)
+        conf_path = find_config()
     elif not os.path.exists(conf_path):
         sys.exit(f"configuration not found: {conf_path}")
     conf = load_config(conf_path) if conf_path else {}

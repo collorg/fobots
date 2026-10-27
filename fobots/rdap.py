@@ -12,7 +12,7 @@ import urllib.error
 import urllib.request
 from collections import deque
 
-from .util import fmt_range
+from .util import fmt_range, write_atomic
 
 log = logging.getLogger("fobots")
 
@@ -65,11 +65,9 @@ class RangeStore:
             if name:
                 self.names[r] = name
             if self.path:
-                tmp = self.path + ".tmp"
-                with open(tmp, "w") as f:
-                    json.dump([list(x) + [self.names[x]] if x in self.names else list(x)
-                               for x in self.ranges], f)
-                os.replace(tmp, self.path)
+                write_atomic(self.path, json.dumps(
+                    [list(x) + [self.names[x]] if x in self.names else list(x)
+                     for x in self.ranges]))
 
 
 

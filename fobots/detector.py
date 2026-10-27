@@ -4,7 +4,6 @@
 import ipaddress
 import json
 import logging
-import os
 import re
 import time
 from collections import Counter, defaultdict, deque
@@ -15,7 +14,7 @@ from .load import LEVELS, NoLoad
 from .nft import NftError
 from .traps import TrapLearner
 from .welcome import NO_WELCOME
-from .util import fmt_range, parse_ts, prefix_of
+from .util import fmt_range, parse_ts, prefix_of, write_atomic
 
 log = logging.getLogger("fobots")
 
@@ -78,7 +77,7 @@ class Detector:
         self.recent_ban = {}
         self.memo, self.memo_version = {}, store.version
         self.latest = self.last_purge = 0
-        self.skipped = self.ignored = 0
+        self.skipped = self.ignored = self.errors = 0
         self.ignore_path = ignore_path  # global regex: requests not counted (static pages)
         self.sites = tuple(sites)       # targets (SIGUSR1 statistics)
         self.observed = scope == "observed"
@@ -212,6 +211,18 @@ class Detector:
                 self.react_traps(learner, name)
         self.feed(m.group(1), sec, tag)
 
+    def feed_line_safe(self, line, site=None):
+        """feed_line for the daemon's loops: a line that raises an unexpected error (a bug, a
+        format never seen) is logged and skipped. Otherwise one crafted request would stop the
+        daemon, and the restart would forget the counts."""
+        try:
+            self.feed_line(line, site)
+        except Exception:
+            self.errors += 1
+            if self.errors <= 10 or self.errors % 1000 == 0:  # the journal must not be flooded
+                log.exception("line skipped after an unexpected error (%d so far): %r",
+                              self.errors, line[:300])
+
     def welcomed(self, ip):
         """Is the IP in the trap welcome list (a security scanner you accept)? Such an IP neither
         makes a trap nor is flagged. It is NOT the welcome list of the bans: that one holds
@@ -284,11 +295,8 @@ class Detector:
         sites = {n: s for n, s in self.trap_state.items() if n not in self.learners}
         sites.update({n: dict(l.snapshot(), state=l.state()) for n, l in self.learners.items()})
         data = {"t": int(time.time()), "sites": sites}
-        tmp = self.trap_file + ".tmp"
         try:
-            with open(tmp, "w") as f:
-                json.dump(data, f, ensure_ascii=False)
-            os.replace(tmp, self.trap_file)
+            write_atomic(self.trap_file, json.dumps(data, ensure_ascii=False))
         except OSError as e:
             log.warning("cannot write %s: %s", self.trap_file, e)
 
@@ -446,8 +454,8 @@ class Detector:
 
     def dump(self, top=30):
         log.info("--- %d ranges tracked, %d unreadable lines, %d excluded lines, "
-                 "%d monitored IPs, %s ---", len(self.hits), self.skipped, self.ignored,
-                 len(self.watched), self.load.describe())
+                 "%d lines in error, %d monitored IPs, %s ---", len(self.hits), self.skipped,
+                 self.ignored, self.errors, len(self.watched), self.load.describe())
         for site in self.sites:
             log.info("site %s: %d lines read, %d excluded", site.name, site.lines, site.ignored)
         for key, n in self.hits.most_common(top):

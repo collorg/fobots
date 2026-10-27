@@ -5,6 +5,7 @@ import argparse
 import configparser
 import os
 import re
+import stat
 import sys
 
 from .constants import CONF_DIR
@@ -50,6 +51,26 @@ SITE_KEYS = ("log", "ignore_path", "ignore_all", "watch_agent", "watch_path", "t
 
 TRUE_VALUES = ("1", "true", "yes", "oui", "on")
 
+
+
+def find_config():
+    """The configuration used without -f: /etc/fobots/fobots.conf, otherwise ./fobots.conf, but
+    only if it belongs to the user running the command and nobody else can modify it or its
+    directory. A fobots.conf found in a shared directory (/tmp…) must not choose, for root, the
+    nft binary to run."""
+    system, local = CONF_SEARCH
+    if os.path.exists(system):
+        return system
+    try:
+        st, dst = os.stat(local), os.stat(".")
+    except OSError:
+        return None
+    if st.st_uid != os.geteuid() or st.st_mode & 0o022 or \
+            (dst.st_mode & 0o022 and not dst.st_mode & stat.S_ISVTX):
+        print(f"{os.path.abspath(local)} ignored: it does not belong to you, or others can modify "
+              "it or its directory; give it with -f if it is trustworthy", file=sys.stderr)
+        return None
+    return local
 
 
 def load_config(path):
