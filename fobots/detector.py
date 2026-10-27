@@ -262,7 +262,7 @@ class Detector:
             else:
                 reason = (f"trap paths on {name}: {len(off['paths'])} distinct "
                           f"({', '.join(off['paths'][:3])}), time {off['strikes']}")
-            addr = ipaddress.ip_address(ip)
+            addr = ipaddress.ip_network(ip, strict=False).network_address  # IPv6: a /64 already
             net = ipaddress.ip_network((addr, 32 if addr.version == 4 else 64), strict=False)
             scope = self.trap_scope
             if scope == "all" and self.in_welcome(net):

@@ -1505,6 +1505,22 @@ class TrapShapes(unittest.TestCase):
 
 
 class TrapLearning(unittest.TestCase):
+    def test_ipv6_scanner_rotating_inside_its_64_is_one_client(self):
+        tl = TrapLearner(scan_paths=5, scan_segments=2)
+        for i, p in enumerate(["/a/1", "/b/2", "/c/3", "/d/4", "/e/5"]):
+            tl.feed_line(req(f"2a00:1450:1:2::{i + 1:x}", 100 + i, p, 404))  # a new address each time
+        offs = tl.take_offenders()
+        self.assertEqual([(o["kind"], o["ip"]) for o in offs], [("scan", "2a00:1450:1:2::/64")])
+
+    def test_one_ipv6_64_counts_once_for_min_ips(self):
+        tl = TrapLearner(min_ips=3, min_nets=1)
+        for i in range(10):
+            tl.feed_line(req(f"2a00:1450:1:2::{i + 1:x}", 100 + i, "/.env", 404))
+        self.assertEqual(tl.found(), [])
+        for i, a in enumerate(("2a00:1450:1:3::1", "2a00:1450:1:4::1")):
+            tl.feed_line(req(a, 200 + i, "/.env", 404))
+        self.assertEqual([(e["path"], e["ips"]) for e in tl.found()], [("/.env", 3)])
+
     def test_scan_with_targets_without_slash(self):
         """CONNECT host:443 or "*" answered 404/403 used to crash the daemon (IndexError)."""
         tl = TrapLearner(scan_paths=5, scan_segments=2)
@@ -1795,6 +1811,13 @@ class TrapDetector(DetectorBase):
         scopes = {o["ip"]: o["scope"] for o in det.learners["default"].offenders}
         self.assertEqual(scopes["20.1.1.1"], "web")
         self.assertEqual(scopes["30.1.1.1"], "all")
+
+    def test_ipv6_offender_is_banned_as_its_64(self):
+        det = self.detector(trap_conf={"scan_paths": 5, "scan_segments": 2}, trap_ban=True)
+        with self.assertLogs("fobots", "INFO"):
+            for i, p in enumerate(["/a/1", "/b/2", "/c/3", "/d/4", "/e/5"]):
+                det.feed_line(req(f"2a00:1450:1:2::{i + 1:x}", 100 + i, p, 404))
+        self.assertEqual(self.nft.banned(6), ["2a00:1450:1:2::/64"])
 
     def test_trap_scope_defaults_to_web_ports(self):
         det = self.detector(trap_conf={}, trap_ban=True)

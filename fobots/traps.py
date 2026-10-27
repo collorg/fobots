@@ -90,15 +90,27 @@ def shape(path):
 
 @lru_cache(maxsize=65536)
 def net_of(ip):
-    """Network of a public IP (/16, IPv6 /32), None otherwise: distinct networks tell a
+    """Network of a public IP or client (/16, IPv6 /32), None otherwise: distinct networks tell a
     scan spread over many hosts from one noisy client."""
     try:
-        a = ipaddress.ip_address(ip)
+        a = ipaddress.ip_network(ip, strict=False).network_address  # an address or a client /64
     except ValueError:
         return None
     if not a.is_global:
         return None
     return (a.version, int(a) >> (16 if a.version == 4 else 96))
+
+
+@lru_cache(maxsize=65536)
+def client_of(ip):
+    """Key of a client: the IPv4 address, or the /64 of an IPv6 one ("2001:db8:1:2::/64"). A
+    scanner changes address freely inside its /64: counted per address, it would never reach the
+    scan thresholds, would count as many IPs for `min_ips`, and would fill the tables."""
+    try:
+        a = ipaddress.ip_address(ip)
+    except ValueError:
+        return ip
+    return str(ipaddress.ip_network((a, 64), strict=False)) if a.version == 6 else ip
 
 
 class TrapLearner:
@@ -137,6 +149,7 @@ class TrapLearner:
             self.feed(m.group(1), sec, m.group(3), int(m.group(4)))
 
     def feed(self, ip, sec, path, status):
+        """`ip`: the address of the request. The state is kept per client (client_of: IPv6 /64)."""
         self.lines += 1
         if sec > self.latest:
             self.latest = sec
@@ -144,7 +157,7 @@ class TrapLearner:
                 self.purge()
         if status < 400 or status in EXTRA_EXISTS:
             self.learn_served(*shape(path))
-            b = self.scans.get(ip)
+            b = self.scans.get(client_of(ip))
             if b is not None:  # answered requests: a visitor, not a scanner
                 b[1].append(sec)
         elif status in FAILED:
@@ -181,9 +194,10 @@ class TrapLearner:
             return
         if net_of(ip) is None:
             return
-        if self.exempt is not None and self.exempt(ip):
+        if self.exempt is not None and self.exempt(ip):  # the address itself, not its /64
             self.welcomed += 1
             return
+        ip = client_of(ip)
         if self.scan_paths:
             self.note_scan(ip, sec, p)
         t = self.traps.get(p)
