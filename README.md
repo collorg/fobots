@@ -32,9 +32,8 @@ Plain Python 3.7+ (no dependencies), nftables, Linux.
    `/16` prefix (`/32` in IPv6) that already exceeds `prefix_threshold` req/s, with an hourly
    budget, a delay between requests and a pause on HTTP 429. The ranges found are saved on
    disk (`ip_ranges.json`) and reused.
-4. By default (`ban_scope = observed`) the ban narrows down to the IPs actually seen inside the
-   allocation: see "Tight bans" below. With `ban_scope = allocation`, it covers the **whole
-   allocation**.
+4. The ban covers the IPs actually seen inside the allocation, grouped, never the whole
+   allocation at once: see "Tight bans" below.
 5. A ban is a single nft transaction. A range already covered by a wider ban is ignored; a
    range that encloses others replaces them.
 6. The ban state is **in nft** (read at startup): the daemon can be restarted without loss,
@@ -106,8 +105,8 @@ An upgrade only restarts a service that is already running; `purge` removes
 ```
 make test            # python3 -m unittest discover -s tests  (standard library only, about 1 s)
 ```
-The suite covers range grouping, bans (including the nft overlap workaround), detection with
-and without `ban_scope = observed`, load levels, configuration errors, log rotation and the
+The suite covers range grouping, bans (including the nft overlap workaround), detection (tight bans,
+fallback blocks, escalation), load levels, configuration errors, log rotation and the
 commands (`run --dry-run`, `welcome`, `watched`, `install --destdir`). None of it needs root or
 a real `nft`.
 
@@ -388,7 +387,7 @@ individual: a machine of an authorised network that scans is banned alone and th
 network stays reachable. In IPv6 the unit is the /64, because a scanner changes address freely
 inside it; an IP of the trap welcome list inside that /64 is left out of the ban. The rate bans
 are the opposite on purpose: their point is a load spread over many IPs of a range, which a ban
-per IP would not see (`ban_scope = observed` narrows them to the groups of IPs actually seen).
+per IP would not see (they are narrowed to the groups of IPs actually seen).
 
 **Ports.** A trap ban closes the web ports (TCP 80/443, UDP 443), like the rate bans. With
 `trap_scope = all`, it closes **every port** (SSH, mail…) from the first time, in sets of their
@@ -507,10 +506,9 @@ the configuration file. **The command line overrides the configuration.** See
 | `trap_hits`, `trap_scan_paths`, `trap_scan_segments`, `trap_scan_window`, `trap_ban_time`, `trap_min_ips`, `trap_min_nets`, `trap_window`, `trap_template_min`, `trap_ignore`, `trap_welcome`, `traps_file` | 2, 20, 5, 5m, 1h, 5, 3, 6h, 3, none, `trap_welcome.txt` next to the configuration, `<dir>/traps.json` | tuning of the above |
 | `slow_threshold`, `slow_window` | 0, 10m | bans a range whose **average** rate over the window exceeds this (req/s); `0` = disabled |
 | `ban_time` | 1h | duration of a ban (`30m`, `1h`, `1d`) |
-| `ban_scope` | `observed` | `observed`: only the groups of IPs seen inside the RDAP range; `allocation`: ban the whole range |
 | `observed_prefix` | 20 | `observed`: maximum extent of a group of IPs (IPv4 prefix; IPv6: `/48`) |
 | `observed_escalate` | 4 | `observed`: partial bans of an allocation, within a ban's duration, before falling back to wide blocks |
-| `observed_max_prefix` | 16 | `observed`: width of the blocks banned as a fallback (IPv4 prefix; IPv6: `/32`); `0` = whole allocation |
+| `observed_max_prefix` | 16 | width of the blocks banned as a fallback (IPv4 prefix; IPv6: `/32`); `0` = whole allocation |
 | `rdap_per_hour`, `delay` | 100, 2 | budget and spacing of RDAP requests |
 | `load_signal` | `none` | load-based hardening: `probe`, `psi`, `loadavg` or `none` |
 | `load_probe_url`, `load_probe_timeout` | none, 10s | `probe` signal: `[HOST@]URL` page(s) requested; answer time counted as the timeout when slower |
@@ -593,16 +591,17 @@ allocation, never exceeds a per-second `threshold`. With `slow_threshold = 0.5` 
 over the last 10 minutes (counted in 10-second buckets: no cost per request). Disabled by
 default. Measure it first with `fobots analyse` (table "Slow scrapers"): it shows which
 ranges would be caught and how much of the traffic they send. The rule is the same as the
-per-second one for the rest (`welcome` list, `ban_scope`, `ban_time`); with
-`ban_scope = observed`, the IPs seen over the whole window are considered, so the ban stays
-tight. Caution: a large legitimate network (campus behind a NAT) on a busy site can exceed a
+per-second one for the rest (`welcome` list, tight bans, `ban_time`); the IPs seen over the
+whole window are considered, so the ban stays tight. Caution: a large legitimate network (campus behind a NAT) on a busy site can exceed a
 low average rate; check with `analyse` on your own logs, and fix false positives with
 `welcome add`. It is not scaled by the load level.
 
-## Tight bans (`ban_scope = observed`)
+## Tight bans
 
-The default. With `ban_scope = allocation`, the whole allocation is banned: a single client
-above the threshold then cuts off every visitor of its provider (up to a `/8`). RDAP still provides the
+The whole allocation is never banned at once: a single client above the threshold would cut off
+every visitor of its provider (up to a `/8`). The former `ban_scope = allocation` did that; it no
+longer exists, and a configuration that still has it starts with a warning and the tight bans.
+RDAP still provides the
 **boundary** (the allocation) and decides *when* to ban (same threshold, same counting per
 allocation). What changes is *what*: instead of the whole allocation, it bans the IPs seen
 during the `window`, grouped as follows:
@@ -621,23 +620,25 @@ during the `window`, grouped as follows:
   allocation.
 
 For each ban the journal states the number of IPs, of groups and the share of requests
-covered. To compare safely: `run --dry-run --ban-scope observed` on the same replayed log
-(`fobots run --dry-run --ban-scope allocation LOG`, then `observed`).
+covered. To see what would be banned on a real log: `fobots run --dry-run LOG`.
 When a ban replaces others (a `/16` that encloses `/32`s), the daemon removes the old elements
 then adds the new one in **two nft transactions**: nft 0.9.x refuses to do it in a single one
 ("interval overlaps with an existing one"). If the addition fails, the removed elements are
 put back.
-Memory: at most 200,000 IPs tracked. IPv4 and IPv6 are handled the same way.
+Memory: at most 200,000 IPs tracked. Once the table is full (an IPv6 `/64` can fill it), an
+allocation above the threshold gets the block of `observed_prefix` around the IP that triggered
+it (IPv6: its `/48`), never the whole allocation. IPv4 and IPv6 are handled the same way.
 
 ## Known limits
 
 - **Remaining ban time with old nftables.** With nftables 0.9.x, `nft list set` only shows
   `timeout 1h` and never `expires`: `bans` and `watched` then do not show the remaining time.
   More recent versions show `expires`, and these commands use it.
-- **Range = RIR allocation** with `ban_scope = allocation` (the default, `observed`, narrows it), often very
-  wide (`17.0.0.0/8`, `43.0.0.0/9`, `36.128.0.0/10`). A ban hits the whole allocation,
-  including legitimate visitors. Safeguard: the ban expires, the welcome list fixes it. RDAP
-  answers wider than `/8` (IPv4) or `/16` (IPv6) are rejected.
+- **Counting per RIR allocation**, often very wide (`17.0.0.0/8`, `43.0.0.0/9`,
+  `36.128.0.0/10`): the requests of all its IPs add up. The ban is narrowed to the IPs seen, but a
+  fallback block (`/16`) or, with `observed_max_prefix = 0`, the whole allocation, can hit
+  legitimate visitors. Safeguard: the ban expires, the welcome list fixes it. RDAP answers wider
+  than `/8` (IPv4) or `/16` (IPv6) are rejected.
 - **Detection on the log**, therefore *after* the request: nginx only writes a line once the
   response is finished. An already saturated server writes its logs late, and the reaction is
   late too.

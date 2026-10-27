@@ -95,10 +95,10 @@ ban_time = 1h        # duration of a ban: 30m, 1h, 1d…
 # slow_threshold = 0.5
 # slow_window = 10m
 
-# Tight bans (default): instead of banning the whole RDAP allocation, ban the groups of IPs seen
-# inside it; fall back to wide blocks if the traffic is scattered or after several partial bans.
-# `allocation` bans the whole allocation (up to a /8): one client then cuts off all its neighbours.
-# ban_scope = observed     # observed | allocation
+# Tight bans: the groups of IPs seen inside the RDAP allocation are banned, never the whole
+# allocation at once (one client would cut off all its neighbours); fall back to wide blocks if
+# the traffic is scattered or after several partial bans. (`ban_scope` no longer exists: an old
+# `ban_scope = allocation` is ignored with a warning.)
 # observed_prefix = 20     # maximum extent of a group (IPv4 prefix; IPv6: /48)
 # observed_escalate = 4    # partial bans of an allocation before falling back to wide blocks
 # observed_max_prefix = 16 # fallback (scattered traffic): /16 blocks instead of the allocation; 0 = whole allocation

@@ -35,8 +35,9 @@ WATCH_RETENTION = 3600  # seconds (log time) during which they are remembered
 
 WATCH_EVENT_IPS = 200         # IPs recorded at most per ban
 
-# ban_scope = observed: the IPs seen (`window`) are grouped into groups of bounded extent;
-# the most active are banned, until they cover this share of the allocation's requests.
+# The IPs seen (`window`) are grouped into groups of bounded extent; the most active are banned,
+# until they cover this share of the allocation's requests (never the allocation at once: one
+# client above the threshold must not cut off every visitor of its provider).
 OBSERVED_COVERAGE = 0.8
 
 OBSERVED_MAX_GROUPS = 4       # beyond: too scattered, fall back to wide blocks
@@ -53,7 +54,9 @@ TRAP_SAVE_EVERY = 300         # seconds (log time) between two snapshots of the 
 
 SLOW_BUCKET = 10               # seconds per bucket of the average-rate window
 
-SCOPES = ("allocation", "observed")
+# ban_scope: only "observed" remains. "allocation" (the whole RDAP allocation at the first excess,
+# up to a /8) is still read in old configurations, with a warning, and means "observed".
+SCOPES = ("observed",)
 
 TRAP_SCOPES = ("web", "all")  # ports closed to an IP flagged by the traps
 
@@ -62,7 +65,7 @@ TRAP_SCOPES = ("web", "all")  # ports closed to an IP flagged by the traps
 class Detector:
     def __init__(self, threshold, prefix_threshold, sustain, window, store, banner, rdap,
                  load=None, min_threshold=1.0, min_ban_seconds=60, watch=None,
-                 watch_file=None, ignore_path=None, sites=(), scope="observed",
+                 watch_file=None, ignore_path=None, sites=(),
                  observed_prefix=20, escalate=4, wide_prefix=16, slow_threshold=0,
                  slow_window=600, trap_conf=None, trap_file=None, trap_ban=False, trap_ban_seconds=3600, trap_welcome=None, trap_scope="web"):
         self.base_threshold, self.base_prefix_threshold = threshold, prefix_threshold
@@ -71,7 +74,7 @@ class Detector:
         # average rate over a long window (slow scrapers, below any per-second threshold)
         self.slow_threshold, self.slow_window = slow_threshold, slow_window
         self.slow = {}  # range -> [deque of (bucket, requests), total over the window]
-        self.track = max(window, slow_window if slow_threshold else 0)  # observed: IPs memory
+        self.track = max(window, slow_window if slow_threshold else 0)  # memory of the IPs seen
         self.store, self.banner, self.rdap = store, banner, rdap
         self.counts = defaultdict(dict)  # key -> {second: n}
         self.over = defaultdict(set)     # range -> seconds above the threshold
@@ -82,13 +85,12 @@ class Detector:
         self.skipped = self.ignored = self.errors = 0
         self.ignore_path = ignore_path  # global regex: requests not counted (static pages)
         self.sites = tuple(sites)       # targets (SIGUSR1 statistics)
-        self.observed = scope == "observed"
         self.span4 = 2 ** (32 - observed_prefix)
         self.span6 = 2 ** (128 - OBSERVED_PREFIX6)
         self.wide_shift4 = 32 - wide_prefix if wide_prefix else None  # None: whole allocation
         self.wide_shift6 = 128 - OBSERVED_WIDE6 if wide_prefix else None
         self.escalate = escalate        # recent partial bans of an allocation before banning it
-        self.ips = {}      # ip -> [requests, start, last second, range] (observed mode)
+        self.ips = {}      # ip -> [requests, start, last second, range]
         self.partial = {}  # range -> seconds of the partial bans
         self.watch = watch  # (agent regex or None, path regex or None); None = disabled
         self.watched = {}   # ip -> [requests, last second seen, example path]
@@ -341,8 +343,7 @@ class Detector:
         n = c[sec] = c.get(sec, 0) + 1
         self.hits[key] += 1
         if isinstance(key, tuple):
-            if self.observed:
-                self.note_ip(ip, sec, key)
+            self.note_ip(ip, sec, key)
             if self.slow_threshold:
                 self.note_slow(key, sec, n, ip)
             if n > self.threshold:
@@ -386,10 +387,9 @@ class Detector:
             e[0] += 1
             e[2], e[3] = sec, key
 
-    def targets(self, key, sec):
-        """(ranges to ban, detail for the journal) for an allocation that has triggered."""
-        if not self.observed:
-            return [key], ""
+    def targets(self, key, sec, ip):
+        """(ranges to ban, detail for the journal) for an allocation that has triggered (`ip`:
+        the request that did it)."""
         ver = key[0]
         ips = [(int(ipaddress.ip_address(s)), e[0]) for s, e in self.ips.items()
                if e[3] == key and e[2] >= sec - self.track]
@@ -400,10 +400,16 @@ class Detector:
         if len(recent) < self.escalate and groups:
             picked = pick_groups(groups, OBSERVED_COVERAGE, OBSERVED_MAX_GROUPS)
             why = f"{len(groups)} group(s) of IPs, too scattered"
+        if not ips:  # the IP table is full (OBSERVED_MAX_IPS): only the block of the IP seen
+            span = self.span4 if ver == 4 else self.span6
+            a = int(ipaddress.ip_address(ip))
+            start = a - a % span
+            return ([(ver, max(start, key[1]), min(start + span - 1, key[2]))],
+                    f", no IP tracked (table full): the block of {ip} only")
         if picked is None:  # fallback: wide blocks (or the whole allocation), never narrower
             self.partial.pop(key, None)
             shift = self.wide_shift4 if ver == 4 else self.wide_shift6
-            if shift is None or not ips or (key[2] - key[1] + 1) <= (1 << shift):
+            if shift is None or (key[2] - key[1] + 1) <= (1 << shift):
                 return [key], f", {why}: whole allocation"
             blocks = wide_blocks(ips, key[1], key[2], shift, OBSERVED_COVERAGE)
             return ([(ver, a, b) for a, b in blocks],
@@ -427,7 +433,7 @@ class Detector:
             reason = f"{n} req/s > {thr:g}, seen with {ip}, {self.hits[key]} requests in total"
         if self.load.level:
             reason += f", load level {LEVELS[self.load.level]}"
-        targets, detail = self.targets(key, sec)
+        targets, detail = self.targets(key, sec, ip)
         reason += detail
         try:
             seconds = self.ban_seconds()
@@ -454,11 +460,10 @@ class Detector:
             if not self.over[key]:
                 del self.over[key]
         self.recent_ban = {k: s for k, s in self.recent_ban.items() if s >= cutoff}
-        if self.observed:
-            self.ips = {ip: e for ip, e in self.ips.items() if e[2] >= cutoff}
-            keep = self.latest - self.banner.ban_seconds
-            self.partial = {k: v for k, v in
-                            ((k, [t for t in v if t >= keep]) for k, v in self.partial.items()) if v}
+        self.ips = {ip: e for ip, e in self.ips.items() if e[2] >= cutoff}
+        keep = self.latest - self.banner.ban_seconds
+        self.partial = {k: v for k, v in
+                        ((k, [t for t in v if t >= keep]) for k, v in self.partial.items()) if v}
         if self.learners and self.trap_welcome is not None:
             self.trap_welcome.reload()  # the list may have changed (welcome add --traps)
         if self.trap_file and self.learners and self.latest - self.last_trap_save >= TRAP_SAVE_EVERY:

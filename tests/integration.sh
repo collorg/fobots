@@ -41,7 +41,7 @@ bad() { fail=$((fail + 1)); echo "  FAIL $1"; }
 section() { echo; echo "== $1"; }
 
 # -f: a minimal configuration file, so that neither /etc/fobots/fobots.conf nor ./fobots.conf
-# (e.g. ban_scope = observed) changes the scenarios.
+# (e.g. observed_max_prefix) changes the scenarios.
 fobots() { "$ROOT/fobots.py" "$@" -f "$W/fobots.conf" --nft-bin "$NFT"; }
 
 # Elements of the real set, as CIDRs, one per line (read with the program's own parser).
@@ -97,8 +97,7 @@ json.dump([[ipaddress.ip_address(s).version, int(ipaddress.ip_address(s)), int(i
            for s, e in ranges], open(sys.argv[1], "w"))
 PY
 : > "$W/welcome.txt"
-# one burst is enough here; the scenarios ban whole allocations unless they say --ban-scope observed
-run() { fobots run --dir "$W" --cache "$W/ranges.json" -w "$W/welcome.txt" --sustain 1 --ban-scope allocation "$@" 2>"$W/err"; }
+run() { fobots run --dir "$W" --cache "$W/ranges.json" -w "$W/welcome.txt" --sustain 1 "$@" 2>"$W/err"; }  # one burst is enough here
 reset() { local s; for s in banned4 banned6 trapped4 trapped6; do "$NFT" flush set inet fobots $s; done; }
 drops() { "$NFT" list chain inet fobots input | grep -c ' drop$'; }
 
@@ -139,13 +138,15 @@ PY
 )
 case $sel in "(True,"*) ok "nft handles interval sets with timeouts ($sel)" ;; *) bad "nft self-test: $sel" ;; esac
 
-section "ban of the whole allocation (ban_scope = allocation)"
+section "the IPs seen are banned, never the whole allocation at once"
 mklog "$W/log" $(seq_ips 43.1.1. 1 8)
 run -t 5 "$W/log"
 equal "exit status" $? 0
-has "the allocation 43.0.0.0/9 is banned" 43.0.0.0/9
-out=$(fobots bans --dir "$W" 2>&1)
-case $out in *43.0.0.0/9*) ok "fobots bans lists it" ;; *) bad "fobots bans lists it ($out)" ;; esac
+hasnt "the allocation 43.0.0.0/9 is not banned" 43.0.0.0/9
+equal "only addresses of the scraper's /24 are banned" "$(covered 4 43.0.0.0/9)" "$(covered 4 43.1.1.0/24)"
+[ "$(covered 4)" -ge 5 ] && ok "the scraper IPs seen are banned" || bad "the scraper IPs seen are banned"
+out=$(fobots bans --dir "$W" --no-lookup 2>&1)
+case $out in *43.1.1.*) ok "fobots bans lists them" ;; *) bad "fobots bans lists them ($out)" ;; esac
 
 section "a short burst is not banned (sustain)"
 reset
@@ -153,10 +154,10 @@ mklog "$W/log" $(seq_ips 43.1.1. 1 8)
 run -t 5 --sustain 5 "$W/log"
 equal "a one-second burst is tolerated" "$(covered 4)" 0
 
-section "tight ban (ban_scope = observed)"
+section "a bystander of the same allocation is spared"
 reset
 mklog "$W/log" 34.100.9.9 $(seq_ips 34.67.1. 1 8)
-run -t 5 --ban-scope observed "$W/log"
+run -t 5 "$W/log"
 equal "exit status" $? 0
 equal "only addresses of the scraper's /24 are banned" "$(covered 4 34.64.0.0/10)" "$(covered 4 34.67.1.0/24)"
 hasnt "the bystander is not banned" 34.100.9.9/32
@@ -165,7 +166,7 @@ hasnt "the bystander is not banned" 34.100.9.9/32
 
 section "wider ban replacing smaller ones (the nft 0.9.x overlap case)"
 mklog "$W/log" $(seq_ips 34.67.2. 1 3) $(for o in 66 68 70 72 74 76; do echo "34.$o.1.1"; done)
-run -t 8 --ban-scope observed "$W/log"
+run -t 8 "$W/log"
 equal "exit status" $? 0
 grep -q "refused\|overlap" "$W/err" && bad "nft refused a transaction: $(grep -m1 'refused\|overlap' "$W/err")" || ok "no nft refusal"
 has "the /16 block replaces the small bans" 34.67.0.0/16
@@ -173,9 +174,9 @@ equal "nothing inside 34.67.0.0/16 except the block" "$(covered 4 34.67.0.0/16)"
 # same, with the whole allocation as the fallback
 reset
 mklog "$W/log" $(seq_ips 34.67.1. 1 8)
-run -t 5 --ban-scope observed "$W/log"
+run -t 5 "$W/log"
 mklog "$W/log" $(for o in 66 68 70 72 74 76 78 80 82; do echo "34.$o.1.1"; done)
-run -t 8 --ban-scope observed --observed-max-prefix 0 "$W/log"
+run -t 8 --observed-max-prefix 0 "$W/log"
 equal "exit status" $? 0
 grep -q "refused\|overlap" "$W/err" && bad "nft refused a transaction" || ok "no nft refusal"
 has "the allocation 34.64.0.0/10 replaces the tight ban" 34.64.0.0/10
@@ -202,7 +203,9 @@ reset
 mklog "$W/log" $(seq_ips 2a00:1450::1: 1 8 | sed 's/::1:\([0-9]*\)/::\1/')
 run -t 5 "$W/log"
 equal "exit status" $? 0
-has "the IPv6 allocation is banned" 2a00:1450::/32 6
+hasnt "the IPv6 allocation is not banned" 2a00:1450::/32 6
+# the ban triggers at the 6th request: it covers the IPs seen by then, nothing wider
+n=$(covered 6); [ "$n" -ge 6 ] && [ "$n" -le 8 ] && ok "the IPv6 addresses seen are banned ($n)" || bad "IPv6 addresses banned: $n"
 
 section "trap_scope = all: every port, except for the IPs of welcome.txt"
 reset

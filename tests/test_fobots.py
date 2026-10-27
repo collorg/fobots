@@ -457,7 +457,7 @@ class BannerTests(TmpDirCase):
 
 
 class DetectorBase(TmpDirCase):
-    def detector(self, ranges=(), threshold=5, sustain=1, window=60, scope="allocation", nft=None,
+    def detector(self, ranges=(), threshold=5, sustain=1, window=60, nft=None,
                  welcome="", **kw):
         self.nft = nft or FakeNft()
         self.store = RangeStore(None)
@@ -466,7 +466,7 @@ class DetectorBase(TmpDirCase):
         self.rdap = NoRdap()
         banner = Banner(self.nft, Welcome(self.write("w.txt", welcome)), 3600)
         self.det = Detector(threshold, kw.pop("prefix_threshold", threshold), sustain, window,
-                               self.store, banner, self.rdap, scope=scope, **kw)
+                               self.store, banner, self.rdap, **kw)
         return self.det
 
     def feed(self, ips, sec):
@@ -474,7 +474,7 @@ class DetectorBase(TmpDirCase):
             self.det.feed_line(line(a, sec))
 
 
-class DetectorAllocation(DetectorBase):
+class DetectorRate(DetectorBase):
     ALLOC = rng("43.0.0.0", "43.127.255.255")
 
     def test_ban_when_threshold_exceeded(self):
@@ -483,7 +483,8 @@ class DetectorAllocation(DetectorBase):
         self.assertEqual(self.nft.banned(), [])
         with self.assertLogs("fobots", "INFO") as cm:
             self.feed(["43.2.2.2"], 0)
-        self.assertEqual(self.nft.banned(), ["43.0.0.0/9"])
+        # the IPs seen, never the /9: 43.2.2.2, alone and far away, is under the 80 % coverage
+        self.assertEqual(self.nft.banned(), ["43.1.1.0/30", "43.1.1.4/32"])
         self.assertIn("req/s > 5", cm.output[0])
 
     def test_unexpected_error_skips_the_line_not_the_daemon(self):
@@ -506,7 +507,8 @@ class DetectorAllocation(DetectorBase):
         with self.assertLogs("fobots", "INFO") as cm:
             for s in range(0, 100):  # one request per second: never above the threshold
                 self.feed([f"43.{s % 7}.1.1"], s)
-        self.assertEqual(self.nft.banned(), ["43.0.0.0/9"])
+        self.assertTrue(self.nft.banned())  # 7 scattered IPs: /16 blocks, never the /9
+        self.assertTrue(all(net(b).prefixlen == 16 for b in self.nft.banned()))
         self.assertTrue(any("on average over" in m for m in cm.output))
 
     def test_slow_criterion_ignores_a_short_burst_and_is_off_by_default(self):
@@ -532,7 +534,7 @@ class DetectorAllocation(DetectorBase):
         self.assertEqual(self.nft.banned(), [])
         with self.assertLogs("fobots", "INFO"):
             self.feed(["43.1.1.1"] * 3, 2)
-        self.assertEqual(self.nft.banned(), ["43.0.0.0/9"])
+        self.assertEqual(self.nft.banned(), ["43.1.1.1/32"])
 
     def test_sustain_requires_consecutive_seconds(self):
         self.detector([self.ALLOC], threshold=2, sustain=3)
@@ -541,7 +543,7 @@ class DetectorAllocation(DetectorBase):
         self.assertEqual(self.nft.banned(), [])
         with self.assertLogs("fobots", "INFO"):
             self.feed(["43.1.1.1"] * 3, 5)
-        self.assertEqual(self.nft.banned(), ["43.0.0.0/9"])
+        self.assertEqual(self.nft.banned(), ["43.1.1.1/32"])
 
     def test_sustain_forgets_old_seconds(self):
         self.detector([self.ALLOC], threshold=2, sustain=2, window=5)
@@ -568,7 +570,7 @@ class DetectorAllocation(DetectorBase):
         self.detector([r], threshold=2)
         with self.assertLogs("fobots", "INFO"):
             self.feed(["2a00:1450::1", "2a00:1450::2", "2a00:1450::3"], 0)
-        self.assertEqual(self.nft.banned(6), ["2a00:1450::/32"])
+        self.assertEqual(self.nft.banned(6), ["2a00:1450::1/128", "2a00:1450::2/127"])
 
     def test_recent_ban_is_not_repeated_within_a_minute(self):
         self.detector([self.ALLOC], threshold=2)
@@ -591,7 +593,7 @@ class DetectorAllocation(DetectorBase):
         with self.assertLogs("fobots", "INFO"):
             for _ in range(3):
                 self.det.feed_line(line("43.1.1.1", 0, "/projects"), site)
-        self.assertEqual(self.nft.banned(), ["43.0.0.0/9"])
+        self.assertEqual(self.nft.banned(), ["43.1.1.1/32"])
 
     def test_site_ignore_all(self):
         site = Site("static", "/x.log", all=True)
@@ -619,10 +621,10 @@ class DetectorAllocation(DetectorBase):
         with self.assertLogs("fobots", "WARNING") as cm:
             for _ in range(3):
                 self.det.feed_line(line("43.1.1.1", 0, "/api/jobs", agent="runner/1"))
-        self.assertTrue(any("WATCH 43.0.0.0/9 banned" in m for m in cm.output))
+        self.assertTrue(any("WATCH 43.1.1.1/32 banned" in m for m in cm.output))
         events = read_events(wf, 0)
         self.assertEqual(events[0]["ips"][0][0], "43.1.1.1")
-        self.assertEqual(events[0]["range"], "43.0.0.0/9")
+        self.assertEqual(events[0]["range"], "43.1.1.1/32")
 
     def test_site_watch_overrides_the_global_one(self):
         wf = self.path("watched.jsonl")
@@ -631,7 +633,7 @@ class DetectorAllocation(DetectorBase):
         with self.assertLogs("fobots", "WARNING") as cm:
             for _ in range(3):
                 self.det.feed_line(line("43.1.1.1", 0, "/api/jobs", agent="runner/1"), site)
-        self.assertTrue(any("WATCH 43.0.0.0/9 banned" in m for m in cm.output))
+        self.assertTrue(any("WATCH 43.1.1.1/32 banned" in m for m in cm.output))
         self.assertEqual(read_events(wf, 0)[0]["ips"][0][0], "43.1.1.1")
 
     def test_site_watch_requires_its_own_path(self):
@@ -662,7 +664,7 @@ class DetectorObserved(DetectorBase):
     ALLOC = rng("34.64.0.0", "34.127.255.255")  # a /10
 
     def test_concentrated_scraper_gets_a_tight_ban(self):
-        self.detector([self.ALLOC], threshold=5, scope="observed")
+        self.detector([self.ALLOC], threshold=5)
         self.feed(["34.100.9.9"], 0)  # a bystander in the same allocation
         with self.assertLogs("fobots", "INFO"):
             self.feed([f"34.67.1.{i}" for i in range(1, 8)], 0)
@@ -673,7 +675,7 @@ class DetectorObserved(DetectorBase):
         self.assertTrue(any(ipaddress.ip_address("34.67.1.3") in n for n in banned))
 
     def test_scattered_traffic_falls_back_to_slash16_blocks(self):
-        self.detector([self.ALLOC], threshold=8, scope="observed")
+        self.detector([self.ALLOC], threshold=8)
         ips = [f"34.{o}.1.1" for o in (66, 67, 68, 70, 72, 74, 76, 78, 80)]
         with self.assertLogs("fobots", "INFO") as cm:
             self.feed(ips, 0)
@@ -682,7 +684,7 @@ class DetectorObserved(DetectorBase):
         self.assertTrue(any("too scattered" in m for m in cm.output))
 
     def test_fallback_whole_allocation_when_cap_is_zero(self):
-        self.detector([self.ALLOC], threshold=8, scope="observed", wide_prefix=0)
+        self.detector([self.ALLOC], threshold=8, wide_prefix=0)
         ips = [f"34.{o}.1.1" for o in (66, 67, 68, 70, 72, 74, 76, 78, 80)]
         with self.assertLogs("fobots", "INFO"):
             self.feed(ips, 0)
@@ -690,29 +692,33 @@ class DetectorObserved(DetectorBase):
 
     def test_small_allocation_is_banned_whole_on_fallback(self):
         small = rng("20.0.0.0", "20.0.255.255")
-        self.detector([small], threshold=8, scope="observed")
+        self.detector([small], threshold=8)
         with self.assertLogs("fobots", "INFO"):
             self.feed([f"20.0.{o}.1" for o in range(0, 144, 16)], 0)  # 9 groups, 4096 apart
         self.assertEqual(self.nft.banned(), ["20.0.0.0/16"])
 
     def test_escalates_after_repeated_partial_bans(self):
-        self.detector([self.ALLOC], threshold=5, scope="observed", escalate=2)
+        self.detector([self.ALLOC], threshold=5, escalate=2)
         with self.assertLogs("fobots", "INFO"):
             for k, base in enumerate((66, 80, 100)):
                 self.feed([f"34.{base}.1.{i}" for i in range(1, 8)], k * 120)
         self.assertTrue(any(net(b).prefixlen == 16 for b in self.nft.banned()))
 
     def test_ips_are_forgotten_after_the_window(self):
-        self.detector([self.ALLOC], threshold=100, scope="observed", window=10)
+        self.detector([self.ALLOC], threshold=100, window=10)
         self.feed(["34.67.1.1"], 0)
         self.feed(["34.67.1.2"], 100)  # triggers a purge
         self.assertNotIn("34.67.1.1", self.det.ips)
         self.assertIn("34.67.1.2", self.det.ips)
 
-    def test_default_mode_tracks_no_ips(self):
-        self.detector([self.ALLOC], threshold=100)
-        self.feed(["34.67.1.1"], 0)
-        self.assertEqual(self.det.ips, {})
+    def test_full_ip_table_bans_the_block_of_the_ip_never_the_allocation(self):
+        """An IPv6 /64 can fill OBSERVED_MAX_IPS: the next allocation over the threshold must not
+        be banned whole (that would be the amplification of the old ban_scope = allocation)."""
+        self.detector([self.ALLOC], threshold=5)
+        with mock.patch("fobots.detector.OBSERVED_MAX_IPS", 0), self.assertLogs("fobots", "INFO") as cm:
+            self.feed(["34.67.1.9"] * 6, 0)
+        self.assertEqual(self.nft.banned(), ["34.67.0.0/20"])
+        self.assertTrue(any("table full" in m for m in cm.output))
 
 
 class LoadMonitorTests(unittest.TestCase):
@@ -2215,15 +2221,23 @@ class Commands(TmpDirCase):
         rc_file = self.write("ranges.json", json.dumps([[4, ip("43.0.0.0"), ip("43.127.255.255")]]))
         rc, out, err = self.run_main("run", "--dry-run", "--dir", self.dir, "-c", rc_file,
                                      "-w", self.path("w.txt"), "-t", "5", "--sustain", "1", log_path)
-        self.assertEqual(rc, 0)  # default ban_scope = observed: the IPs seen, not the /9
+        self.assertEqual(rc, 0)  # the IPs seen, not the /9
         self.assertIn("add element inet fobots banned4 { 43.1.1.0/30 timeout 3600s, "
                       "43.1.1.4/31 timeout 3600s }", out)
-        rc, out, err = self.run_main("run", "--dry-run", "--dir", self.dir, "-c", rc_file,
-                                     "-w", self.path("w.txt"), "-t", "5", "--sustain", "1",
-                                     "--ban-scope", "allocation", log_path)
-        self.assertEqual(rc, 0)
-        self.assertIn("add element inet fobots banned4 { 43.0.0.0/9 timeout 3600s }", out)
-        self.assertIn("BAN 43.0.0.0/9 for 3600 s", err)
+
+    def test_old_ban_scope_allocation_warns_and_bans_the_ips_seen(self):
+        """An old configuration must not stop the daemon (no protection at all after an upgrade)."""
+        log_path = self.write("access.log", "".join(line(f"43.1.1.{i}", 0) for i in range(8)))
+        rc_file = self.write("ranges.json", json.dumps([[4, ip("43.0.0.0"), ip("43.127.255.255")]]))
+        for value, code in (("allocation", 0), ("observed", 0), ("bogus", 1)):
+            conf = self.write("old.conf", f"[fobots]\nban_scope = {value}\n")
+            rc, out, err = self.run_main("run", "--dry-run", "--dir", self.dir, "-c", rc_file, "-f", conf,
+                                         "-w", self.path("w.txt"), "-t", "5", "--sustain", "1", log_path)
+            self.assertEqual(rc, code, value)
+            self.assertEqual("no longer exists" in err, value == "allocation", value)
+            if code == 0:
+                self.assertNotIn("43.0.0.0/9", out)
+                self.assertIn("43.1.1.0/30", out)
 
     def test_run_saves_the_traps_state_at_the_end(self):
         log_path = self.write("access.log", "".join(
@@ -2235,15 +2249,6 @@ class Commands(TmpDirCase):
             site = json.load(f)["sites"]["default"]
         self.assertEqual([e["path"] for e in site["traps"]], ["/.env"])
         self.assertIn("/.env", site["state"]["traps"])
-
-    def test_run_observed_replay(self):
-        log_path = self.write("access.log", "".join(line(f"43.1.1.{i}", 0) for i in range(8)))
-        rc_file = self.write("ranges.json", json.dumps([[4, ip("43.0.0.0"), ip("43.127.255.255")]]))
-        rc, out, err = self.run_main("run", "--dry-run", "--dir", self.dir, "-c", rc_file,
-                                     "-w", self.path("w.txt"), "-t", "5", "--sustain", "1", "--ban-scope", "observed", log_path)
-        self.assertEqual(rc, 0)
-        self.assertNotIn("43.0.0.0/9", out)
-        self.assertIn("43.1.1.", out)
 
     def test_run_rejects_bad_options(self):
         for argv in (("--observed-prefix", "4"), ("--observed-max-prefix", "24"), ("--load-signal", "bogus")):

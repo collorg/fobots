@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 Joël Maizi
-"""Grouping of observed IPs (ban_scope = observed)."""
+"""Grouping of the IPs seen in an allocation (tight bans)."""
 from collections import Counter
 
 

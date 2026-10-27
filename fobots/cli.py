@@ -185,8 +185,13 @@ def cmd_run(args):
     if args.trap_scope not in TRAP_SCOPES:
         log.error("invalid trap_scope: %r (%s)", args.trap_scope, " or ".join(TRAP_SCOPES))
         return 1
-    if args.ban_scope not in SCOPES:
-        log.error("invalid ban_scope: %r (%s)", args.ban_scope, " or ".join(SCOPES))
+    if args.ban_scope == "allocation":
+        log.warning("ban_scope = allocation no longer exists (one client could get its whole "
+                    "provider banned): ban_scope = observed is used; remove the line from the "
+                    "configuration (observed_max_prefix = 0 still allows the whole allocation as "
+                    "the fallback of a repeated or scattered abuse)")
+    elif args.ban_scope not in SCOPES:
+        log.error("invalid ban_scope: %r (only %s)", args.ban_scope, " or ".join(SCOPES))
         return 1
     if not 8 <= args.observed_prefix <= 32:
         log.error("observed_prefix must be between 8 and 32 (IPv4)")
@@ -223,16 +228,14 @@ def cmd_run(args):
     det = Detector(args.threshold, args.prefix_threshold or args.threshold, args.sustain,
                    args.window, store, Banner(nft, wl, args.ban_seconds), rdap,
                    load, args.min_threshold, args.min_ban_seconds, watch, watch_file,
-                   ignore_path, sites, args.ban_scope, args.observed_prefix, args.observed_escalate,
+                   ignore_path, sites, args.observed_prefix, args.observed_escalate,
                    args.observed_max_prefix, args.slow_threshold, args.slow_window,
                    trap_conf, trap_file, args.trap_ban, args.trap_ban_seconds, trap_welcome,
                    args.trap_scope)
-    if det.observed:
-        log.info("ban_scope observed: groups of IPs of at most /%d (IPv6 /%d), fallback to blocks "
-                 "of %s if scattered or after %d partial bans", args.observed_prefix,
-                 OBSERVED_PREFIX6,
-                 f"/{args.observed_max_prefix} (IPv6 /{OBSERVED_WIDE6})"
-                 if args.observed_max_prefix else "the whole allocation", args.observed_escalate)
+    log.info("bans: groups of IPs of at most /%d (IPv6 /%d), fallback to blocks of %s if "
+             "scattered or after %d partial bans", args.observed_prefix, OBSERVED_PREFIX6,
+             f"/{args.observed_max_prefix} (IPv6 /{OBSERVED_WIDE6})"
+             if args.observed_max_prefix else "the whole allocation", args.observed_escalate)
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     signal.signal(signal.SIGUSR1, lambda *_: det.dump())
     if args.config:
@@ -835,17 +838,14 @@ def main(argv=None):
     r.add_argument("--watch-path", metavar="REGEX",
                    help="restricts --watch-agent to the matching paths (e.g. ^/api/); "
                         "if both are given, both must match")
-    r.add_argument("--ban-scope", choices=SCOPES, default="observed",
-                   help="observed: only the groups of IPs seen, inside the allocation (default); "
-                        "allocation: the whole RDAP range is banned")
     r.add_argument("--observed-prefix", type=int, default=20,
-                   help="ban_scope=observed: maximum width of a group of IPs, as an IPv4 prefix "
+                   help="maximum width of a group of IPs banned, as an IPv4 prefix "
                         "(default: 20, i.e. 4096 addresses; IPv6: /48)")
     r.add_argument("--observed-escalate", type=int, default=4,
-                   help="ban_scope=observed: partial bans of the same allocation (within the duration "
+                   help="partial bans of the same allocation (within the duration "
                         "of a ban) before falling back to wide blocks (default: 4)")
     r.add_argument("--observed-max-prefix", type=int, default=16,
-                   help="ban_scope=observed: if the traffic is scattered, blocks of this width are "
+                   help="if the traffic is scattered, blocks of this width are "
                         "banned (IPv4 prefix, default: 16; IPv6: /32) instead of the whole "
                         "allocation; 0 = whole allocation")
     r.add_argument("--rdap-per-hour", type=int, default=100,
@@ -856,7 +856,7 @@ def main(argv=None):
                    help="learns the trap paths (404/403 asked for by many IPs); nothing is banned, "
                         "see `fobots traps`")
     add_trap_options(r)
-    r.set_defaults(fn=cmd_run)
+    r.set_defaults(fn=cmd_run, ban_scope="observed")  # ban_scope: configuration only (see cmd_run)
 
     sub.add_parser("setup", parents=[common],
                    help="creates the nft table, or completes an older one (idempotent)").set_defaults(fn=cmd_setup)

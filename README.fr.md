@@ -38,9 +38,8 @@ Python 3.7+ standard (aucune dépendance), nftables, Linux.
    `prefix_threshold` req/s, avec un budget horaire, un délai entre requêtes et
    une pause sur HTTP 429. Les plages trouvées sont enregistrées sur disque
    (`ip_ranges.json`) et réutilisées.
-4. Par défaut (`ban_scope = observed`), le ban se resserre sur les IP réellement vues dans
-   l'allocation : voir « Ban resserré » plus bas. Avec `ban_scope = allocation`, il couvre
-   **toute l'allocation**.
+4. Le ban couvre les IP réellement vues dans l'allocation, regroupées, jamais l'allocation
+   entière d'emblée : voir « Ban resserré » plus bas.
 5. Le ban est une transaction nft unique. Une plage déjà couverte par un ban plus
    large est ignorée ; une plage qui en englobe d'autres les remplace.
 6. L'état des bans est **dans nft** (lu au démarrage) : le démon peut être
@@ -112,7 +111,8 @@ Une mise à jour relance seulement un service déjà démarré ; `purge` supprim
 make test            # python3 -m unittest discover -s tests  (bibliothèque standard, environ 1 s)
 ```
 La suite couvre le regroupement des plages, les bans (dont le contournement du chevauchement
-nft), la détection avec et sans `ban_scope = observed`, les niveaux de charge, les erreurs de
+nft), la détection (bans resserrés,
+blocs de repli, escalade), les niveaux de charge, les erreurs de
 configuration, la rotation des logs et les commandes (`run --dry-run`, `welcome`, `watched`,
 `install --destdir`). Aucun test n'exige root ni un vrai `nft`.
 
@@ -405,8 +405,8 @@ donc individuelle : une machine d'un réseau autorisé qui scanne est bannie seu
 réseau reste joignable. En IPv6 l'unité est le /64, car un scanner change d'adresse à volonté à
 l'intérieur ; une IP de la liste welcome des pièges située dans ce /64 est exclue du ban. Les
 bans de débit sont l'inverse, volontairement : leur raison d'être est une charge répartie sur
-beaucoup d'IP d'une plage, que le ban par IP ne verrait pas (`ban_scope = observed` les restreint
-aux groupes d'IP réellement vus).
+beaucoup d'IP d'une plage, que le ban par IP ne verrait pas (ils sont restreints aux groupes d'IP
+réellement vus).
 
 **Ports.** Un ban de piège ferme les ports web (TCP 80/443, UDP 443), comme les bans de débit.
 Avec `trap_scope = all`, il ferme **tous les ports** (SSH, mail…) dès la première fois, dans des
@@ -528,10 +528,9 @@ conf.** Voir `fobots.conf.example` pour toutes les clés :
 | `trap_hits`, `trap_scan_paths`, `trap_scan_segments`, `trap_scan_window`, `trap_ban_time`, `trap_min_ips`, `trap_min_nets`, `trap_window`, `trap_template_min`, `trap_ignore`, `trap_welcome`, `traps_file` | 2, 20, 5, 5m, 1h, 5, 3, 6h, 3, aucun, `trap_welcome.txt` à côté de la configuration, `<dir>/traps.json` | réglages de ce qui précède |
 | `slow_threshold`, `slow_window` | 0, 10m | bannit une plage dont le débit **moyen** sur la fenêtre dépasse cette valeur (req/s) ; `0` = désactivé |
 | `ban_time` | 1h | durée d'un ban (`30m`, `1h`, `1d`) |
-| `ban_scope` | `observed` | `observed` : seulement les groupes d'IP vues dans la plage RDAP ; `allocation` : on bannit la plage entière |
 | `observed_prefix` | 20 | `observed` : étendue maximale d'un groupe d'IP (préfixe IPv4 ; IPv6 : `/48`) |
 | `observed_escalate` | 4 | `observed` : bans partiels d'une allocation, pendant la durée d'un ban, avant le repli en blocs larges |
-| `observed_max_prefix` | 16 | `observed` : largeur des blocs bannis en repli (préfixe IPv4 ; IPv6 : `/32`) ; `0` = allocation entière |
+| `observed_max_prefix` | 16 | largeur des blocs bannis en repli (préfixe IPv4 ; IPv6 : `/32`) ; `0` = allocation entière |
 | `rdap_per_hour`, `delay` | 100, 2 | budget et espacement des requêtes RDAP |
 | `load_signal` | `none` | durcissement selon la charge : `probe`, `psi`, `loadavg` ou `none` |
 | `load_probe_url`, `load_probe_timeout` | aucun, 10s | signal `probe` : page(s) `[HOTE@]URL` demandée(s) ; une réponse plus lente compte pour la valeur du délai |
@@ -617,16 +616,17 @@ allocation cloud, ne dépasse jamais un `threshold` par seconde. Avec `slow_thre
 sur les 10 dernières minutes (comptées par tranches de 10 secondes : pas de coût par requête).
 Désactivé par défaut. À mesurer d'abord avec `fobots analyse` (tableau « Slow scrapers ») : il
 montre quelles plages seraient prises et quelle part du trafic elles envoient. Pour le reste la
-règle est la même que celle par seconde (liste `welcome`, `ban_scope`, `ban_time`) ; avec
-`ban_scope = observed`, les IP vues sur toute la fenêtre sont considérées, donc le ban reste
-serré. Attention : un gros réseau légitime (campus derrière un NAT) sur un site très fréquenté
+règle est la même que celle par seconde (liste `welcome`, ban resserré, `ban_time`) ; les IP
+vues sur toute la fenêtre sont considérées, donc le ban reste serré. Attention : un gros réseau légitime (campus derrière un NAT) sur un site très fréquenté
 peut dépasser un débit moyen bas ; vérifie avec `analyse` sur tes propres logs, et corrige les
 faux positifs avec `welcome add`. Il n'est pas modulé par le niveau de charge.
 
-## Ban resserré (`ban_scope = observed`)
+## Ban resserré
 
-C'est le défaut. Avec `ban_scope = allocation`, toute l'allocation est bannie : un seul client
-au-dessus du seuil coupe alors tous les visiteurs de son fournisseur (jusqu'à un `/8`). RDAP continue de
+L'allocation entière n'est jamais bannie d'emblée : un seul client au-dessus du seuil couperait
+tous les visiteurs de son fournisseur (jusqu'à un `/8`). C'est ce que faisait l'ancien
+`ban_scope = allocation` ; il n'existe plus, et une configuration qui l'a encore démarre avec un
+avertissement et le ban resserré. RDAP continue de
 fournir la **frontière** (l'allocation) et de décider *quand* bannir (même seuil, même
 comptage par allocation). Ce qui change, c'est *quoi* : au lieu de l'allocation entière,
 on bannit les IP vues pendant la fenêtre `window`, regroupées ainsi :
@@ -646,23 +646,26 @@ on bannit les IP vues pendant la fenêtre `window`, regroupées ainsi :
   `observed_max_prefix = 0`, le repli bannit l'allocation entière.
 
 Le journal indique pour chaque ban le nombre d'IP, de groupes et la part des requêtes
-couverte. Pour comparer sans risque : `run --dry-run --ban-scope observed` sur un même log
-rejoué (`fobots run --dry-run --ban-scope allocation LOG`, puis `observed`).
+couverte. Pour voir ce qui serait banni sur un vrai log : `fobots run --dry-run LOG`.
 Quand un ban en remplace d'autres (un `/16` qui englobe des `/32`), le démon retire les
 anciens éléments puis ajoute le nouveau en **deux transactions** nft : nft 0.9.x refuse de
 le faire en une seule (« interval overlaps with an existing one »). Si l'ajout échoue, les
 éléments retirés sont remis.
-Mémoire : au plus 200 000 IP suivies. Les IPv4 et IPv6 sont traitées de la même façon.
+Mémoire : au plus 200 000 IP suivies. Une fois la table pleine (un `/64` IPv6 peut la remplir),
+une allocation au-dessus du seuil reçoit le bloc `observed_prefix` autour de l'IP qui l'a
+déclenché (IPv6 : son `/48`), jamais l'allocation entière. Les IPv4 et IPv6 sont traitées de la
+même façon.
 
 ## Limites connues
 
 - **Temps de ban restant avec un vieux nftables.** Avec nftables 0.9.x, `nft list set`
   n'affiche que `timeout 1h` et jamais `expires` : `bans` et `watched` n'indiquent alors pas le
   temps restant. Les versions plus récentes affichent `expires`, que ces commandes utilisent.
-- **Plage = allocation RIR** avec `ban_scope = allocation` (le défaut, `observed`, la resserre), souvent très large (`17.0.0.0/8`, `43.0.0.0/9`,
-  `36.128.0.0/10`). Un ban frappe toute l'allocation, y compris des visiteurs
-  légitimes. Garde-fou : le ban expire, la liste welcome corrige. Les réponses
-  RDAP plus larges que `/8` (IPv4) ou `/16` (IPv6) sont rejetées.
+- **Comptage par allocation RIR**, souvent très large (`17.0.0.0/8`, `43.0.0.0/9`,
+  `36.128.0.0/10`) : les requêtes de toutes ses IP s'additionnent. Le ban est resserré sur les IP
+  vues, mais un bloc de repli (`/16`) ou, avec `observed_max_prefix = 0`, l'allocation entière,
+  peut toucher des visiteurs légitimes. Garde-fou : le ban expire, la liste welcome corrige. Les
+  réponses RDAP plus larges que `/8` (IPv4) ou `/16` (IPv6) sont rejetées.
 - **Détection sur le log**, donc *après* la requête : nginx n'écrit une ligne
   qu'une fois la réponse terminée. Un serveur déjà saturé écrit ses logs en
   retard, et la réaction l'est aussi.
