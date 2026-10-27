@@ -397,6 +397,16 @@ administrator scanning their own site keeps SSH. Mind the shared addresses (carr
 company or university NAT, a VPN exit): one infected machine behind them closes the whole server
 to all their users for the duration of the ban.
 
+**Poisoning.** Anyone with `trap_min_ips` (5) IPs in `trap_min_nets` (3) networks, a small
+botnet, can make a trap of any missing path, including one that real browsers ask for on your
+site (a `manifest.json` or a service worker you removed, an old link still published). Visitors
+who then ask for `trap_hits` (2) of them are banned. Only the paths that never answered can be
+turned into traps (a path the site serves, or of a shape it serves, never is), and the files every
+browser asks for are ignored (favicon, `apple-touch-icon`, `robots.txt`, `/.well-known/`…). Before
+`trap_ban = yes`, read `fobots traps` on your own traffic for a while; put the missing paths that
+legitimate visitors ask for in `trap_ignore`, and raise `trap_min_nets` on a busy site. In IPv6
+the unit is the /64: a single machine cannot pass for several IPs.
+
 **`welcome.txt` does not protect from traps**: it holds trusted networks, often internal ones, and attacks come from inside too. The traps have their own list, `trap_welcome.txt` next to the configuration (`trap_welcome` to move it): its IPs neither make a trap nor are flagged. Use it for the security scanners you accept (audit, monitoring, a pentest):
 
 ```

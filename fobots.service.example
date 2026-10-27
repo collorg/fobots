@@ -32,6 +32,10 @@ User=fobots
 SupplementaryGroups=adm
 ConfigurationDirectory=fobots
 StateDirectory=fobots
+# the state (/var/lib/fobots) is for the fobots user only (systemd would create it 0755), and so
+# is what the daemon creates (UMask)
+StateDirectoryMode=0750
+UMask=0027
 
 # `setup` is idempotent: creates the nft table if missing, otherwise does nothing.
 ExecStartPre=/usr/local/sbin/fobots setup -f /etc/fobots/fobots.conf
@@ -45,18 +49,33 @@ AmbientCapabilities=CAP_NET_ADMIN
 CapabilityBoundingSet=CAP_NET_ADMIN
 NoNewPrivileges=yes
 
-# Hardening (to relax if a particular case requires it).
+# Hardening (to relax if a particular case requires it). `systemd-analyze security fobots`
+# rates it. Directives unknown to an older systemd are ignored with a warning in the journal
+# (ProtectProc: systemd 247). /proc stays whole (no ProcSubset=pid): load_signal reads
+# /proc/pressure and /proc/loadavg.
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
 PrivateDevices=yes
 ProtectKernelModules=yes
+ProtectKernelTunables=yes
+ProtectKernelLogs=yes
 ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RemoveIPC=yes
 LockPersonality=yes
 MemoryDenyWriteExecute=yes
 SystemCallArchitectures=native
+# Python and nft (netlink) need nothing outside the usual set of a service.
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallErrorNumber=EPERM
 
 [Install]
 WantedBy=multi-user.target

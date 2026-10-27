@@ -416,6 +416,17 @@ qu'un administrateur qui scanne son propre site garde SSH. Attention aux adresse
 NAT d'entreprise ou d'université, sortie de VPN) : une seule machine infectée derrière ferme tout
 le serveur à tous leurs utilisateurs pendant la durée du ban.
 
+**Empoisonnement.** Quiconque dispose de `trap_min_ips` (5) IP dans `trap_min_nets` (3) réseaux,
+un petit botnet, peut faire un piège de n'importe quel chemin absent, y compris un chemin que de
+vrais navigateurs demandent sur votre site (un `manifest.json` ou un service worker retiré, un
+ancien lien encore publié). Les visiteurs qui en demandent ensuite `trap_hits` (2) sont bannis.
+Seuls les chemins qui n'ont jamais répondu peuvent devenir des pièges (un chemin servi, ou de la
+forme d'un chemin servi, jamais), et les fichiers que tout navigateur demande sont ignorés
+(favicon, `apple-touch-icon`, `robots.txt`, `/.well-known/`…). Avant `trap_ban = yes`, lisez
+`fobots traps` sur votre propre trafic un moment ; mettez dans `trap_ignore` les chemins absents
+que des visiteurs légitimes demandent, et montez `trap_min_nets` sur un site très fréquenté. En
+IPv6 l'unité est le /64 : une seule machine ne peut pas passer pour plusieurs IP.
+
 **`welcome.txt` ne protège pas des pièges** : elle contient des réseaux de confiance, souvent internes, et les attaques viennent aussi de l'intérieur. Les pièges ont leur propre liste, `trap_welcome.txt` à côté de la configuration (`trap_welcome` pour la déplacer) : ses IP ne fabriquent pas de piège et ne sont jamais signalées. À réserver aux scanners de sécurité que l'on accepte (audit, supervision, test d'intrusion) :
 
 ```
