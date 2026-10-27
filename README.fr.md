@@ -12,11 +12,13 @@ débit dépasse un seuil, et les ajoute à un set **nftables** avec expiration :
 trafic est rejeté par le pare-feu avant d'atteindre le serveur web.
 
 > **Statut : preuve de concept (POC).** Ce logiciel a été *vibe codé* (écrit avec un assistant
-> d'IA) et est encore en phase de test. Il a des tests unitaires et d'intégration, mais il n'a
-> **pas été relu par des humains** : toutes les contributions sont les bienvenues. Il modifie
-> le pare-feu : un bogue ou un mauvais réglage peut couper des visiteurs légitimes, ou
-> vous-même. Relisez le code avant de vous y fier, essayez-le d'abord avec `--dry-run` (et
-> `trap_ban = no`), et gardez un accès à la machine hors de ce chemin réseau.
+> d'IA) et est encore en phase de test. Il a des tests unitaires et d'intégration, et il a déjà
+> permis de ressusciter un serveur qui ne pouvait plus répondre aux sollicitations à cause de
+> scrapers. Mais il n'a **pas été relu par d'autres humains que son auteur** : toutes les
+> contributions sont les bienvenues. Il modifie le pare-feu : un bogue ou un mauvais réglage
+> peut couper des visiteurs légitimes, ou vous-même. Relisez le code avant de vous y fier,
+> essayez-le d'abord avec `--dry-run` (et `trap_ban = no`), et gardez un accès à la machine
+> hors de ce chemin réseau.
 
 Python 3.7+ standard (aucune dépendance), nftables, Linux. Sur Ubuntu 20.04 (Python 3.8,
 noyau 5.4) : `apt install nftables` (version 0.9.3).
