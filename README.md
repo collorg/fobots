@@ -11,10 +11,10 @@ dropped by the firewall before it reaches the web server.
 
 > **Status: proof of concept (POC).** This software was *vibe coded* (written with an AI
 > assistant) and is still being tested. It has unit and integration tests, but it has
-> **not been reviewed by humans** and has not been proven in production. It edits your
-> firewall: a bug or a bad setting can lock out legitimate visitors, or you. Review the code before relying on it, try it with
-> `--dry-run` (and `trap_ban = no`) first, and keep an out-of-band access to the machine.
-> Reviews and bug reports are welcome.
+> **not been reviewed by humans**: all contributions are welcome. It edits your firewall: a
+> bug or a bad setting can lock out legitimate visitors, or you. Review the code before
+> relying on it, try it with `--dry-run` (and `trap_ban = no`) first, and keep an
+> out-of-band access to the machine.
 
 Plain Python 3.7+ (no dependencies), nftables, Linux. On Ubuntu 20.04 (Python 3.8,
 kernel 5.4): `apt install nftables` (version 0.9.3).
