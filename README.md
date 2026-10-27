@@ -11,22 +11,15 @@ dropped by the firewall before it reaches the web server.
 
 > **Status: proof of concept (POC).** This software was *vibe coded* (written with an AI
 > assistant) and is still being tested. It has unit and integration tests, and it has already
-> brought back to life a server that could no longer answer requests because of scrapers. But
-> it has **not been reviewed by humans other than its author**: all contributions are
-> welcome. It edits your firewall: a bug or a bad setting can lock out legitimate visitors, or
-> you. Review the code before relying on it, try it with `--dry-run` (and `trap_ban = no`)
-> first, and keep an out-of-band access to the machine.
+> brought back to life a server that could no longer answer requests because of scrapers (load
+> brought down from over 35 to 0.2). The other features (example systemd unit, load-based
+> hardening, IPv6, `watch_*` monitoring) have only been tested with a fake `nft`. It has
+> **not been reviewed by humans other than its author**: all contributions are welcome. It
+> edits your firewall: a bug or a bad setting can lock out legitimate visitors, or you. Review
+> the code before relying on it, try it with `--dry-run` (and `trap_ban = no`) first, and keep
+> an out-of-band access to the machine.
 
-Plain Python 3.7+ (no dependencies), nftables, Linux. On Ubuntu 20.04 (Python 3.8,
-kernel 5.4): `apt install nftables` (version 0.9.3).
-
-> Status: banning has been validated in production on Ubuntu 20.04 (Python 3.8, kernel
-> 5.4, nftables 0.9.3): load brought down from over 35 to 0.2. The other features
-> (example systemd unit, load-based hardening, IPv6, `watch_*` monitoring) have only been
-> tested with a fake `nft`. With nftables 0.9.3 (Ubuntu 20.04), `nft list set` only shows
-> `timeout 1h` and never `expires`: `bans` and `watched` therefore do not show the remaining
-> time. On more recent versions (Ubuntu 24.04, from a user report), `expires` is shown and
-> used by these commands. Start with `--dry-run`.
+Plain Python 3.7+ (no dependencies), nftables, Linux.
 
 ## How it works
 
@@ -124,7 +117,7 @@ The integration test replays generated logs through the real daemon and checks t
 set: whole-allocation and tight bans, a wider ban replacing smaller ones (the case nft 0.9.x
 refuses in a single transaction), `welcome add`, IPv6 and the kernel expiry. It runs in a
 throwaway user+network namespace (`unshare -Urn`): no root, and the machine's own nft rules
-are never touched. Run it on the oldest nft you support (Ubuntu 20.04: 0.9.3).
+are never touched. Run it on the oldest nft you support (0.9.3).
 
 ## Load-based hardening
 
@@ -604,6 +597,9 @@ Memory: at most 200,000 IPs tracked. IPv4 and IPv6 are handled the same way.
 
 ## Known limits
 
+- **Remaining ban time with old nftables.** With nftables 0.9.x, `nft list set` only shows
+  `timeout 1h` and never `expires`: `bans` and `watched` then do not show the remaining time.
+  More recent versions show `expires`, and these commands use it.
 - **Range = RIR allocation** by default (see `ban_scope = observed` to narrow it), often very
   wide (`17.0.0.0/8`, `43.0.0.0/9`, `36.128.0.0/10`). A ban hits the whole allocation,
   including legitimate visitors. Safeguard: the ban expires, the welcome list fixes it. RDAP

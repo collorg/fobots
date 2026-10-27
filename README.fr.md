@@ -14,23 +14,15 @@ trafic est rejeté par le pare-feu avant d'atteindre le serveur web.
 > **Statut : preuve de concept (POC).** Ce logiciel a été *vibe codé* (écrit avec un assistant
 > d'IA) et est encore en phase de test. Il a des tests unitaires et d'intégration, et il a déjà
 > permis de ressusciter un serveur qui ne pouvait plus répondre aux sollicitations à cause de
-> scrapers. Mais il n'a **pas été relu par d'autres humains que son auteur** : toutes les
-> contributions sont les bienvenues. Il modifie le pare-feu : un bogue ou un mauvais réglage
-> peut couper des visiteurs légitimes, ou vous-même. Relisez le code avant de vous y fier,
-> essayez-le d'abord avec `--dry-run` (et `trap_ban = no`), et gardez un accès à la machine
-> hors de ce chemin réseau.
+> scrapers (charge de plus de 35 ramenée à 0,2). Les autres fonctions (unité systemd
+> d'exemple, durcissement selon la charge, IPv6, surveillance `watch_*`) n'ont été testées
+> qu'avec un faux `nft`. Il n'a **pas été relu par d'autres humains que son auteur** : toutes
+> les contributions sont les bienvenues. Il modifie le pare-feu : un bogue ou un mauvais
+> réglage peut couper des visiteurs légitimes, ou vous-même. Relisez le code avant de vous y
+> fier, essayez-le d'abord avec `--dry-run` (et `trap_ban = no`), et gardez un accès à la
+> machine hors de ce chemin réseau.
 
-Python 3.7+ standard (aucune dépendance), nftables, Linux. Sur Ubuntu 20.04 (Python 3.8,
-noyau 5.4) : `apt install nftables` (version 0.9.3).
-
-> État : le bannissement a été validé en production sur Ubuntu 20.04 (Python 3.8, noyau
-> 5.4, nftables 0.9.3) : charge de plus de 35 ramenée à 0,2. Les autres fonctions
-> (unité systemd d'exemple, durcissement selon la charge, IPv6, surveillance
-> `watch_*`) n'ont été testées qu'avec un faux `nft`. Avec nftables 0.9.3
-> (Ubuntu 20.04), `nft list set` n'affiche que `timeout 1h` et jamais `expires` : `bans` et
-> `watched` n'indiquent donc pas le temps restant. Sur des versions plus récentes (Ubuntu 24.04,
-> d'après un retour d'usage), `expires` est affiché et repris par ces commandes.
-> Commencer par `--dry-run`.
+Python 3.7+ standard (aucune dépendance), nftables, Linux.
 
 ## Fonctionnement
 
@@ -131,7 +123,7 @@ bans d'allocation entière et resserrés, un ban plus large qui en remplace de p
 que nft 0.9.x refuse en une seule transaction), `welcome add`, IPv6 et l'expiration par le noyau.
 Il s'exécute dans un espace de noms utilisateur+réseau jetable (`unshare -Urn`) : sans root, et
 les règles nft de la machine ne sont jamais touchées. À lancer avec la plus ancienne version de
-nft prise en charge (Ubuntu 20.04 : 0.9.3).
+nft prise en charge (0.9.3).
 
 ## Durcissement selon la charge
 
@@ -628,6 +620,9 @@ Mémoire : au plus 200 000 IP suivies. Les IPv4 et IPv6 sont traitées de la mê
 
 ## Limites connues
 
+- **Temps de ban restant avec un vieux nftables.** Avec nftables 0.9.x, `nft list set`
+  n'affiche que `timeout 1h` et jamais `expires` : `bans` et `watched` n'indiquent alors pas le
+  temps restant. Les versions plus récentes affichent `expires`, que ces commandes utilisent.
 - **Plage = allocation RIR** par défaut (voir `ban_scope = observed` pour resserrer), souvent très large (`17.0.0.0/8`, `43.0.0.0/9`,
   `36.128.0.0/10`). Un ban frappe toute l'allocation, y compris des visiteurs
   légitimes. Garde-fou : le ban expire, la liste welcome corrige. Les réponses

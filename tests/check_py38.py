@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 Joël Maizi
-"""Syntax that Python 3.8 (Ubuntu 20.04) refuses but a recent Python accepts, in the files given.
+"""Syntax that Python 3.8 refuses but a recent Python accepts, in the files given.
 
 The tests run on a recent Python on the development machine and would not notice it. Checked:
 an f-string that reuses its own quote inside a replacement field (f"{d["k"]}", Python 3.12+), and
