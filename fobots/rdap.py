@@ -9,10 +9,11 @@ import queue
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections import deque
 
-from .util import fmt_range, write_atomic
+from .util import fmt_range, printable, write_atomic
 
 log = logging.getLogger("fobots")
 
@@ -21,6 +22,10 @@ RDAP_URL = "https://rdap.org/ip/{}"  # redirects to the competent RIR
 
 # An RDAP answer wider than this is rejected (safeguard against 0.0.0.0/0).
 MIN_PREFIX = {4: 8, 6: 16}
+
+MAX_ANSWER = 1 << 20   # bytes: an RDAP answer is a few kB
+
+MAX_PAUSE = 3600       # seconds: longest pause asked by a 429 (Retry-After) that is obeyed
 
 
 
@@ -93,8 +98,22 @@ def abuse_email(data):
 
 
 def label(data):
-    """Organisation as shown by `bans`: name of the allocation and abuse contact."""
-    return " ".join(x for x in (str(data.get("name") or ""), abuse_email(data)) if x)
+    """Organisation as shown by `bans`: name of the allocation and abuse contact (written by
+    whoever registered the allocation: control characters are escaped)."""
+    return printable(" ".join(x for x in (str(data.get("name") or ""), abuse_email(data)) if x))[:200]
+
+
+class HttpsOnlyRedirect(urllib.request.HTTPRedirectHandler):
+    """rdap.org redirects to the RIR: a redirection to plain HTTP would let anyone on the path
+    forge the range."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if urllib.parse.urlsplit(newurl).scheme != "https":
+            raise RdapError(f"redirection to a non-HTTPS URL refused ({newurl[:100]})", retry=3600)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+OPENER = urllib.request.build_opener(HttpsOnlyRedirect)
 
 
 def fetch_rdap(ip):
@@ -102,17 +121,20 @@ def fetch_rdap(ip):
                                  headers={"Accept": "application/rdap+json",
                                           "User-Agent": "fobots/1.0"})
     try:
-        with urllib.request.urlopen(req, timeout=15) as r:
-            data = json.load(r)
+        with OPENER.open(req, timeout=15) as r:
+            body = r.read(MAX_ANSWER + 1)
+        if len(body) > MAX_ANSWER:
+            raise RdapError(f"answer larger than {MAX_ANSWER} bytes", retry=3600)
+        data = json.loads(body)
         return (ipaddress.ip_address(data["startAddress"]),
                 ipaddress.ip_address(data["endAddress"]), label(data))
     except urllib.error.HTTPError as e:
         if e.code == 429:
             ra = e.headers.get("Retry-After", "")
-            pause = int(ra) if ra.isdigit() else 600
+            pause = min(int(ra), MAX_PAUSE) if ra.isdigit() else 600
             raise RdapError("HTTP 429", retry=pause, pause=pause)
         raise RdapError(f"HTTP {e.code}", retry=1800)
-    except (OSError, ValueError, KeyError) as e:
+    except (OSError, ValueError, KeyError, TypeError) as e:  # TypeError: data is not a dict
         raise RdapError(f"{type(e).__name__}: {e}", retry=300)
 
 

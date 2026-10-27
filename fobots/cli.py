@@ -57,7 +57,7 @@ from .replay import report as replay_report
 from .record import report as record_report
 from .sites import Site
 from .traps import MAX_VALUES, TrapLearner
-from .util import parse_duration
+from .util import parse_duration, printable
 from .welcome import Banner, Welcome, welcome_add
 
 log = logging.getLogger("fobots")
@@ -96,6 +96,22 @@ def watch_file_path(args):
 
 def traps_file_path(args):
     return args.traps_file or os.path.join(args.dir, "traps.json")
+
+
+
+def welcome_cmd(entries, traps=False, config=None):
+    """The `welcome add` command offered for copying: only the entries that are IPs or networks
+    (they come from files the daemon writes, which must not slip in shell text)."""
+    nets = []
+    for x in entries:
+        try:
+            n = str(ipaddress.ip_network(x, strict=False))
+        except ValueError:
+            continue
+        if n not in nets:
+            nets.append(n)
+    cmd = "fobots welcome add " + ("--traps " if traps else "") + " ".join(nets)
+    return cmd + (f" -f {config}" if config else "")
 
 
 
@@ -294,7 +310,7 @@ def cmd_bans(args):
     for (n, exp, scope), name in zip(rows, names):
         left = "" if exp is None else f"{exp} s left"
         ports = "all ports" if scope == "all" else "web"
-        print(f"{str(n):<24} {left:<12} {ports:<9} {name}".rstrip())
+        print(f"{str(n):<24} {left:<12} {ports:<9} {printable(name)}".rstrip())
     return 0
 
 
@@ -366,8 +382,12 @@ def cmd_watched(args):
     for ip, a in agg.items():
         state = "?"
         if known:
-            addr = ipaddress.ip_address(ip)
-            left = [e for n, e in active if n.version == addr.version and addr in n]
+            try:
+                addr = ipaddress.ip_address(ip)
+            except ValueError:
+                addr = None
+            left = [e for n, e in active if addr is not None and n.version == addr.version
+                    and addr in n]
             state = f"active ({max(e or 0 for e in left)} s)" if left else "expired"
         a["state"] = state
         rows.append((ip, a))
@@ -377,17 +397,15 @@ def cmd_watched(args):
     if not rows:
         print("no monitored IP in an active ban")
         return 0
-    cmd = "fobots welcome add " + " ".join(str(ipaddress.ip_network(ip)) for ip, _ in rows)
-    if args.config:
-        cmd += f" -f {args.config}"
+    cmd = welcome_cmd([ip for ip, _ in rows], config=args.config)
     if args.cmd:
         print(cmd)
         return 0
     print(f"{'IP':<40} {'BANS':>4} {'REQ':>6}  {'LAST BAN':<16} {'RANGE':<20} {'STATE':<14} ROUTE")
     for ip, a in rows:
         when = datetime.fromtimestamp(a["t"]).strftime("%Y-%m-%d %H:%M")
-        print(f"{ip:<40} {a['bans']:>4} {a['req']:>6}  {when:<16} {a['range']:<20} "
-              f"{a['state']:<14} {a['path']}")
+        print(f"{printable(ip):<40} {a['bans']:>4} {a['req']:>6}  {when:<16} "
+              f"{printable(a['range']):<20} {a['state']:<14} {printable(a['path'])}")
     print(f"\n{len(rows)} IP(s) over {args.since / 86400:g} d. To protect them all:\n  {cmd}")
     return 0
 
@@ -439,7 +457,7 @@ def cmd_traps(args):
             print(f"  {'VALUES':>7}  SHAPE")
             for t in snap["templates"][:args.top]:
                 suffix = "+" if t["values"] >= MAX_VALUES else ""
-                print(f"  {str(t['values']) + suffix:>7}  {t['template']}")
+                print(f"  {str(t['values']) + suffix:>7}  {printable(t['template'])}")
         offenders = snap.get("offenders", [])
         if offenders:
             print("  IPs that asked for several traps (banned only with trap_ban = yes):")
@@ -450,12 +468,10 @@ def cmd_traps(args):
                 if o["banned"] and o.get("scope") == "all":
                     state += " all"
                 what = f"scan, {o['rate']} paths: " if o.get("kind") == "scan" else ""
-                print(f"  {when:<16}  {o['ip']:<40} {o['strikes']:>5} {state:<12} "
-                      f"{what}{', '.join(o['paths'][:4])}")
+                print(f"  {when:<16}  {printable(o['ip']):<40} {o['strikes']:>5} {state:<12} "
+                      f"{what}{printable(', '.join(o['paths'][:4]))}")
         if offenders:
-            cmd = "fobots welcome add --traps " + " ".join(sorted({o["ip"] for o in offenders}))
-            if args.config:
-                cmd += f" -f {args.config}"
+            cmd = welcome_cmd(sorted({o["ip"] for o in offenders}), traps=True, config=args.config)
             print(f"  to protect them all (security scanners you accept):\n    {cmd}")
         if not snap["traps"]:
             print(f"  no trap path: none asked for by at least {args.trap_min_ips} IP(s) from "
@@ -466,7 +482,7 @@ def cmd_traps(args):
         print(f"  {'IPS':>5} {'NETS':>5} {'REQ':>6}  {'LAST':<16}  PATH")
         for e in snap["traps"][:args.top]:
             when = datetime.fromtimestamp(e["last"]).strftime("%Y-%m-%d %H:%M")
-            print(f"  {e['ips']:>5} {e['nets']:>5} {e['requests']:>6}  {when:<16}  {e['path']}")
+            print(f"  {e['ips']:>5} {e['nets']:>5} {e['requests']:>6}  {when:<16}  {printable(e['path'])}")
         if len(snap["traps"]) > args.top:
             print(f"  … {len(snap['traps']) - args.top} more (--top)")
     return 0

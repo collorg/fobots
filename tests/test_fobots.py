@@ -21,7 +21,7 @@ from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 from fobots.analyse import Analysis, average_rate, dir_key, report, short_agent, sustained_rate  # noqa: E402
-from fobots.cli import main  # noqa: E402
+from fobots.cli import main, welcome_cmd  # noqa: E402
 from fobots.config import CONF_KEYS, SITE_KEYS, find_config, load_config  # noqa: E402
 from fobots.detector import Detector  # noqa: E402
 from fobots.events import append_event, read_events, trim_events  # noqa: E402
@@ -29,14 +29,14 @@ from fobots.follow import follow  # noqa: E402
 from fobots.grouping import cluster_ips, pick_groups, wide_blocks  # noqa: E402
 from fobots.load import LoadMonitor, Probe, parse_probe_urls, read_psi, summarize  # noqa: E402
 from fobots.nft import NFT_SETUP, Nft, NftError, parse_elems, val_nets  # noqa: E402
-from fobots.rdap import label, RangeStore  # noqa: E402
+from fobots.rdap import MAX_PAUSE, RdapError, fetch_rdap, label, RangeStore  # noqa: E402
 from fobots.replay import Replay, make_fetcher, parse_rates, read_requests, schedule, select_requests  # noqa: E402
 from fobots.replay import report as replay_report  # noqa: E402
 from fobots.record import LogTail, Recorder, episodes, read_records, read_sys, recorded_span, scan_procs  # noqa: E402
 from fobots.record import report as record_report  # noqa: E402
 from fobots.sites import Site  # noqa: E402
 from fobots.traps import TrapLearner, shape  # noqa: E402
-from fobots.util import append_text, fmt_range, parse_duration, parse_ts, prefix_of, range_nets, subtract, write_atomic  # noqa: E402
+from fobots.util import append_text, fmt_range, printable, parse_duration, parse_ts, prefix_of, range_nets, subtract, write_atomic  # noqa: E402
 from fobots.welcome import Banner, Welcome, welcome_add  # noqa: E402
 
 # main() calls logging.basicConfig; with a handler already on the root logger it does nothing,
@@ -248,6 +248,76 @@ class WelcomeList(TmpDirCase):
         os.utime(p, (time.time() + 5, time.time() + 5))
         w.reload()
         self.assertEqual(w.nets, [net("10.0.0.0/8"), net("192.168.0.0/16")])
+
+
+class RdapFetch(unittest.TestCase):
+    """fetch_rdap against a local server standing for rdap.org."""
+
+    @classmethod
+    def setUpClass(cls):
+        answer = {"startAddress": "43.0.0.0", "endAddress": "43.127.255.255", "name": "ACME"}
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def send(self, code, body=b"", **headers):
+                self.send_response(code)
+                for k, v in headers.items():
+                    self.send_header(k.replace("_", "-"), v)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_GET(self):
+                what = self.path.rsplit("/", 1)[1]
+                if what == "ok":
+                    self.send(200, json.dumps(answer).encode())
+                elif what == "esc":
+                    self.send(200, json.dumps(dict(answer, name="EVIL\x1b]0;pwned\x07")).encode())
+                elif what == "redir":
+                    self.send(302, Location=f"http://127.0.0.1:{self.server.server_port}/ip/ok")
+                elif what == "big":
+                    self.send(200, b" " * (2 << 20))
+                elif what == "busy":
+                    self.send(429, Retry_After="99999999")
+                else:
+                    self.send(200, b"[1, 2]")
+        cls.server = QuietServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=cls.server.serve_forever, daemon=True).start()
+        cls.url = f"http://127.0.0.1:{cls.server.server_port}/ip/{{}}"
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+
+    def fetch(self, what):
+        with mock.patch("fobots.rdap.RDAP_URL", self.url):
+            return fetch_rdap(what)
+
+    def test_answer(self):
+        self.assertEqual(self.fetch("ok")[2], "ACME")
+
+    def test_redirection_to_plain_http_is_refused(self):
+        with self.assertRaisesRegex(RdapError, "non-HTTPS"):
+            self.fetch("redir")
+
+    def test_oversized_answer_is_refused(self):
+        with self.assertRaisesRegex(RdapError, "larger than"):
+            self.fetch("big")
+
+    def test_retry_after_is_capped(self):
+        with self.assertRaises(RdapError) as cm:
+            self.fetch("busy")
+        self.assertEqual(cm.exception.pause, MAX_PAUSE)
+
+    def test_name_control_characters_are_escaped(self):
+        self.assertEqual(self.fetch("esc")[2], "EVIL\\x1b]0;pwned\\x07")
+
+    def test_answer_that_is_not_an_object(self):
+        with self.assertRaises(RdapError):
+            self.fetch("list")
 
 
 class RangeStoreTests(TmpDirCase):
@@ -1919,6 +1989,33 @@ class TrapDetector(DetectorBase):
         det = self.detector()
         det.feed_line(req("20.1.1.1", 1, "/.env", 404))
         self.assertEqual(det.learners, {})
+
+
+class Display(TmpDirCase):
+    """What the administration commands print, as root, comes partly from untrusted sources."""
+
+    def test_printable(self):
+        self.assertEqual(printable("/a\x1b[2Jb"), "/a\\x1b[2Jb")
+        self.assertEqual(printable("\u202eabc"), "\\u202eabc")
+        self.assertEqual(printable("été /x"), "été /x")
+
+    def test_offered_command_keeps_only_networks(self):
+        self.assertEqual(welcome_cmd(["1.2.3.4", "1.2.3.4; rm -rf /", "2a00:1450:1:2::/64", "1.2.3.4"],
+                                     traps=True, config="/etc/fobots/fobots.conf"),
+                         "fobots welcome add --traps 1.2.3.4/32 2a00:1450:1:2::/64 -f /etc/fobots/fobots.conf")
+
+    def test_traps_command_escapes_the_snapshot(self):
+        off = {"ip": "1.2.3.4$(id)", "paths": ["/\x1b[31mx"], "t": 0, "strikes": 1,
+               "banned": False, "seconds": 0, "kind": "traps", "rate": 0}
+        snap = {"lines": 1, "excused": 0, "served": 0, "ignored": 0, "welcomed": 0, "latest": 0,
+                "traps": [], "offenders": [off], "templates": []}
+        p = self.write("traps.json", json.dumps({"t": 0, "sites": {"default": snap}}))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            main(["traps", "--traps-file", p, "-f", self.write("c.conf", "[fobots]\n")])
+        self.assertNotIn("\x1b", out.getvalue())
+        self.assertIn("/\\x1b[31mx", out.getvalue())
+        self.assertNotIn("welcome add --traps 1.2.3.4$(id)", out.getvalue())
 
 
 class LinkSafeWrites(TmpDirCase):

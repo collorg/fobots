@@ -87,3 +87,14 @@ def append_text(path, text):
     fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_NOFOLLOW, 0o644)
     with os.fdopen(fd, "a") as f:
         f.write(text)
+
+
+
+def printable(s):
+    """`s` with its control characters escaped (\\x1b…): text read from the logs, RDAP or a file
+    the daemon writes must not drive the administrator's terminal (escape sequences)."""
+    s = str(s)
+    if s.isprintable():
+        return s
+    return "".join(c if c.isprintable() else f"\\x{ord(c):02x}" if ord(c) < 256
+                   else f"\\u{ord(c):04x}" for c in s)
