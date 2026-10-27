@@ -382,8 +382,8 @@ def cmd_watched(args):
 def trap_options(args):
     return {"min_ips": args.trap_min_ips, "min_nets": args.trap_min_nets,
             "window": args.trap_window, "template_min": args.trap_template_min,
-            "hits": args.trap_hits, "burst": args.trap_burst,
-            "burst_sustain": args.trap_burst_sustain,
+            "hits": args.trap_hits, "scan_paths": args.trap_scan_paths,
+            "scan_segments": args.trap_scan_segments, "scan_window": args.trap_scan_window,
             "ignore": re.compile(args.trap_ignore) if args.trap_ignore else None}
 
 
@@ -433,7 +433,7 @@ def cmd_traps(args):
             for o in offenders[-args.top:]:
                 when = datetime.fromtimestamp(o["t"]).strftime("%Y-%m-%d %H:%M")
                 state = f"{o['seconds']} s" if o["banned"] else "not banned"
-                what = f"burst {o['rate']}/s: " if o.get("kind") == "burst" else ""
+                what = f"scan, {o['rate']} paths: " if o.get("kind") == "scan" else ""
                 print(f"  {when:<16}  {o['ip']:<40} {o['strikes']:>5} {state:<12} "
                       f"{what}{', '.join(o['paths'][:4])}")
         if offenders:
@@ -713,11 +713,14 @@ def add_trap_options(parser):
     parser.add_argument("--trap-hits", type=int, default=2, metavar="N",
                         help="an IP is flagged once it asked for this many distinct traps "
                              "(default: 2)")
-    parser.add_argument("--trap-burst", type=float, default=5, metavar="REQ_PER_S",
-                        help="an IP asking for more than this many missing paths per second, "
-                             "none answered, is flagged (0 = off, default: 5)")
-    parser.add_argument("--trap-burst-sustain", type=int, default=3, metavar="SECONDS",
-                        help="... for this many consecutive seconds (default: 3)")
+    parser.add_argument("--trap-scan-paths", type=int, default=20, metavar="N",
+                        help="an IP asking for this many different missing paths, almost none "
+                             "answered, is flagged as a scanner (0 = off, default: 20)")
+    parser.add_argument("--trap-scan-segments", type=int, default=5, metavar="N",
+                        help="... under at least this many different top-level directories "
+                             "(a page with broken assets uses one or two) (default: 5)")
+    parser.add_argument("--trap-scan-window", type=parse_duration, default=300, metavar="DURATION",
+                        help="... within this period (default: 5m)")
     parser.add_argument("--trap-ignore", metavar="REGEX",
                         help="paths that are never traps (a [site:NAME] trap_ignore replaces it)")
     parser.add_argument("--trap-ban", action="store_true",

@@ -1531,55 +1531,74 @@ class TrapLearning(unittest.TestCase):
         self.assertEqual([e["path"] for e in tl.found()], ["/favicon.ico.bak"])
         self.assertEqual(tl.ignored, 25)
 
-    def burst(self, tl, ip, secs, per_sec, status=404, start=1000):
-        for s in range(secs):
-            for i in range(per_sec):
-                tl.feed(ip, start + s, f"/p{s}-{i}", status)
+    # what real scanners looked like in a log (paths shortened), and what they are not
+    LIBREDTAIL = ["/hello.world", "/index.php", "/test.hello", "/vendor/phpunit/phpunit/src/util/php/eval-stdin.php",
+                  "/vendor/phpunit/phpunit/util/php/eval-stdin.php", "/phpunit/phpunit/src/util/php/eval-stdin.php",
+                  "/lib/phpunit/phpunit/src/util/php/eval-stdin.php", "/laravel/vendor/phpunit/eval-stdin.php",
+                  "/www/vendor/phpunit/eval-stdin.php", "/ws/vendor/phpunit/eval-stdin.php",
+                  "/yii/vendor/phpunit/eval-stdin.php", "/zend/vendor/phpunit/eval-stdin.php",
+                  "/v2/vendor/phpunit/eval-stdin.php", "/tests/vendor/phpunit/eval-stdin.php",
+                  "/demo/vendor/phpunit/eval-stdin.php", "/cms/vendor/phpunit/eval-stdin.php",
+                  "/crm/vendor/phpunit/eval-stdin.php", "/admin/vendor/phpunit/eval-stdin.php",
+                  "/backup/vendor/phpunit/eval-stdin.php", "/blog/vendor/phpunit/eval-stdin.php",
+                  "/panel/vendor/phpunit/eval-stdin.php", "/public/vendor/phpunit/eval-stdin.php",
+                  "/apps/vendor/phpunit/eval-stdin.php", "/app/vendor/phpunit/eval-stdin.php",
+                  "/containers/json"]
 
-    def test_a_sustained_burst_of_missing_paths_flags_the_ip(self):
+    def asks(self, tl, ip, paths, start=1000, step=0, status=404):
+        for i, path in enumerate(paths):
+            tl.feed(ip, start + i * step, path, status)
+
+    def test_a_slow_scanner_walking_a_dictionary_is_flagged(self):
         tl = self.learner()
-        self.burst(tl, "20.1.1.1", 2, 8)
-        self.assertEqual(tl.take_offenders(), [])  # 2 s: could be a page with broken assets
-        self.burst(tl, "20.1.1.1", 1, 5, start=1002)
-        self.assertEqual(tl.take_offenders(), [])  # the 3rd second has not passed 5 yet
-        tl.feed("20.1.1.1", 1002, "/one-more", 404)
+        self.asks(tl, "20.1.1.1", self.LIBREDTAIL, step=2)  # one request every two seconds
         off = tl.take_offenders()
-        self.assertEqual([(o["ip"], o["kind"], o["strikes"]) for o in off],
-                         [("20.1.1.1", "burst", 1)])
-        self.assertEqual(off[0]["rate"], 6)
-        self.assertEqual(len(off[0]["paths"]), 3)
+        self.assertEqual([(o["ip"], o["kind"]) for o in off], [("20.1.1.1", "scan")])
+        self.assertGreaterEqual(off[0]["rate"], 20)
 
-    def test_a_burst_needs_more_than_the_rate_and_no_answer(self):
+    def test_a_scanner_firing_everything_in_one_second_is_flagged(self):
         tl = self.learner()
-        self.burst(tl, "20.1.1.1", 6, 5)   # exactly 5/s is not "more than 5"
-        for s in range(6):                  # an answered request in each second
-            tl.feed("30.1.1.1", 2000 + s, "/", 200)
-            for i in range(8):
-                tl.feed("30.1.1.1", 2000 + s, f"/m{s}-{i}", 404)
-        self.assertEqual(tl.take_offenders(), [])
-        self.burst(tl, "40.1.1.1", 3, 8, start=3000)
-        self.assertEqual([o["ip"] for o in tl.take_offenders()], ["40.1.1.1"])
-        tl2 = self.learner()
-        for s in (3000, 3002, 3004, 3006):
-            for i in range(8):
-                tl2.feed("50.1.1.1", s, f"/g{s}-{i}", 404)
-        self.assertEqual(tl2.take_offenders(), [])  # not consecutive seconds
+        self.asks(tl, "20.1.1.1", self.LIBREDTAIL, step=0)
+        self.assertEqual(len(tl.take_offenders()), 1)
 
-    def test_burst_ignores_excused_welcome_and_private_requests(self):
+    def test_a_page_with_broken_assets_is_not_a_scan(self):
+        tl = self.learner()
+        tl.feed("30.1.1.1", 990, "/gallery", 200)  # the HTML, answered earlier
+        self.asks(tl, "30.1.1.1", [f"/img/thumb{i}.png" for i in range(40)], step=0)  # one directory
+        self.asks(tl, "30.1.1.1", [f"/{d}/x{i}.png" for i, d in enumerate(("img", "css", "js", "fonts"))
+                                   for _ in range(1)], start=1001)  # 4 directories: still < 5
+        self.assertEqual(tl.take_offenders(), [])
+
+    def test_a_visitor_with_a_few_dead_links_is_not_a_scan(self):
+        tl = self.learner()
+        self.asks(tl, "30.1.1.1", ["/ecoop13/venue.html", "/ecoop/", "/old/page"], step=60)
+        self.assertEqual(tl.take_offenders(), [])
+
+    def test_answered_requests_protect_a_busy_visitor(self):
+        tl = self.learner()
+        for i in range(30):  # a crawler: as many answered pages as dead links
+            tl.feed("30.1.1.1", 1000 + i, f"/page{i}", 200)
+            tl.feed("30.1.1.1", 1000 + i, f"/d{i}/gone", 404)
+        self.assertEqual(tl.take_offenders(), [])
+
+    def test_a_slow_trickle_is_forgotten_by_the_window(self):
+        tl = self.learner(scan_window=60)
+        self.asks(tl, "20.1.1.1", self.LIBREDTAIL, step=10)  # 25 paths over 240 s: never 20 within 60 s
+        self.assertEqual(tl.take_offenders(), [])
+
+    def test_scan_ignores_excused_welcome_and_private_requests(self):
         tl = self.learner(exempt=lambda ip: ip == "20.1.1.1")
+        self.asks(tl, "20.1.1.1", self.LIBREDTAIL)                      # welcome list
+        self.asks(tl, "10.0.0.5", self.LIBREDTAIL)                      # private
+        self.asks(tl, "30.1.1.1", ["/favicon.ico", "/robots.txt", "/sitemap.xml"] * 20)  # never traps
         for i in range(3):
             tl.feed("8.8.8.8", i, f"/post/{UID[:-1]}{i}", 200)
-        for s in range(5):
-            for i in range(8):
-                tl.feed("30.1.1.1", 1000 + s, f"/post/{UID[:-2]}{i:02d}", 404)  # deleted posts
-                tl.feed("30.1.1.1", 1000 + s, "/favicon.ico", 404)
-                tl.feed("20.1.1.1", 1000 + s, f"/w{s}-{i}", 404)                # welcome list
-                tl.feed("10.0.0.5", 1000 + s, f"/q{s}-{i}", 404)                # private
-        self.assertEqual(tl.take_offenders(), [])
+        self.asks(tl, "40.1.1.1", [f"/d{i}/post/{UID[:-2]}{i:02d}" for i in range(30)])  # not the shape
+        self.assertEqual([o["ip"] for o in tl.take_offenders()], ["40.1.1.1"])
 
-    def test_burst_can_be_switched_off(self):
-        tl = self.learner(burst=0)
-        self.burst(tl, "20.1.1.1", 6, 20)
+    def test_scan_can_be_switched_off(self):
+        tl = self.learner(scan_paths=0)
+        self.asks(tl, "20.1.1.1", self.LIBREDTAIL)
         self.assertEqual(tl.take_offenders(), [])
 
     def test_state_survives_json_and_a_restart(self):
@@ -1785,11 +1804,10 @@ class TrapDetector(DetectorBase):
             det.feed_line(req("8.8.8.8", 1, "/", 200))
         self.assertEqual(det.learners["default"].lines, 1)
 
-    def test_a_burst_gets_the_ip_banned_alone(self):
+    def test_a_scanner_gets_the_ip_banned_alone(self):
         det = self.detector(trap_conf={}, trap_ban=True, trap_ban_seconds=300)
-        for s in range(3):
-            for i in range(8):
-                det.feed_line(req("20.1.1.1", s, f"/p{s}-{i}", 404))
+        for i, path in enumerate(TrapLearning.LIBREDTAIL):
+            det.feed_line(req("20.1.1.1", i, path, 404))
         self.assertEqual(self.nft.banned(), ["20.1.1.1/32"])
         self.assertEqual([e for _, e in self.nft.sets[4]], [300])
 

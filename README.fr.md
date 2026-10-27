@@ -383,15 +383,18 @@ Ce que le site sert réellement protège des faux positifs :
 - `trap_ignore` (regex, globale ou dans une section `[site:NOM]`, qui la remplace) ajoute des
   chemins qui ne sont jamais des pièges.
 
-**Deuxième signal : une rafale de chemins inexistants.** Un scanner qui parcourt un dictionnaire
-envoie un flot de requêtes qui reçoivent toutes un 404/403. Une IP qui demande plus de
-`trap_burst` (5) chemins inexistants par seconde pendant `trap_burst_sustain` (3) secondes
-consécutives, **sans une seule requête ayant reçu une réponse** pendant ces secondes, est
-signalée aussitôt, dès le premier scanner (inutile que d'autres IP aient demandé les mêmes
-chemins). La durée et la règle « aucune réponse » écartent une page aux assets cassés (le HTML
-a reçu une réponse et tout est fini en une seconde). Les requêtes qui ne sont jamais des pièges
-(favicon…, formes servies par le site, `trap_ignore`) et la liste welcome des pièges ne
-comptent pas. `trap_burst = 0` désactive.
+**Deuxième signal : un scan.** Un scanner qui parcourt un dictionnaire demande des dizaines de
+chemins *différents*, sous de nombreux répertoires différents, et n'obtient presque aucune
+réponse : `/wp-json`, `/owa`, `/geoserver`, `/vendor/phpunit/…`, `/login.cgi`. Sa vitesse ne
+compte pas (une requête toutes les deux secondes, ou trente en une seconde), seulement cette
+dispersion. Une IP qui demande `trap_scan_paths` (20) chemins inexistants différents, sous au
+moins `trap_scan_segments` (5) répertoires de tête différents, en `trap_scan_window` (5 min),
+avec au plus une requête sur dix répondue, est signalée aussitôt, dès le premier scanner
+(inutile que d'autres IP aient demandé les mêmes chemins). Les autres trafics ont une autre
+allure : une page aux assets cassés se concentre sur un ou deux répertoires et son HTML a reçu
+une réponse ; un visiteur au lien mort demande un seul chemin. Les requêtes qui ne sont jamais
+des pièges (favicon…, formes servies par le site, `trap_ignore`) et la liste welcome des pièges
+ne comptent pas. `trap_scan_paths = 0` désactive.
 
 **Réaction.** Une IP qui a demandé `trap_hits` (2) pièges distincts est signalée, y compris
 celles qui ont fabriqué les pièges. Le signal est individuel, le ban aussi : l'IP seule (IPv6 :
@@ -425,10 +428,10 @@ fobots traps         # pièges, formes et IP signalées, d'après l'instantané 
 fobots traps access.log autre.log   # idem, calculé maintenant depuis des logs (ni nft, ni root)
 ```
 Options : `trap_min_ips`, `trap_min_nets`, `trap_window`, `trap_template_min`, `trap_hits`,
-`trap_burst`, `trap_burst_sustain`, `trap_ban_time`, `trap_ignore`, `trap_welcome`, `traps_file`. Un robot d'indexation qui suit des liens morts
+`trap_scan_paths`, `trap_scan_segments`, `trap_scan_window`, `trap_ban_time`, `trap_ignore`, `trap_welcome`, `traps_file`. Un robot d'indexation qui suit des liens morts
 depuis plusieurs réseaux ressemble à un scanner (le mettre dans la liste welcome ou dans
-`trap_ignore`). Pas encore couvert : un site qui répond 200 à tout, et un scanner lent : un
-piège n'existe qu'une fois que d'autres IP l'ont demandé, et la rafale ne voit que les rapides.
+`trap_ignore`). Pas encore couvert : un site qui répond 200 à tout, et un scanner qui reste sous les
+seuils du scan (moins de 20 chemins en 5 minutes, ou mêlés de requêtes répondues).
 
 ## Repérer des IP légitimes prises dans un ban (runners CI…)
 
@@ -509,7 +512,7 @@ conf.** Voir `fobots.conf.example` pour toutes les clés :
 | `prefix_threshold` | = `threshold` | req/s d'un `/16` non résolu qui autorisent RDAP |
 | `sustain`, `window` | 5, 60 | secondes consécutives au-dessus du seuil exigées ; fenêtre de suivi (s) |
 | `traps`, `trap_ban` | non, non | apprend les chemins pièges (404/403 demandés par beaucoup d'IP) et signale les IP qui en demandent `trap_hits` ; avec `trap_ban` elles sont bannies, sinon seulement journalisées ; voir `fobots traps` |
-| `trap_hits`, `trap_burst`, `trap_burst_sustain`, `trap_ban_time`, `trap_min_ips`, `trap_min_nets`, `trap_window`, `trap_template_min`, `trap_ignore`, `trap_welcome`, `traps_file` | 2, 5, 3, 1h, 5, 3, 6h, 3, aucun, `trap_welcome.txt` à côté de la configuration, `<dir>/traps.json` | réglages de ce qui précède |
+| `trap_hits`, `trap_scan_paths`, `trap_scan_segments`, `trap_scan_window`, `trap_ban_time`, `trap_min_ips`, `trap_min_nets`, `trap_window`, `trap_template_min`, `trap_ignore`, `trap_welcome`, `traps_file` | 2, 20, 5, 5m, 1h, 5, 3, 6h, 3, aucun, `trap_welcome.txt` à côté de la configuration, `<dir>/traps.json` | réglages de ce qui précède |
 | `slow_threshold`, `slow_window` | 0, 10m | bannit une plage dont le débit **moyen** sur la fenêtre dépasse cette valeur (req/s) ; `0` = désactivé |
 | `ban_time` | 1h | durée d'un ban (`30m`, `1h`, `1d`) |
 | `ban_scope` | `allocation` | `allocation` : on bannit la plage RDAP entière ; `observed` : seulement les groupes d'IP vues dedans |

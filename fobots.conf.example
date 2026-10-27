@@ -70,8 +70,10 @@ ban_time = 1h        # duration of a ban: 30m, 1h, 1d…
 # only with trap_ban = yes. Try it with trap_ban = no first and read `fobots traps`.
 # traps = no
 # trap_ban = no
-# trap_burst = 5          # more than this many missing paths per second, none answered ...
-# trap_burst_sustain = 3  # ... for this many consecutive seconds: flagged at once (0 = burst off)
+# trap_scan_paths = 20    # an IP asking for this many different missing paths, almost none
+#                         # answered, ... (0 = no scan detection)
+# trap_scan_segments = 5  # ... under at least this many top-level directories, ...
+# trap_scan_window = 5m   # ... within this period, is a scanner: flagged at once
 # trap_hits = 2           # distinct traps asked for before an IP is flagged
 # trap_ban_time = 1h      # first ban of an IP, doubled each time it comes back (7d at most)
 # trap_min_ips = 5        # distinct IPs asking for the same missing path
