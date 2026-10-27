@@ -685,6 +685,18 @@ def cmd_replay(args):
 
 
 
+def fold_extra(ap, args, extra):
+    """Before Python 3.13, argparse matches the empty `nets` of `welcome add --traps CIDR` as soon
+    as it has read `add`, then leaves the CIDRs aside as unrecognized: they are `nets` anyway."""
+    if not extra:
+        return
+    if args.cmd == "welcome" and not any(x.startswith("-") for x in extra):
+        args.nets = list(args.nets) + extra
+        return
+    ap.error("unrecognized arguments: " + " ".join(extra))
+
+
+
 def add_trap_options(parser):
     parser.add_argument("--trap-min-ips", type=int, default=5, metavar="N",
                         help="a missing path (404/403) is a trap when asked for by this many "
@@ -946,7 +958,8 @@ def main(argv=None):
 
     for p in sub.choices.values():
         p.set_defaults(config=conf_path, **conf)  # command line > configuration > defaults
-    args = ap.parse_args(argv)
+    args, extra = ap.parse_known_args(argv)
+    fold_extra(ap, args, extra)
     if args.cmd == "run":
         for name in ("tense_factor", "critical_factor"):
             if not 0 < getattr(args, name) <= 1:

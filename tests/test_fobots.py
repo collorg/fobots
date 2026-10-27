@@ -2132,6 +2132,18 @@ class Commands(TmpDirCase):
         rc, out, _ = self.run_main("welcome", "list", "--traps", "--trap-welcome", tw)
         self.assertIn("198.51.100.0/24", out)
 
+    def test_welcome_add_with_an_option_before_the_ranges(self):
+        """What argparse before 3.13 does with `welcome add --traps CIDR`: CIDRs left over."""
+        from fobots.cli import fold_extra
+        ap = argparse.ArgumentParser()
+        args = argparse.Namespace(cmd="welcome", nets=[])
+        fold_extra(ap, args, ["198.51.100.0/24", "203.0.113.7"])
+        self.assertEqual(args.nets, ["198.51.100.0/24", "203.0.113.7"])
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            fold_extra(ap, argparse.Namespace(cmd="welcome", nets=[]), ["--bogus"])
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            fold_extra(ap, argparse.Namespace(cmd="run", nets=[]), ["x"])
+
     def test_every_documented_conf_key_is_known(self):
         root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
         import re
