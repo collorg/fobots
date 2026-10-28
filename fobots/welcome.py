@@ -102,7 +102,8 @@ class Banner:
                 log.warning("nft refused (attempt %d): %s", attempt, e)
                 if attempt == 2:
                     raise
-        log.info("BAN %s for %d s%s (%s)%s", ", ".join(str(a) for a, _ in adds),
+        log.info("BAN%s %s for %d s%s (%s)%s", " (dry run)" if getattr(self.nft, "dry_run", False) else "",
+                 ", ".join(str(a) for a, _ in adds),
                  seconds, ", all ports" if scope == "all" else "", reason,
                  f", {len(deletes)} included ban(s) replaced" if deletes else "")
         return True

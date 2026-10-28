@@ -597,7 +597,7 @@ the configuration file. **The command line overrides the configuration.** See
 | `tense_factor`, `critical_factor` | 0.5, 0.25 | multiplier of the threshold **and** of the ban duration |
 | `min_threshold`, `min_ban_time` | 1, 1m | floors of the effective threshold and duration |
 | `from_start` | no | first read the existing content of the log |
-| `dry_run` | no | observation: the daemon counts and logs its bans but only prints the nft commands. For `run` only: `welcome add` or `bans` still act on nftables |
+| `dry_run` | no | observation: the daemon counts and logs its bans (`BAN (dry run) …`, they expire after `ban_time` like real ones) but only prints the nft commands. For `run` only: `welcome add` or `bans` still act on nftables |
 
 Without `log` or a `[site:…]` section, the daemon **refuses to start** (clear error), unless
 stdin is a pipe or a file (`tail -F file | fobots run`) or `-` is given explicitly. Files

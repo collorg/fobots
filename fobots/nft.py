@@ -5,6 +5,7 @@ import ipaddress
 import json
 import logging
 import subprocess
+import time
 
 log = logging.getLogger("fobots")
 
@@ -69,11 +70,13 @@ def parse_elems(data):
 
 
 class Nft:
-    """Calls to nft; in dry-run mode, prints the scripts and simulates the sets in memory."""
+    """Calls to nft; in dry-run mode, prints the scripts and simulates the sets in memory, where
+    the bans expire like in the kernel (otherwise a range seen once would never be banned again,
+    and days of observation would hide the repeat offenders)."""
 
-    def __init__(self, binary="nft", dry_run=False):
-        self.binary, self.dry_run = binary, dry_run
-        self.sim = {name: [] for sets in SCOPE_SETS.values() for name in sets.values()}
+    def __init__(self, binary="nft", dry_run=False, clock=time.monotonic):
+        self.binary, self.dry_run, self.clock = binary, dry_run, clock
+        self.sim = {name: [] for sets in SCOPE_SETS.values() for name in sets.values()}  # (net, deadline)
 
     def _run(self, args, stdin=None):
         try:
@@ -124,7 +127,9 @@ class Nft:
     def elements(self, ver, scope="web"):
         name = SCOPE_SETS[scope][ver]
         if self.dry_run:
-            return list(self.sim[name])
+            now = self.clock()
+            self.sim[name] = [(n, d) for n, d in self.sim[name] if d > now]
+            return [(n, max(1, int(d - now))) for n, d in self.sim[name]]
         r = self._run(["-j", "list", "set", "inet", "fobots", name])
         if r.returncode:
             raise NftError(r.stderr.strip() or "set not found (run `setup`?)")
@@ -165,4 +170,5 @@ class Nft:
         elems = ", ".join(f"{n} timeout {max(1, int(t))}s" for n, t in adds)
         self._script(f"add element inet fobots {name} {{ {elems} }}\n")
         if self.dry_run:
-            self.sim[name] += [(n, t) for n, t in adds]
+            now = self.clock()
+            self.sim[name] += [(n, now + max(1, int(t))) for n, t in adds]

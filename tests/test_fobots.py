@@ -39,7 +39,7 @@ from fobots.record import report as record_report  # noqa: E402
 from fobots.sites import Site  # noqa: E402
 from fobots.traps import TrapLearner, shape  # noqa: E402
 from fobots.util import append_text, fmt_range, printable, parse_duration, parse_ts, prefix_of, range_nets, subtract, write_atomic  # noqa: E402
-from fobots.welcome import Banner, Welcome, welcome_add  # noqa: E402
+from fobots.welcome import NO_WELCOME, Banner, Welcome, welcome_add  # noqa: E402
 
 # main() calls logging.basicConfig; with a handler already on the root logger it does nothing,
 # so the tests control where the log records go.
@@ -396,11 +396,25 @@ class NftDryRun(unittest.TestCase):
         return out.getvalue()
 
     def test_scope_all_uses_the_every_port_set(self):
-        nft = Nft(dry_run=True)
+        nft = Nft(dry_run=True, clock=lambda: 1000.0)
         out = self.apply(nft, 6, [], [(net("2001:db8::/64"), 60)], scope="all")
         self.assertEqual(out, "add element inet fobots trapped6 { 2001:db8::/64 timeout 60s }\n")
         self.assertEqual(nft.elements(6, "all"), [(net("2001:db8::/64"), 60)])
         self.assertEqual(nft.elements(6), [])
+
+    def test_simulated_bans_expire(self):
+        now = [1000.0]
+        nft = Nft(dry_run=True, clock=lambda: now[0])
+        self.apply(nft, 4, [], [(net("1.2.3.0/24"), 60)])
+        now[0] += 59.5
+        self.assertEqual(nft.elements(4), [(net("1.2.3.0/24"), 1)])
+        now[0] += 1
+        self.assertEqual(nft.elements(4), [])
+        # gone: the same range is banned again, and logged as simulated
+        banner = Banner(nft, NO_WELCOME, 60)
+        with self.assertLogs("fobots", "INFO") as cm, contextlib.redirect_stdout(io.StringIO()):
+            self.assertTrue(banner.ban(rng("1.2.3.0", "1.2.3.255"), "test"))
+        self.assertIn("BAN (dry run) 1.2.3.0/24 for 60 s", "\n".join(cm.output))
 
     def test_setup_blocks_http3_and_refills_the_chain(self):
         lines = NFT_SETUP.splitlines()
@@ -424,13 +438,13 @@ class NftDryRun(unittest.TestCase):
             self.assertFalse(nft.table_up_to_date())
 
     def test_delete_and_add_are_two_transactions_in_order(self):
-        nft = Nft(dry_run=True)
-        nft.sim["banned4"] = [(net("34.66.63.27/32"), 100)]
+        nft = Nft(dry_run=True, clock=lambda: 1000.0)
+        nft.sim["banned4"] = [(net("34.66.63.27/32"), 1100.0)]
         out = self.apply(nft, 4, [net("34.66.63.27/32")], [(net("34.64.0.0/10"), 3600)])
         lines = out.strip().splitlines()
         self.assertEqual(lines[0], "delete element inet fobots banned4 { 34.66.63.27/32 }")
         self.assertEqual(lines[1], "add element inet fobots banned4 { 34.64.0.0/10 timeout 3600s }")
-        self.assertEqual(nft.sim["banned4"], [(net("34.64.0.0/10"), 3600)])
+        self.assertEqual(nft.elements(4), [(net("34.64.0.0/10"), 3600)])
 
     def test_add_only_and_timeout_floor(self):
         nft = Nft(dry_run=True)
@@ -438,8 +452,8 @@ class NftDryRun(unittest.TestCase):
         self.assertEqual(out.strip(), "add element inet fobots banned4 { 1.2.3.0/24 timeout 1s }")
 
     def test_restore_when_add_fails(self):
-        nft = Nft(dry_run=True)
-        nft.sim["banned4"] = [(net("1.1.1.1/32"), 50)]
+        nft = Nft(dry_run=True, clock=lambda: 1000.0)
+        nft.sim["banned4"] = [(net("1.1.1.1/32"), 1050.0)]
         calls = []
         orig = nft._add
 
@@ -453,7 +467,7 @@ class NftDryRun(unittest.TestCase):
             with self.assertRaises(NftError):
                 nft.apply(4, [net("1.1.1.1/32")], [(net("1.1.0.0/16"), 3600)], restore=[(net("1.1.1.1/32"), 50)])
         self.assertEqual(calls[1], [(net("1.1.1.1/32"), 50)])
-        self.assertEqual(nft.sim["banned4"], [(net("1.1.1.1/32"), 50)])
+        self.assertEqual(nft.elements(4), [(net("1.1.1.1/32"), 50)])
 
 
 class BannerTests(TmpDirCase):

@@ -622,7 +622,7 @@ conf.** Voir `fobots.conf.example` pour toutes les clés :
 | `tense_factor`, `critical_factor` | 0.5, 0.25 | multiplicateur du seuil **et** de la durée de ban |
 | `min_threshold`, `min_ban_time` | 1, 1m | planchers du seuil et de la durée effectifs |
 | `from_start` | non | lire d'abord le contenu existant du log |
-| `dry_run` | non | observation : le démon compte et journalise ses bans mais ne fait qu'afficher les commandes nft. Pour `run` seulement : `welcome add` ou `bans` agissent toujours sur nftables |
+| `dry_run` | non | observation : le démon compte et journalise ses bans (`BAN (dry run) …`, ils expirent après `ban_time` comme les vrais) mais ne fait qu'afficher les commandes nft. Pour `run` seulement : `welcome add` ou `bans` agissent toujours sur nftables |
 
 Sans `log` ni section `[site:…]`, le démon **refuse de démarrer** (erreur claire), sauf si
 stdin est un tube ou un fichier (`tail -F fichier | fobots run`) ou si `-` est passé
