@@ -23,9 +23,9 @@ from urllib.parse import urlsplit
 
 from .analyse import dir_key
 from .load import TLSConnection, sni_of, summarize
-from .util import parse_ts
+from .util import VHOST, parse_ts
 
-LOG_RE = re.compile(r'^(\S+) \S+ \S+ \[([^\]]+)\] "([A-Z]+) (\S+)[^"]*" (\d{3}) (\S+) "[^"]*" "([^"]*)"')
+LOG_RE = re.compile('^' + VHOST + r'(\S+) \S+ \S+ \[([^\]]+)\] "([A-Z]+) (\S+)[^"]*" (\d{3}) (\S+) "[^"]*" "([^"]*)"')
 
 DEFAULT_RATES = (2.0, 5.0, 10.0, 15.0)  # requests per second
 MIN_REQUESTS = 20          # fewer requests than this in the log: not a mix

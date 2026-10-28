@@ -23,7 +23,7 @@ Plain Python 3.7+ (no dependencies), nftables, Linux.
 
 ## How it works
 
-1. Each line of the log (nginx/Apache *combined* format) is attached to an IP range:
+1. Each line of the log (nginx/Apache *combined* format, or Apache's *vhost_combined*) is attached to an IP range:
    the RIR allocation that contains it (obtained through RDAP, the successor of whois).
    The owner's details are not kept: only the range matters.
 2. Requests are counted per range and per second. When a range exceeds `threshold` req/s
@@ -41,6 +41,54 @@ Plain Python 3.7+ (no dependencies), nftables, Linux.
 
 ## Installation
 
+In short, on Debian/Ubuntu:
+
+```
+sudo apt install ./dist/fobots_*_all.deb   # or: sudo ./fobots.py install (see below)
+sudo fobots init                           # finds the logs, writes the configuration
+sudo systemctl enable --now fobots         # observation: nothing is banned yet
+```
+
+### Writing the configuration: `fobots init`
+
+```
+sudo fobots init --dry-run     # what would be written, nothing is modified
+sudo fobots init               # writes /etc/fobots/fobots.conf (fobots.conf.new if it exists)
+```
+`init` reads the configuration of Apache (`/etc/apache2/apache2.conf` and its `Include`s, with
+`envvars` for `${APACHE_LOG_DIR}`) and of nginx (`/etc/nginx/nginx.conf` and its `include`s), and
+finds the access log of each virtual host: its own `CustomLog` / `access_log`, otherwise the
+one it inherits (on Debian, an Apache vhost without `CustomLog` writes to
+`other_vhosts_access.log`). It then reads the last 1000 lines of each log and keeps the
+ones fobots can follow:
+
+- the format must be recognised (`combined`, or Apache's `vhost_combined`); whether a duration
+  ends the line (`%D`, `$request_time`) is reported, `analyse` and `stress` use it;
+- a log in which no client is public is left out: the server is behind a proxy and logs the
+  proxy, not the client (`mod_remoteip`, `real_ip_header`);
+- a log piped to a program (`CustomLog "|rotatelogs …"`), with a variable in its path
+  (`access_log /var/log/nginx/$host.log`) or sent to syslog cannot be followed: it is reported at
+  the top of the file. A conditional log (`env=`, `if=`) is followed, with a warning: some
+  requests are missing from it.
+
+Each log becomes a `[site:NAME]` section named after its first host; the logs left out are in
+the file, commented out, with the reason. The configuration starts with **`dry_run = yes`**: the
+service counts and writes in the journal what it would ban, without touching nftables. After a
+few days of `journalctl -u fobots`, remove the line (or set `dry_run = no`) and
+`systemctl restart fobots`. The threshold is the default one: `fobots analyse` reads the logs of
+the configuration and suggests `threshold` and `ignore_path`.
+
+`init` also adds to `welcome.txt` the public addresses of the machine (a cron job, or a probe
+that requests the public name, comes from them) and the address of your SSH session, unless
+they are already covered.
+
+An existing configuration is never replaced: the proposal goes to `fobots.conf.new`
+(`diff -u` to compare); `--force` replaces it and keeps a `.bak`. `-o FILE` writes elsewhere,
+`--apache-conf` / `--nginx-conf` read another configuration. The service reads the logs with the
+`adm` group: `init` says which log it could not read that way, and how to grant access.
+
+### `fobots install` (without the package)
+
 On Debian/Ubuntu, from a clone of the repository:
 
 ```
@@ -57,16 +105,17 @@ touches an existing configuration or welcome list. It:
    time of bans;
 3. creates the `fobots` system user if missing;
 4. installs the command `/usr/local/sbin/fobots` (the launcher, without `.py`) and its modules in
-   `/opt/fobots/fobots/`, the configuration in `/etc/fobots/fobots.conf`
-   (with `--log` if given), an empty welcome list `/etc/fobots/welcome.txt`, and the state
-   directory `/var/lib/fobots` (0750, owned by `fobots`);
+   `/opt/fobots/fobots/`, the configuration in `/etc/fobots/fobots.conf` (written like
+   `fobots init` does, in observation mode; with `--log`, or when no log is found, from the
+   example), the welcome list `/etc/fobots/welcome.txt` (with the addresses of the machine and of
+   your SSH session), and the state directory `/var/lib/fobots` (0750, owned by `fobots`);
 5. installs the systemd unit, with the group that gives access to the log (detected,
    otherwise `adm`; `--log-group` to force it), then runs `systemctl daemon-reload`;
 6. checks that the `fobots` user can read the log, and says what to do if not.
 
-The service is **neither enabled nor started** by default: adapt the configuration, fill in
-the welcome list, try `fobots run --dry-run`, then
-`systemctl enable --now fobots` (or run `install` again with `--enable` / `--start`).
+The service is **neither enabled nor started** by default: check the configuration, fill in
+the welcome list, then `systemctl enable --now fobots` (or run `install` again with
+`--enable` / `--start`); with `dry_run = yes` it only observes.
 `--destdir DIR` writes the files under a prefix without touching the system (tests,
 packaging).
 
@@ -95,8 +144,11 @@ make upgrade         # tests, build, then sudo dpkg -i (restarts a running servi
 make lint            # lintian
 sudo apt install ./dist/fobots_*_all.deb
 ```
-The package installs the same files as `install` (command `/usr/sbin/fobots`, modules in `/opt/fobots/fobots/`, configuration and
-`welcome.txt` in `/etc/fobots` as conffiles, systemd unit) and does not start the service.
+The package installs the same files as `install` (command `/usr/sbin/fobots`, modules in
+`/opt/fobots/fobots/`, `welcome.txt` in `/etc/fobots` as a conffile, systemd unit) and does not
+start the service. It does not ship `/etc/fobots/fobots.conf`: `fobots init` writes it (the
+example is in `/usr/share/doc/fobots/fobots.conf.example`). After an upgrade from an older
+package, the existing configuration stays in place, untouched.
 An upgrade only restarts a service that is already running; `purge` removes
 `/var/lib/fobots` and the `fobots` user.
 
@@ -545,6 +597,7 @@ the configuration file. **The command line overrides the configuration.** See
 | `tense_factor`, `critical_factor` | 0.5, 0.25 | multiplier of the threshold **and** of the ban duration |
 | `min_threshold`, `min_ban_time` | 1, 1m | floors of the effective threshold and duration |
 | `from_start` | no | first read the existing content of the log |
+| `dry_run` | no | observation: the daemon counts and logs its bans but only prints the nft commands. For `run` only: `welcome add` or `bans` still act on nftables |
 
 Without `log` or a `[site:…]` section, the daemon **refuses to start** (clear error), unless
 stdin is a pipe or a file (`tail -F file | fobots run`) or `-` is given explicitly. Files
@@ -553,13 +606,14 @@ passed as arguments are read once (`-` = stdin), which is useful to replay a log
 If the daemon follows nothing although the configuration looks right, check that it reads the
 expected configuration (the `configuration : …` line at startup) and that the installed script
 is up to date: an old copy ignores the `[site:…]` sections without saying so. `SIGUSR1` also
-reports the number of unreadable lines (unexpected log format, e.g. the `host:port` prefix of
-the Apache `vhost_combined` format, which is not supported).
+reports the number of unreadable lines (unexpected log format: `combined`, or Apache's
+`vhost_combined`, is expected).
 
 ## Commands
 
 ```
 fobots run [-t THRESHOLD] [-p PREFIX_THRESHOLD] [--log FILE] [files…]   (no argument: follows the logs of the configuration)
+fobots init [--dry-run] [--force] finds the Apache / nginx logs, writes fobots.conf (dry_run = yes)
 fobots install [--dry-run] [--log F] installs nftables, the user, the configuration, the systemd unit
 fobots setup                      creates the nft table, sets and rules
 fobots bans [--no-lookup]          active bans, remaining time and organisation (RDAP name + abuse email, looked up and cached when missing)
@@ -686,7 +740,7 @@ it (IPv6: its `/48`), never the whole allocation. IPv4 and IPv6 are handled the 
 | File | Role |
 |---|---|
 | `fobots.py` | launcher: `./fobots.py` in a clone, installed as the command `fobots` |
-| `fobots/` | the package: `cli` (commands), `detector`, `nft`, `welcome` (bans), `rdap`, `grouping`, `follow` (logs), `load`, `sites`, `events`, `config`, `install`, `util`, `constants` |
+| `fobots/` | the package: `cli` (commands), `detector`, `nft`, `welcome` (bans), `rdap`, `grouping`, `follow` (logs), `load`, `sites`, `events`, `config`, `install`, `discover` (`init`), `util`, `constants` |
 | `fobots.conf.example` | example configuration |
 | `fobots.service.example` | example systemd unit |
 | `build-deb.sh`, `Makefile` | Debian package, `make test` |

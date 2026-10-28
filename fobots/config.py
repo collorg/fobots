@@ -41,7 +41,12 @@ CONF_KEYS = {  # file key -> (argparse destination, conversion)
     "trap_scope": ("trap_scope", str),
     "trap_ban": ("trap_ban", lambda v: v.lower() in ("1", "true", "yes", "oui", "on")),
     "from_start": ("from_start", lambda v: v.lower() in ("1", "true", "yes", "oui", "on")),
+    "dry_run": ("dry_run", lambda v: v.lower() in ("1", "true", "yes", "oui", "on")),
 }
+
+# Options of the daemon only: `dry_run = yes` observes without banning, but `welcome add` or
+# `bans` must still act on the real nft table.
+RUN_ONLY_KEYS = ("dry_run",)
 
 PATH_KEYS = {"dir", "cache", "welcome", "log", "watch_file", "traps_file", "trap_welcome"}
 

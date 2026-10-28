@@ -38,7 +38,10 @@ sed -i '1s|.*|#!/usr/bin/python3|' "$BUILD/usr/sbin/fobots"
 for module in fobots/*.py; do
     install -D -m 0644 "$module"       "$BUILD/opt/fobots/$module"
 done
-install -D -m 0644 fobots.conf.example "$BUILD/etc/fobots/fobots.conf"
+# No /etc/fobots/fobots.conf: `fobots init` writes it from the Apache / nginx configuration (a
+# conffile would make dpkg ask about it at every upgrade). The example stays in the documentation.
+install -D -m 0644 fobots.conf.example "$BUILD/usr/share/doc/$PKG/fobots.conf.example"
+mkdir -p "$BUILD/etc/fobots"
 install -D -m 0644 README.md          "$BUILD/usr/share/doc/$PKG/README.md"
 install -D -m 0644 README.fr.md       "$BUILD/usr/share/doc/$PKG/README.fr.md"
 {
@@ -106,11 +109,11 @@ Description: nftables bans of overly aggressive IP ranges
  Reads an access log (nginx, Apache), counts requests per IP range
  and adds the ranges that exceed the threshold to an nftables set. Bans
  expire by themselves. The service is neither enabled nor started by the
- installation: adapt /etc/fobots/fobots.conf, fill in /etc/fobots/welcome.txt,
- then systemctl enable --now fobots.
+ installation: fobots init finds the logs of Apache and nginx and writes
+ /etc/fobots/fobots.conf in observation mode, then systemctl enable --now fobots.
 CONTROL
 
-printf '%s\n' /etc/fobots/fobots.conf /etc/fobots/welcome.txt > "$BUILD/DEBIAN/conffiles"
+printf '%s\n' /etc/fobots/welcome.txt > "$BUILD/DEBIAN/conffiles"
 
 cat > "$BUILD/DEBIAN/postinst" <<'SCRIPT'
 #!/bin/sh
@@ -126,10 +129,10 @@ if [ "$1" = configure ]; then
     fi
     if [ -z "$2" ]; then
         echo "fobots installed, not started. Next steps:"
-        echo "  1. adapt /etc/fobots/fobots.conf (log, thresholds)"
+        echo "  1. fobots init   (finds the Apache / nginx logs, writes /etc/fobots/fobots.conf"
+        echo "     in observation mode: nothing is banned, the journal shows what would be)"
         echo "  2. add your networks to /etc/fobots/welcome.txt"
-        echo "  3. trial: fobots run --dry-run"
-        echo "  4. systemctl enable --now fobots"
+        echo "  3. systemctl enable --now fobots; after a few days: dry_run = no, restart"
     fi
 fi
 exit 0

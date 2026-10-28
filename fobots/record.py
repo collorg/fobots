@@ -19,6 +19,7 @@ import statistics
 import time
 
 from .load import read_psi, summarize
+from .util import VHOST
 
 log = logging.getLogger("fobots")
 
@@ -44,7 +45,7 @@ MIN_LEAD = 20            # seconds of median advance
 SIM_MAX_STEP = 30        # seconds counted for one sample in the replay
 EPISODE_GAP = 120        # seconds without snapshot: the next slowdown is another episode
 
-LOG_RE = re.compile(r'^(\S+) .*?"[A-Z]+ [^"]*" (\d{3}) ')
+LOG_RE = re.compile('^' + VHOST + r'(\S+) .*?"[A-Z]+ [^"]*" (\d{3}) ')
 MIN_LOG_SECONDS = 0.5    # a rate over less than this would be meaningless
 LOG_MAX_READ = 8 << 20   # bytes read from one log per measure (the rest is read next time)
 

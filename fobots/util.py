@@ -10,6 +10,11 @@ from datetime import datetime
 from functools import lru_cache
 
 
+# Optional `host:port ` before the client: Apache's vhost_combined format (%v:%p), the one of
+# other_vhosts_access.log on Debian. Unambiguous: an IPv6 client has at least two colons.
+VHOST = r"(?:[^\s:]+:\d+ )?"
+
+
 @lru_cache(maxsize=4096)
 def parse_ts(s):
     return int(datetime.strptime(s, "%d/%b/%Y:%H:%M:%S %z").timestamp())

@@ -15,6 +15,8 @@ threshold = 5        # req/s of a range above which it is banned
 sustain = 5          # consecutive seconds above the threshold required (a page load is a short burst)
 window = 60          # window (s) over which the IPs seen are tracked
 ban_time = 1h        # duration of a ban: 30m, 1h, 1d…
+# dry_run = yes       # observation: counts and logs the bans, only prints the nft commands
+                     # (the daemon only; `fobots init` writes it, remove it once satisfied)
 
 # Load-based hardening (disabled by default).
 # At the "tense" / "critical" level, the threshold AND the ban duration are multiplied by

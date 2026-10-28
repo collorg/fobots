@@ -14,12 +14,12 @@ from .load import LEVELS, NoLoad
 from .nft import NftError
 from .traps import TrapLearner
 from .welcome import NO_WELCOME
-from .util import fmt_range, parse_ts, prefix_of, write_atomic
+from .util import VHOST, fmt_range, parse_ts, prefix_of, write_atomic
 
 log = logging.getLogger("fobots")
 
 
-LINE_RE = re.compile(r'^(\S+) \S+ \S+ \[([^\]]+)\]')
+LINE_RE = re.compile('^' + VHOST + r'(\S+) \S+ \S+ \[([^\]]+)\]')
 
 # End of a "combined" line: "METHOD /path PROTO" status size "referer" "user-agent" [duration]
 REQ_RE = re.compile(r'"[A-Z]+ (\S+)[^"]*" \d+ \S+ "[^"]*" "([^"]*)"(?:\s+[\d.]+)?\s*$')

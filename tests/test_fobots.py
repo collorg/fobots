@@ -25,6 +25,7 @@ from fobots.analyse import Analysis, average_rate, dir_key, report, short_agent,
 from fobots.cli import main, welcome_cmd  # noqa: E402
 from fobots.config import CONF_KEYS, SITE_KEYS, find_config, load_config  # noqa: E402
 from fobots.detector import Detector  # noqa: E402
+from fobots.discover import admin_address, apache_logs, discover, nginx_logs, welcome_additions  # noqa: E402
 from fobots.events import append_event, read_events, trim_events  # noqa: E402
 from fobots.follow import follow  # noqa: E402
 from fobots.grouping import cluster_ips, pick_groups, wide_blocks  # noqa: E402
@@ -729,6 +730,25 @@ class DetectorRate(DetectorBase):
         self.det.load.factor = 0.01
         self.assertEqual(self.det.threshold, 1.0)  # floor
         self.assertEqual(self.det.ban_seconds(), 60)
+
+
+class VhostCombined(DetectorBase):
+    """Apache's vhost_combined (`host:port` before the client), the format of
+    other_vhosts_access.log on Debian."""
+
+    def test_the_client_follows_the_vhost(self):
+        self.detector([rng("43.0.0.0", "43.127.255.255")], threshold=2)
+        for a in ("43.1.1.1", "43.1.1.2", "43.1.1.3"):
+            self.det.feed_line("www.example.org:443 " + line(a, 0))
+        self.assertEqual(self.det.skipped, 0)
+        self.assertEqual(self.nft.banned(), ["43.1.1.1/32", "43.1.1.2/31"])
+
+    def test_an_ipv6_client_is_not_taken_for_a_vhost(self):
+        an = Analysis(RangeStore(None))
+        for raw in (line("2001:db8::1", 0), "h.example.org:80 " + line("2001:db8::2", 0)):
+            an.feed(raw)
+        self.assertEqual(an.lines, 2)
+        self.assertEqual(an.unreadable, 0)
 
 
 class DetectorObserved(DetectorBase):
@@ -2520,6 +2540,152 @@ class Commands(TmpDirCase):
         site_only = set(SITE_KEYS)
         for k in keys - site_only:
             self.assertIn(k, CONF_KEYS, k)
+
+
+class DiscoveryTree(TmpDirCase):
+    """A Debian-like Apache tree and an nginx one, with logs."""
+
+    def tree(self):
+        for d in ("apache2/sites-enabled", "apache2/conf-enabled", "nginx/sites-enabled", "log"):
+            os.makedirs(self.path(d), exist_ok=True)
+        log_dir = self.path("log")
+        self.write("apache2/envvars", 'if [ x ]; then\n\tSUFFIX=\nfi\n'
+                   f'export APACHE_LOG_DIR={log_dir}$SUFFIX\n')
+        self.write("apache2/apache2.conf", f'ServerRoot "{self.path("apache2")}"\n'
+                   "IncludeOptional conf-enabled/*.conf\nIncludeOptional sites-enabled/*.conf\n")
+        self.write("apache2/conf-enabled/other.conf",
+                   "CustomLog ${APACHE_LOG_DIR}/other_vhosts_access.log vhost_combined\n")
+        self.write("apache2/sites-enabled/a.conf", """<VirtualHost *:80>
+    ServerName www.example.org
+    ServerAlias example.org *.example.org
+    CustomLog ${APACHE_LOG_DIR}/access.log combined
+</VirtualHost>
+<IfModule mod_ssl.c>
+<VirtualHost *:443>
+    ServerName www.example.org
+    CustomLog ${APACHE_LOG_DIR}/access.log \\
+        combined
+    CustomLog "|/usr/bin/rotatelogs /x 86400" combined
+</VirtualHost>
+</IfModule>
+<VirtualHost *:443>
+    ServerName proxied.example.org
+    CustomLog ${APACHE_LOG_DIR}/proxied.log combined env=!dontlog
+</VirtualHost>
+<VirtualHost *:80>
+    ServerName bare.example.org
+</VirtualHost>
+""")
+        self.write("nginx/nginx.conf", "events {}\nhttp {\n  access_log /var/log/n/all.log;  # all\n"
+                   "  include sites-enabled/*;\n}\n")
+        self.write("nginx/sites-enabled/s", 'server { listen 443 ssl; server_name "a.example.org"; }\n'
+                   "server { server_name v.example.org; access_log /var/log/n/$host.log; }\n"
+                   "server { server_name quiet.example.org; access_log off; }\n"
+                   "server { server_name own.example.org; access_log /var/log/n/own.log combined if=$x; }\n")
+        self.write("log/access.log", "".join(line(f"43.1.1.{i}", i) for i in range(30)))
+        self.write("log/other_vhosts_access.log", "".join("bare.example.org:80 " + line("43.1.1.1", i)
+                                                          for i in range(30)))
+        self.write("log/proxied.log", "".join(line("127.0.0.1", i) for i in range(30)))
+
+
+
+class Discovery(DiscoveryTree):
+    """`fobots init`: the logs found in the configuration, and what their last lines say."""
+
+    def test_apache(self):
+        self.tree()
+        warnings = []
+        found = {os.path.basename(f.path): f for f in apache_logs(self.path("apache2/apache2.conf"), warnings)}
+        self.assertEqual(sorted(found), ["access.log", "other_vhosts_access.log", "proxied.log"])
+        self.assertEqual(found["access.log"].names, ["www.example.org", "example.org"])
+        self.assertEqual(found["access.log"].blocks, ["<VirtualHost *:80>", "<VirtualHost *:443>"])
+        self.assertEqual(found["other_vhosts_access.log"].names, ["bare.example.org"])  # inherited
+        self.assertIn("conditional", found["proxied.log"].notes[0])
+        self.assertIn("rotatelogs", warnings[0])
+
+    def test_nginx(self):
+        self.tree()
+        warnings = []
+        found = {f.path: f for f in nginx_logs(self.path("nginx/nginx.conf"), warnings)}
+        # v.example.org has its own access_log (not followed): it does not inherit all.log
+        self.assertEqual(sorted(found), ["/var/log/n/all.log", "/var/log/n/own.log"])
+        self.assertEqual(found["/var/log/n/all.log"].names, ["a.example.org"])
+        self.assertIn("conditional", found["/var/log/n/own.log"].notes[0])
+        self.assertIn("$host", warnings[0])
+
+    def test_samples_decide_what_is_followed(self):
+        self.tree()
+        found, read, _ = discover((self.path("apache2/apache2.conf"),), (self.path("none.conf"),))
+        reasons = {os.path.basename(f.path): f.reason for f in found}
+        self.assertIsNone(reasons["access.log"])
+        self.assertIsNone(reasons["other_vhosts_access.log"])
+        self.assertIn("proxy", reasons["proxied.log"])
+        self.assertEqual(read, [self.path("apache2/apache2.conf")])
+
+    def test_welcome_additions(self):
+        own = [ipaddress.ip_address("193.49.110.101"), ipaddress.ip_address("2001:660::1")]
+        lines = welcome_additions([ipaddress.ip_network("2001:660::/32")], own,
+                                  ipaddress.ip_address("193.49.110.101"))
+        self.assertEqual(len(lines), 1)  # IPv6 already covered, the admin is the machine itself
+        self.assertTrue(lines[0].startswith("193.49.110.101/32  # this machine"))
+        self.assertEqual(str(admin_address({"SSH_CONNECTION": "8.8.8.8 5000 10.0.0.1 22"})), "8.8.8.8")
+        with mock.patch("fobots.discover.subprocess.run", side_effect=OSError):
+            self.assertIsNone(admin_address({"SSH_CONNECTION": "10.0.0.5 5000 10.0.0.1 22"}))
+
+
+class InitCommand(DiscoveryTree):
+    def init(self, *argv):
+        with mock.patch("fobots.cli.own_addresses", return_value=[ipaddress.ip_address("193.49.110.101")]), \
+                mock.patch("fobots.cli.admin_address", return_value=None):
+            return Commands.run_main(self, "init", "--apache-conf", self.path("apache2/apache2.conf"),
+                                     "--nginx-conf", self.path("none.conf"), "-o", self.path("etc/fobots.conf"),
+                                     *argv)
+
+    def write(self, name, text):
+        os.makedirs(os.path.dirname(self.path(name)), exist_ok=True)
+        return super().write(name, text)
+
+    def test_writes_an_observation_configuration(self):
+        self.tree()
+        rc, out, err = self.init()
+        self.assertEqual(rc, 0, out + err)
+        conf = load_config(self.path("etc/fobots.conf"))
+        self.assertTrue(conf["dry_run"])
+        self.assertEqual(sorted(os.path.basename(x["log"]) for x in conf["sites"]),
+                         ["access.log", "other_vhosts_access.log"])
+        self.assertIn("# log = " + self.path("log/proxied.log"), self.read("etc/fobots.conf"))
+        self.assertIn("193.49.110.101/32  # this machine", self.read("etc/welcome.txt"))
+        # again: the existing configuration is kept, the proposal goes to .new
+        with open(self.path("etc/fobots.conf"), "a") as f:
+            f.write("# mine\n")
+        rc, out, _ = self.init()
+        self.assertIn("# mine", self.read("etc/fobots.conf"))
+        self.assertTrue(os.path.exists(self.path("etc/fobots.conf.new")))
+        self.assertEqual(self.read("etc/welcome.txt").count("193.49.110.101"), 1)
+        rc, out, _ = self.init("--force")
+        self.assertNotIn("# mine", self.read("etc/fobots.conf"))
+        self.assertIn("# mine", self.read("etc/fobots.conf.bak"))
+
+    def test_dry_run_writes_nothing(self):
+        self.tree()
+        rc, out, _ = self.init("--dry-run")
+        self.assertEqual(rc, 0)
+        self.assertIn("dry_run = yes", out)
+        self.assertFalse(os.path.exists(self.path("etc")))
+
+    def test_nothing_found(self):
+        rc, _, err = self.init()
+        self.assertEqual(rc, 1)
+        self.assertIn("no Apache or nginx configuration", err)
+
+    def test_dry_run_of_the_configuration_is_for_the_daemon_only(self):
+        conf = self.write("d.conf", "[fobots]\ndry_run = yes\n")
+        seen = {}
+        with mock.patch("fobots.cli.cmd_run", side_effect=lambda a: seen.setdefault("run", a.dry_run) and 0), \
+                mock.patch("fobots.cli.cmd_setup", side_effect=lambda a: seen.setdefault("setup", a.dry_run) or 0):
+            Commands.run_main(self, "run", "-f", conf)
+            Commands.run_main(self, "setup", "-f", conf)
+        self.assertEqual(seen, {"run": True, "setup": False})
 
 
 if __name__ == "__main__":

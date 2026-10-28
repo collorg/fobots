@@ -7,6 +7,8 @@ import shutil
 import subprocess
 import sys
 
+from .discover import (APACHE_CONFS, NGINX_CONFS, admin_address, config_text, discover,
+                       own_addresses, welcome_additions)
 from .constants import BIN_PATH, CONF_DIR, INSTALL_DIR, SERVICE_USER, SRC_DIR, STATE_DIR, UNIT_PATH
 from .nft import Nft
 
@@ -193,16 +195,20 @@ class Installer:
             if self.args.log:
                 self.say("!!", f"--log ignored: edit the `log =` line of {conf} by hand")
         else:
-            text = self.template("fobots.conf.example")
-            if self.args.log:
-                text = re.sub(r"(?m)^log\s*=.*$", lambda m: f"log = {self.args.log}", text)
+            text = None if self.args.log else self.discovered()
+            if text is None:
+                text = self.template("fobots.conf.example")
+                if self.args.log:
+                    text = re.sub(r"(?m)^log\s*=.*$", lambda m: f"log = {self.args.log}", text)
             self.write(conf, text, 0o644)
             self.say("ok", f"configuration: {conf}")
         wl = os.path.join(CONF_DIR, "welcome.txt")
         if self.read(wl) is None:
+            added = welcome_additions([], own_addresses(), admin_address())
             self.write(wl, "# Ranges never to ban, one CIDR per line.\n"
-                       "# Add with: fobots welcome add CIDR (also removes the bans concerned)\n", 0o644)
-            self.say("ok", f"welcome list: {wl}")
+                       "# Add with: fobots welcome add CIDR (also removes the bans concerned)\n"
+                       + "".join(line + "\n" for line in added), 0o644)
+            self.say("ok", f"welcome list: {wl}" + (f" (this machine and your session: {len(added)})" if added else ""))
 
         self.ensure_dir(STATE_DIR, 0o750, (SERVICE_USER, SERVICE_USER))
         self.say("ok", f"state directory: {STATE_DIR}")
@@ -215,6 +221,18 @@ class Installer:
             self.write(UNIT_PATH, unit, 0o644)
             self.say("ok", f"systemd unit: {UNIT_PATH} (log access groups: {' '.join(self.log_groups())})")
             self.run(["systemctl", "daemon-reload"])
+
+    def discovered(self):
+        """fobots.conf written from the Apache / nginx configuration (as `fobots init`), or None
+        if no log fobots can follow was found."""
+        found, read, warnings = discover(tuple(self.args.apache_conf or APACHE_CONFS),
+                                         tuple(self.args.nginx_conf or NGINX_CONFS))
+        kept = [f.path for f in found if not f.reason]
+        if not kept:
+            self.say("..", "no Apache / nginx log found: configuration from the example, set `log =`")
+            return None
+        self.say("ok", f"logs found in {', '.join(read)}: {', '.join(kept)} (dry_run = yes: observation)")
+        return config_text(found, read, warnings)
 
     def check_log_access(self):
         logs = self.log_paths()
@@ -257,7 +275,7 @@ class Installer:
             self.said_done("service enabled at boot (not started)")
         print(f"""
 Next steps:
-  1. check / adapt {CONF_DIR}/fobots.conf (log, thresholds)
+  1. check / adapt {CONF_DIR}/fobots.conf (logs, thresholds: fobots analyse)
   2. add your networks to {CONF_DIR}/welcome.txt (administrators, CI, monitoring)
   3. trial without banning anything: fobots run --dry-run
   4. start: systemctl enable --now fobots      follow: journalctl -u fobots -f""")

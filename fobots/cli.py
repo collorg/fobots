@@ -34,6 +34,7 @@ import logging
 import os
 import random
 import re
+import shutil
 import signal
 import socket
 import sys
@@ -41,8 +42,10 @@ import time
 from datetime import datetime
 
 from .analyse import Analysis, report
-from .config import find_config, load_config
+from .config import RUN_ONLY_KEYS, find_config, load_config
 from .constants import CONF_DIR, STATE_DIR
+from .discover import (APACHE_CONFS, NGINX_CONFS, admin_address, config_text, describe,
+                       discover, own_addresses, welcome_additions)
 from .detector import OBSERVED_PREFIX6, OBSERVED_WIDE6, SCOPES, TRAP_SCOPES, Detector
 from .events import read_events, trim_events
 from .follow import log_lines, run_sites, stdin_is_feed
@@ -57,7 +60,7 @@ from .replay import report as replay_report
 from .record import report as record_report
 from .sites import Site
 from .traps import MAX_VALUES, TrapLearner
-from .util import parse_duration, printable
+from .util import append_text, parse_duration, printable, write_atomic
 from .welcome import Banner, Welcome, welcome_add
 
 log = logging.getLogger("fobots")
@@ -121,6 +124,9 @@ def cmd_run(args):
     ensure_dir(os.path.dirname(os.path.abspath(watch_file_path(args))))
     store, wl = RangeStore(cache), Welcome(wl_path)
     nft = Nft(args.nft_bin, args.dry_run)
+    if args.dry_run:
+        log.warning("dry run (dry_run = yes or --dry-run): nothing is banned, the nft commands "
+                    "below are only printed")
     try:
         for ver in (4, 6):
             log.info("IPv%d: %d range(s) already banned, %d on every port", ver,
@@ -345,6 +351,11 @@ def cmd_analyse(args):
             with f:
                 for line in f:
                     an.feed(line, site)
+        except FileNotFoundError as e:
+            if args.files:
+                log.error("%s: %s", path, e)
+                return 1
+            log.warning("%s: absent, skipped", path)  # a site of the configuration with no log yet
         except OSError as e:
             log.error("%s: %s", path, e)
             return 1
@@ -491,6 +502,97 @@ def cmd_traps(args):
 
 def cmd_install(args):
     Installer(args).run_all()
+    return 0
+
+
+
+def read_nets(path):
+    nets = []
+    try:
+        with open(path) as f:
+            for line in f:
+                try:
+                    nets.append(ipaddress.ip_network(line.split("#")[0].strip(), strict=False))
+                except ValueError:
+                    pass
+    except OSError:
+        pass
+    return nets
+
+
+def unreadable_by_service(path):
+    """The group of the log, if the service (SupplementaryGroups=adm) may not read it."""
+    import grp
+    try:
+        st = os.stat(path)
+        group = grp.getgrgid(st.st_gid).gr_name
+    except (OSError, KeyError):
+        return None
+    if st.st_mode & 0o004 or (group == "adm" and st.st_mode & 0o040):
+        return None
+    return group
+
+
+def cmd_init(args):
+    apache, nginx = tuple(args.apache_conf or APACHE_CONFS), tuple(args.nginx_conf or NGINX_CONFS)
+    found, read, warnings = discover(apache, nginx)
+    if not read:
+        print(f"no Apache or nginx configuration found (looked for {', '.join(apache + nginx)}): "
+              "write the configuration by hand from fobots.conf.example", file=sys.stderr)
+        return 1
+    print(f"read: {', '.join(read)}")
+    for f in found:
+        print(f"[{'..' if f.reason else 'ok'}] {printable(f.path)}: {describe(f.info)}"
+              + (f"\n     left out: {f.reason}" if f.reason else ""))
+    for w in warnings:
+        print(f"[..] {printable(w)}")
+    kept = [f for f in found if not f.reason]
+    text = config_text(found, read, warnings)
+    out = os.path.abspath(args.output)
+    wl_path = args.welcome or os.path.join(os.path.dirname(out), "welcome.txt")
+    welcome = welcome_additions(read_nets(wl_path), own_addresses(), admin_address())
+    if args.dry_run:
+        print(f"\n--dry-run: nothing written. {out} would be:\n")
+        print(text, end="")
+        if welcome:
+            print(f"\nand {wl_path} would receive:\n" + "\n".join(welcome))
+        return 0 if kept else 1
+    if not kept:
+        print("\nno log fobots can follow: nothing written", file=sys.stderr)
+        return 1
+    target, backup = out, None
+    try:
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        if os.path.exists(out) and not args.force:
+            target = out + ".new"
+        elif os.path.exists(out):
+            backup = out + ".bak"
+            shutil.copy2(out, backup)
+        write_atomic(target, text)
+        if welcome:
+            append_text(wl_path, "".join(line + "\n" for line in welcome))
+    except OSError as e:
+        print(f"cannot write: {e} (as root: sudo fobots init; to only look: --dry-run)", file=sys.stderr)
+        return 1
+    if target != out:
+        print(f"\n{out} exists: kept. The proposal is in {target}\n"
+              f"  diff -u {out} {target}      (--force replaces it, keeping a .bak)")
+    else:
+        print(f"\nwritten: {out}" + (f" (previous one: {backup})" if backup else ""))
+    for line in welcome:
+        print(f"welcome list {wl_path}: + {line}")
+    for f in kept:
+        group = unreadable_by_service(f.path)
+        if group:
+            print(f"[!!] {f.path} belongs to group {group}, not readable by the service (group adm): "
+                  f"setfacl -m u:fobots:r {f.path}, or SupplementaryGroups={group} (systemctl edit fobots)")
+    conf = "" if out == os.path.join(CONF_DIR, "fobots.conf") else f" -f {out}"
+    print(f"""
+Next steps:
+  1. thresholds and static pages from your logs: fobots analyse{conf}
+  2. start in observation (dry_run = yes, nothing is banned): systemctl enable --now fobots
+  3. follow: journalctl -u fobots -f
+     after a few days, set dry_run = no in {out}, then: systemctl restart fobots""")
     return 0
 
 
@@ -890,7 +992,23 @@ def main(argv=None):
     ins.add_argument("--enable", action="store_true", help="enables the service at boot")
     ins.add_argument("--start", action="store_true", help="enables AND starts the service")
     ins.add_argument("--destdir", help="writes the files under this prefix without touching the system (test)")
+    ins.add_argument("--apache-conf", action="append", metavar="FILE", help="Apache configuration to "
+                     "look for the logs in, as `init` (default: the first of %s)" % ", ".join(APACHE_CONFS))
+    ins.add_argument("--nginx-conf", action="append", metavar="FILE",
+                     help="nginx configuration (default: %s)" % ", ".join(NGINX_CONFS))
     ins.set_defaults(fn=cmd_install)
+
+    it = sub.add_parser("init", parents=[common],
+                        help="finds the logs of Apache and nginx, writes fobots.conf in observation "
+                             "mode (dry_run = yes) and protects this machine in welcome.txt")
+    it.add_argument("-o", "--output", default=os.path.join(CONF_DIR, "fobots.conf"),
+                    help="configuration to write (default: %(default)s; if it exists: FILE.new)")
+    it.add_argument("--force", action="store_true", help="replaces an existing configuration (keeps a .bak)")
+    it.add_argument("--apache-conf", action="append", metavar="FILE",
+                    help=f"Apache configuration (default: the first of {', '.join(APACHE_CONFS)})")
+    it.add_argument("--nginx-conf", action="append", metavar="FILE",
+                    help=f"nginx configuration (default: {', '.join(NGINX_CONFS)})")
+    it.set_defaults(fn=cmd_init)
 
     an = sub.add_parser("analyse", parents=[common],
                         help="reads a log once and suggests settings (threshold, ignore_path)")
@@ -999,11 +1117,13 @@ def main(argv=None):
                    help="with --traps: the file (default: trap_welcome.txt next to the configuration)")
     w.set_defaults(fn=cmd_welcome)
 
+    run_only = {k: conf.pop(k) for k in RUN_ONLY_KEYS if k in conf}
     for p in sub.choices.values():
         p.set_defaults(config=conf_path, **conf)  # command line > configuration > defaults
     args, extra = ap.parse_known_args(argv)
     fold_extra(ap, args, extra)
-    if args.cmd == "run":
+    if args.cmd == "run":  # not r.set_defaults: the subcommands share the actions of `common`
+        args.dry_run = args.dry_run or run_only.get("dry_run", False)
         for name in ("tense_factor", "critical_factor"):
             if not 0 < getattr(args, name) <= 1:
                 ap.error(f"--{name.replace('_', '-')} must be in ]0, 1]")

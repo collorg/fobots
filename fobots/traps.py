@@ -22,10 +22,10 @@ import re
 from collections import deque
 from functools import lru_cache
 
-from .util import parse_ts
+from .util import VHOST, parse_ts
 
 # ip - - [time] "METHOD /path PROTO" status
-ACCESS_RE = re.compile(r'^(\S+) \S+ \S+ \[([^\]]+)\] "[A-Z]+ (\S+)[^"]*" (\d{3}) ')
+ACCESS_RE = re.compile('^' + VHOST + r'(\S+) \S+ \S+ \[([^\]]+)\] "[A-Z]+ (\S+)[^"]*" (\d{3}) ')
 
 FAILED = (403, 404)   # the route does not exist (or is forbidden): candidate trap
 EXTRA_EXISTS = (401, 405)  # besides < 400: the route exists, the request is refused

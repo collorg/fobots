@@ -5,12 +5,12 @@ import ipaddress
 import re
 from collections import Counter, defaultdict
 
-from .util import fmt_range, parse_ts, prefix_of
+from .util import VHOST, fmt_range, parse_ts, prefix_of
 
 # common or combined format; the duration, if any, is the LAST field (Apache: %D at the end of
 # the LogFormat, in microseconds; nginx: $request_time, in seconds)
 FULL_RE = re.compile(
-    r'^(\S+) \S+ \S+ \[([^\]]+)\] "([A-Z]+) (\S+)[^"]*" (\d{3}) (\S+)'
+    '^' + VHOST + r'(\S+) \S+ \S+ \[([^\]]+)\] "([A-Z]+) (\S+)[^"]*" (\d{3}) (\S+)'
     r'(?: "[^"]*" "([^"]*)"(?:\s+(\d+(?:\.\d+)?))?)?\s*$')
 
 STATIC_RE = re.compile(r"\.(js|css|png|jpe?g|gif|svg|ico|webp|avif|woff2?|ttf|eot|map|mp4|webm)$",
