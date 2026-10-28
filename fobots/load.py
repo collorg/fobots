@@ -63,6 +63,27 @@ def parse_probe_urls(text):
 
 
 
+class TLSConnection(http.client.HTTPSConnection):
+    """HTTPS to an address, with `sni` as the server name presented in TLS: the vhost (and its
+    certificate) is chosen there, before the Host header. Without it, an IP sends no name and the
+    server answers with its default vhost."""
+
+    def __init__(self, address, port=None, sni=None, **kw):
+        super().__init__(address, port, **kw)
+        self.sni = sni
+
+    def connect(self):
+        http.client.HTTPConnection.connect(self)
+        self.sock = self._context.wrap_socket(self.sock, server_hostname=self.sni or self.host)
+
+
+
+def sni_of(host):
+    """Server name of a Host header (`name[:port]`), None if absent."""
+    return urlsplit(f"//{host}").hostname if host else None
+
+
+
 class Probe:
     """The load signal 'probe': response time (s) of the service itself, the worst of the URLs.
 
@@ -82,7 +103,7 @@ class Probe:
             ctx = ssl.create_default_context()
             if u.hostname in ("127.0.0.1", "localhost", "::1"):  # certificate of the vhost name
                 ctx.check_hostname, ctx.verify_mode = False, ssl.CERT_NONE
-            conn = http.client.HTTPSConnection(u.hostname, u.port, timeout=self.timeout, context=ctx)
+            conn = TLSConnection(u.hostname, u.port, sni=sni_of(host), timeout=self.timeout, context=ctx)
         else:
             conn = http.client.HTTPConnection(u.hostname, u.port, timeout=self.timeout)
         t0 = time.monotonic()

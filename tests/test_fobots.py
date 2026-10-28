@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import re
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -978,6 +979,20 @@ class ProbeTests(unittest.TestCase):
         self.assertEqual(self.hosts, ["www.example.org"])
         self.mode["delay"] = 0.3
         self.assertGreaterEqual(p.measure(), 0.3)
+
+    def test_https_presents_the_host_in_sni(self):
+        names = []
+
+        def wrap_socket(sock, server_hostname=None):
+            names.append(server_hostname)
+            raise ssl.SSLError("handshake stopped by the test")
+        https = self.url.replace("http:", "https:")
+        with mock.patch("fobots.load.ssl.create_default_context") as ctx:
+            ctx.return_value.wrap_socket.side_effect = wrap_socket
+            for host in ("www.example.org:8443", None):
+                with self.assertRaises(ssl.SSLError):
+                    Probe([(host, https)], timeout=5).fetch(host, https)
+        self.assertEqual(names, ["www.example.org", "127.0.0.1"])
 
     def test_worst_of_several_urls(self):
         p = Probe([(None, self.url), (None, self.url + "2")], timeout=5)

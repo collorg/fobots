@@ -138,13 +138,27 @@ Disabled by default (`load_signal = none`). When enabled, a thread measures the 
   # load_critical = 3
   # load_probe_timeout = 10s   # a slower answer counts as 10 s
   ```
-  `HOST@` sets the `Host` header (virtual host); several URLs are separated by commas, the
+  `HOST@` sets the `Host` header and, in HTTPS, the TLS name (SNI): the right vhost even at
+  `https://127.0.0.1/`. Several URLs are separated by commas, the
   level follows the slowest. Choose a **dynamic page typical of your service**, answering 2xx:
   the daemon refuses to start otherwise (a redirection or a 404 would measure nothing). A
   connection error or an HTTP 5xx only counts as critical after 3 consecutive failures. The
   probe comes from `127.0.0.1`: private, so never counted nor banned. It is chosen by you,
   never taken from the log. `fobots probe` measures the URL for a minute (median, p95, max) to
   help choose the levels; run it again during a slowdown to see what "degraded" looks like.
+
+  A site that redirects HTTP to HTTPS answers `http://127.0.0.1/…` with a 301: give the
+  HTTPS address, still on `127.0.0.1`, with the name of the vhost:
+  ```ini
+  load_probe_url = www.example.org@https://127.0.0.1/app/some-dynamic-page
+  ```
+  The certificate is not checked on `127.0.0.1`. The name goes in SNI: without it, Apache would
+  answer with its default HTTPS vhost (the first one on `*:443`), another site or a 400/421. To
+  check by hand what the probe will get:
+  `curl -sk --resolve www.example.org:443:127.0.0.1 https://www.example.org/app/some-dynamic-page -o /dev/null -w '%{http_code} %{size_download}\n'`.
+  **Do not give the public name** (`https://www.example.org/…`): the request would leave from
+  the public address of the server, which is counted like any other client, and the server
+  could ban itself.
 
 ### Recording what a slowdown looks like (before configuring anything)
 
@@ -155,6 +169,10 @@ Left running on a machine, it records what the server looks like when the page s
 ./fobots.py probe --url HOST@http://127.0.0.1/app/page --record probe.jsonl      # run by hand (nohup, tmux…)
 ./fobots.py probe --report probe.jsonl
 ```
+
+While it runs, the page receives its `GET` every 5 s, and the daemon's own if `load_signal =
+probe` points to the same page: two `fobots-probe` lines in the same second are these two
+processes. Stop the recording once the incident is captured, the file grows as long as it runs.
 
 It measures the page every 5 s and keeps the last two minutes of readings in memory (only
 `/proc` is read: load, memory available, swap activity, pressure stall, accept queue of ports

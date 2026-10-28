@@ -22,7 +22,7 @@ import time
 from urllib.parse import urlsplit
 
 from .analyse import dir_key
-from .load import summarize
+from .load import TLSConnection, sni_of, summarize
 from .util import parse_ts
 
 LOG_RE = re.compile(r'^(\S+) \S+ \S+ \[([^\]]+)\] "([A-Z]+) (\S+)[^"]*" (\d{3}) (\S+) "[^"]*" "([^"]*)"')
@@ -113,7 +113,7 @@ def make_fetcher(base, host=None, timeout=20.0, insecure=False, user_agent=None,
 
     def fetch(path, agent):
         if u.scheme == "https":
-            conn = http.client.HTTPSConnection(u.hostname, u.port, timeout=timeout, context=ctx)
+            conn = TLSConnection(u.hostname, u.port, sni=sni_of(host), timeout=timeout, context=ctx)
         else:
             conn = http.client.HTTPConnection(u.hostname, u.port, timeout=timeout)
         t0 = time.monotonic()
