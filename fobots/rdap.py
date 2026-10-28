@@ -129,6 +129,7 @@ def fetch_rdap(ip):
         return (ipaddress.ip_address(data["startAddress"]),
                 ipaddress.ip_address(data["endAddress"]), label(data))
     except urllib.error.HTTPError as e:
+        e.close()  # it holds the response and its socket
         if e.code == 429:
             ra = e.headers.get("Retry-After", "")
             pause = min(int(ra), MAX_PAUSE) if ra.isdigit() else 600
