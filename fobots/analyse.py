@@ -7,11 +7,16 @@ from collections import Counter, defaultdict
 
 from .util import VHOST, fmt_range, parse_ts, prefix_of
 
-# common or combined format; the duration, if any, is the LAST field (Apache: %D at the end of
-# the LogFormat, in microseconds; nginx: $request_time, in seconds)
+# common or combined format, then at most one more field: the duration, if it is one (Apache: %D
+# at the end of the LogFormat, an integer in microseconds; nginx: $request_time, in seconds with
+# 3 decimals), see duration_field
 FULL_RE = re.compile(
     '^' + VHOST + r'(\S+) \S+ \S+ \[([^\]]+)\] "([A-Z]+) (\S+)[^"]*" (\d{3}) (\S+)'
-    r'(?: "[^"]*" "([^"]*)"(?:\s+(\d+(?:\.\d+)?))?)?\s*$')
+    r'(?: "[^"]*" "([^"]*)"(?:\s+(-|\d+(?:\.\d+)?))?)?\s*$')
+
+# A duration: integer (%D) or 3 decimals (nginx prints $request_time as %T.%03M). GitLab Omnibus
+# ends its lines with $gzip_ratio instead: "-" or 2 decimals, which is not a duration.
+DURATION_RE = re.compile(r"\d+(?:\.\d{3})?")
 
 STATIC_RE = re.compile(r"\.(js|css|png|jpe?g|gif|svg|ico|webp|avif|woff2?|ttf|eot|map|mp4|webm)$",
                        re.I)
@@ -29,6 +34,11 @@ STATIC_SHARE = 0.9       # ... if this share of its requests are static files
 CHEAP_MS = 50            # ... and, when the log has durations, below this mean time
 
 UNITS_MS = {"us": 0.001, "ms": 1.0, "s": 1000.0}
+
+
+def duration_field(last):
+    """The last field of a line (FULL_RE group 8) if it is a duration, else None."""
+    return last if last is not None and DURATION_RE.fullmatch(last) else None
 
 
 def dir_key(path):
@@ -87,7 +97,8 @@ class Analysis:
         if not m:
             self.unreadable += 1
             return
-        ip, ts, _method, path, _status, size, agent, dur = m.groups()
+        ip, ts, _method, path, _status, size, agent, last = m.groups()
+        dur = duration_field(last)
         try:
             sec = parse_ts(ts)
         except ValueError:

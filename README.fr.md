@@ -69,7 +69,8 @@ dans `other_vhosts_access.log`). Il lit ensuite les 1000 dernières lignes de ch
 garde ceux que fobots sait suivre :
 
 - le format doit être reconnu (`combined`, ou `vhost_combined` d'Apache) ; il signale si une
-  durée termine la ligne (`%D`, `$request_time`), dont se servent `analyse` et `stress` ;
+  durée termine la ligne (`%D`, `$request_time`), dont se servent `analyse` et `stress` (le
+  `$gzip_ratio` qui termine les lignes de GitLab Omnibus est lu et ignoré) ;
 - un log dont aucun client n'est public est écarté : le serveur est derrière un proxy et
   journalise le proxy, pas le client (`mod_remoteip`, `real_ip_header`) ;
 - un log envoyé à un programme (`CustomLog "|rotatelogs …"`), dont le chemin contient une

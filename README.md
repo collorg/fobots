@@ -63,7 +63,7 @@ one it inherits (on Debian, an Apache vhost without `CustomLog` writes to
 ones fobots can follow:
 
 - the format must be recognised (`combined`, or Apache's `vhost_combined`); whether a duration
-  ends the line (`%D`, `$request_time`) is reported, `analyse` and `stress` use it;
+  ends the line (`%D`, `$request_time`) is reported, `analyse` and `stress` use it (the `$gzip_ratio` that ends the lines of GitLab Omnibus is read and ignored);
 - a log in which no client is public is left out: the server is behind a proxy and logs the
   proxy, not the client (`mod_remoteip`, `real_ip_header`);
 - a log piped to a program (`CustomLog "|rotatelogs …"`), with a variable in its path

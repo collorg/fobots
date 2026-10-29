@@ -699,6 +699,9 @@ class DetectorRate(DetectorBase):
         from fobots.detector import REQ_RE
         m = REQ_RE.search(line("43.1.1.1", 0, "/api", agent="runner/1").rstrip("\n") + " 123456\n")
         self.assertEqual((m.group(1), m.group(2)), ("/api", "runner/1"))
+        for gzip_ratio in ("-", "1.65"):  # GitLab Omnibus
+            m = REQ_RE.search(line("43.1.1.1", 0, "/api", agent="runner/1").rstrip("\n") + f" {gzip_ratio}\n")
+            self.assertEqual((m.group(1), m.group(2)), ("/api", "runner/1"))
 
     def test_watched_ips_are_reported(self):
         wf = self.path("watched.jsonl")
@@ -952,6 +955,13 @@ class AnalyseTests(unittest.TestCase):
         for _ in range(3):
             slow.feed(base.replace("x.js", "y.js") + "900\n")
         self.assertEqual(slow.static_dirs(), [])  # 900 ms per request: not cheap
+
+    def test_gitlab_omnibus_gzip_ratio_is_not_a_duration(self):
+        an = self.analysis()
+        base = '43.1.1.1 - - [14/Oct/2026:10:00:00 +0000] "GET /a/x HTTP/2.0" 200 1 "" "ua" '
+        an.feed(base + "-\n")         # $gzip_ratio of an uncompressed answer
+        an.feed(base + "3.61\n")      # $gzip_ratio: 2 decimals, not seconds
+        self.assertEqual((an.lines, an.unreadable, an.timed), (2, 0, 0))
 
     def test_unreadable_lines_and_empty_report(self):
         an = self.analysis()

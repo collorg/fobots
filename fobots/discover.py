@@ -10,7 +10,7 @@ import shlex
 import subprocess
 from datetime import datetime
 
-from .analyse import FULL_RE
+from .analyse import FULL_RE, duration_field
 
 APACHE_CONFS = ("/etc/apache2/apache2.conf", "/etc/httpd/conf/httpd.conf")
 
@@ -288,7 +288,7 @@ def sample(path):
         if not m:
             continue
         info["ok"] += 1
-        info["duration"] += m.group(8) is not None
+        info["duration"] += duration_field(m.group(8)) is not None
         try:
             info["public"] += ipaddress.ip_address(m.group(1)).is_global
         except ValueError:
