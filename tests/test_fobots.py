@@ -975,6 +975,58 @@ class AnalyseTests(unittest.TestCase):
         self.assertEqual(an.lines, 1)
 
 
+class TopTests(unittest.TestCase):
+    SHA = "3cfff8574a19536e2b3d057b43b59fcf35932c11"
+
+    @staticmethod
+    def gl(addr, sec, path, status=200, referer="-", method="GET"):
+        return (f'{addr} - - [14/Oct/2026:10:{sec // 60:02d}:{sec % 60:02d} +0000] '
+                f'"{method} {path} HTTP/2.0" {status} 10 "{referer}" "ua" -\n')
+
+    def test_path_key(self):
+        from fobots.top import norm_key, path_key
+        self.assertEqual(path_key(f"/adac/gem5/-/blob/{self.SHA}/src/a.cc"), "/adac/gem5/")
+        self.assertEqual(path_key("/rpc/utils/wrappers/mujoco/-/tree/master?x=/-/y"), "/rpc/utils/wrappers/mujoco/")
+        self.assertEqual(path_key("/adac/gem5.git/info/refs?service=git-upload-pack"), "/adac/gem5/")
+        self.assertEqual(path_key("/-/manifest.json"), "/-/")  # GitLab itself, not a project
+        self.assertEqual(path_key("/collorg/images/a.png"), "/collorg/images/")
+        self.assertEqual((norm_key("adac/gem5"), norm_key("/adac/gem5/"), norm_key("/")),
+                         ("/adac/gem5/", "/adac/gem5/", "/"))
+
+    def test_api_calls_are_charged_to_their_page(self):
+        from fobots.top import Top
+        top = Top()
+        page = f"/adac/gem5/-/blob/{self.SHA}/a.cc"
+        top.feed(self.gl("43.1.1.1", 0, page))
+        for _ in range(3):
+            top.feed(self.gl("43.1.1.1", 1, "/api/graphql", 499, "https://git.example.org" + page, "POST"))
+        top.feed(self.gl("43.2.2.2", 1, "/api/v4/projects/7"))           # no referer: stays /api/v4/
+        top.feed(self.gl("43.3.3.3", 2, "/adac/gem5/-/tree/master"))    # not pinned to a commit
+        g = top.paths["/adac/gem5/"]
+        self.assertEqual((g.requests, g.via, g.sha, g.aborted, len(g.ips)), (5, 3, 1, 3, 2))
+        self.assertEqual(top.paths["/api/v4/"].requests, 1)
+        self.assertNotIn("/api/", top.paths)
+        off = Top(via="")
+        off.feed(self.gl("43.1.1.1", 1, "/api/graphql", 200, "https://git.example.org" + page, "POST"))
+        self.assertEqual(list(off.paths), ["/api/"])
+
+    def test_report_and_hourly_table(self):
+        import re
+        from fobots.top import Top, report as top_report
+        top = Top(ignore_path=re.compile("^/assets/"), hourly="/adac/gem5/")
+        for s in range(5):
+            top.feed(self.gl(f"43.1.1.{s}", s, f"/adac/gem5/-/commit/{self.SHA}"))
+        top.feed(self.gl("43.9.9.9", 0, "/other/project/-/tree/main"))
+        top.feed(self.gl("43.9.9.9", 0, "/assets/app.js"))
+        top.feed("garbage\n")
+        text = "\n".join(top_report(top, 1))
+        self.assertIn("1 unreadable line(s), 1 excluded", text)
+        self.assertRegex(text, r"\n +5 +0 +100% +0% +5 +1\.0 +83%  /adac/gem5/\n")
+        self.assertIn("(1 more path(s): --top)", text)
+        self.assertIn("Per hour, /adac/gem5/:", text)
+        self.assertIn("2026-10-14", text)
+
+
 class ProbeTests(unittest.TestCase):
     """The load signal 'probe', against a real local HTTP server."""
 
@@ -2470,6 +2522,19 @@ class Commands(TmpDirCase):
         self.assertIn("ignore_path = ^(/app/img/)", out)
         rc, out, err = self.run_main("analyse", "--dir", self.dir)  # no log in the configuration
         self.assertEqual(rc, 1)
+
+    def test_top_command_reads_gzip(self):
+        import gzip
+        log_path = self.path("access.log.1.gz")
+        with gzip.open(log_path, "wt") as f:
+            f.write("".join(line(f"43.1.1.{i}", i, "/grp/proj/-/tree/main") for i in range(4)))
+        rc, out, err = self.run_main("top", log_path, "--by-hour", "grp/proj")
+        self.assertEqual(rc, 0, err)
+        self.assertIn("/grp/proj/", out)
+        self.assertIn("Per hour, /grp/proj/:", out)
+        rc, out, err = self.run_main("top", log_path, "--via", "(")
+        self.assertEqual(rc, 1)
+        self.assertIn("--via", err)
 
     def test_watched_table_and_cmd(self):
         append_event(self.path("watched.jsonl"), {

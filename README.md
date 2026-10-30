@@ -417,6 +417,30 @@ number is seconds, an integer is microseconds). The daemon is not affected by th
 These are **suggestions**: nothing is changed, and a suggestion built from one quiet day
 should be checked before use.
 
+## Who costs what: `fobots top`
+
+```
+fobots top                                   # the logs of fobots.conf
+fobots top gitlab_access.log*.gz --top 30    # rotated logs too
+fobots top access.log --by-hour group/project   # adds a table per hour for one path
+```
+Ranks the **paths** by requests. On GitLab, the path is the **project** (everything before `/-/`,
+subgroups included; `project.git/…` for git over HTTP), otherwise the directory, as in `analyse`.
+The GraphQL and API calls a GitLab page makes (`--via`, `^/api/` by default) are **charged to
+that page** through their Referer: a blob page triggers about ten of them, so without this the
+real cost of a project hides in an anonymous `/api/` row. Columns:
+
+- `via`: requests charged through their Referer;
+- `sha`: share of the other ones pinned to a commit (40 hex digits in the path): what a
+  scraper enumerates, a person mostly browses a branch;
+- `499`: the client left before the answer (a slow server, or a client with a short timeout);
+- `IPs`, `req/IP`: few requests per IP over many IPs is a scraper spread over proxies, which
+  no per-range threshold will catch.
+
+`--by-hour` shows the effect of a measure (visibility changed, nginx limit) hour by hour. Your
+`ignore_path` applies (excluded lines are counted on the first line); `--ignore-path` replaces
+it, for example to leave out a link maze.
+
 ## Trap paths: what only scanners ask for (`traps`)
 
 A path that gets a 404 or a 403 and is asked for by many distinct IPs from different networks
@@ -622,6 +646,7 @@ fobots welcome list
 fobots watched [--active] [--cmd]  monitored IPs (watch_*) caught in a ban
 fobots traps [LOG…]            trap paths (404/403 asked for by many IPs) learned by the daemon or from logs
 fobots analyse [LOG…]             reads logs once and suggests settings (no nft, no root)
+fobots top [LOG…]                 paths (GitLab projects, directories) ranked by requests
 ```
 Common options: `-f CONF`, `--dir`, `-c`, `-w`, `--ban-time`, `--nft-bin`, `--dry-run`,
 `-v`. `--dry-run` does not call nft: it prints the commands and simulates the sets in memory.

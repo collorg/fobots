@@ -13,6 +13,7 @@ nftables set as soon as the threshold is exceeded. Bans expire by themselves (nf
   fobots stress LOG --base URL       # replays a log at 2, 5, 10… req/s: costs, capacity
   fobots bans                        # active bans with remaining time
   fobots analyse access.log          # suggests threshold and ignore_path from a log
+  fobots top access.log              # paths (GitLab projects…) that receive the most requests
   fobots traps                       # trap paths learned from the 404/403 (run --traps, or LOG…)
   fobots welcome add 17.0.0.0/8      # welcome list + removal of the bans concerned
   fobots welcome list
@@ -27,6 +28,7 @@ command line overrides it.
 Signals: SIGUSR1 prints the most active ranges, SIGTERM/SIGINT stop the daemon.
 """
 import argparse
+import gzip
 import http.client
 import ipaddress
 import json
@@ -59,6 +61,8 @@ from .replay import MIN_REQUESTS, Replay, make_fetcher, parse_rates, read_reques
 from .replay import report as replay_report
 from .record import report as record_report
 from .sites import Site
+from .top import Top, norm_key
+from .top import report as top_report
 from .traps import MAX_VALUES, TrapLearner
 from .util import append_text, parse_duration, printable, write_atomic
 from .welcome import Banner, Welcome, welcome_add
@@ -321,45 +325,91 @@ def cmd_bans(args):
 
 
 
-def cmd_analyse(args):
-    """Reads logs once (the files given, otherwise those of the configuration) and suggests."""
-    cache, _ = paths(args)
-    ignore_path = None
-    if args.ignore_path:
-        try:
-            ignore_path = re.compile(args.ignore_path)
-        except re.error as e:
-            log.error("invalid regular expression for ignore_path: %s", e)
-            return 1
-    inputs = []  # (file, target whose rules apply)
+def log_inputs(args):
+    """[(file, target whose rules apply)]: the files given, otherwise those of the configuration."""
     if args.files:
-        inputs = [(f, None) for f in args.files]
-    else:
-        sites = [Site(d["name"], d["log"], d["regex"], d["all"], d.get("watch"), d.get("trap_ignore"))
-                 for d in (getattr(args, "sites", None) or [])]
-        if getattr(args, "log", None):
-            sites.insert(0, Site("default", args.log))
-        inputs = [(s.log, s) for s in sites]
-    if not inputs:
-        log.error("no log to analyse: give files, or define `log =` / [site:NAME] in the configuration")
-        return 1
-    an = Analysis(RangeStore(cache), ignore_path, args.sustain, args.time_unit, args.slow_window)
-    an.slow_threshold = args.slow_threshold
+        return [(f, None) for f in args.files]
+    sites = [Site(d["name"], d["log"], d["regex"], d["all"], d.get("watch"), d.get("trap_ignore"))
+             for d in (getattr(args, "sites", None) or [])]
+    if getattr(args, "log", None):
+        sites.insert(0, Site("default", args.log))
+    return [(s.log, s) for s in sites]
+
+
+def open_log(path):
+    """A log to read once: - = stdin, .gz = a rotated log."""
+    if path == "-":
+        return sys.stdin
+    if path.endswith(".gz"):
+        return gzip.open(path, "rt", errors="replace")
+    return open(path, errors="replace")
+
+
+def feed_logs(args, inputs, feed):
+    """Gives every line of the inputs to feed(line, site); 0, or 1 after an error."""
     for path, site in inputs:
         try:
-            f = sys.stdin if path == "-" else open(path, errors="replace")
-            with f:
+            with open_log(path) as f:
                 for line in f:
-                    an.feed(line, site)
+                    feed(line, site)
         except FileNotFoundError as e:
             if args.files:
                 log.error("%s: %s", path, e)
                 return 1
             log.warning("%s: absent, skipped", path)  # a site of the configuration with no log yet
-        except OSError as e:
+        except (OSError, EOFError) as e:  # EOFError: truncated .gz
             log.error("%s: %s", path, e)
             return 1
+    return 0
+
+
+def ignore_regex(args):
+    """(compiled --ignore-path or None, ok)"""
+    if not args.ignore_path:
+        return None, True
+    try:
+        return re.compile(args.ignore_path), True
+    except re.error as e:
+        log.error("invalid regular expression for ignore_path: %s", e)
+        return None, False
+
+
+def cmd_analyse(args):
+    """Reads logs once (the files given, otherwise those of the configuration) and suggests."""
+    cache, _ = paths(args)
+    ignore_path, ok = ignore_regex(args)
+    if not ok:
+        return 1
+    inputs = log_inputs(args)
+    if not inputs:
+        log.error("no log to analyse: give files, or define `log =` / [site:NAME] in the configuration")
+        return 1
+    an = Analysis(RangeStore(cache), ignore_path, args.sustain, args.time_unit, args.slow_window)
+    an.slow_threshold = args.slow_threshold
+    if feed_logs(args, inputs, an.feed):
+        return 1
     print("\n".join(report(an, args.threshold, args.top)))
+    return 0
+
+
+def cmd_top(args):
+    """Paths (GitLab projects, directories) ranked by requests, API calls charged to their page."""
+    ignore_path, ok = ignore_regex(args)
+    if not ok:
+        return 1
+    try:
+        top = Top(ignore_path, args.via, None if args.by_hour is None else
+                  ("" if args.by_hour == "" else norm_key(args.by_hour)))
+    except re.error as e:
+        log.error("invalid regular expression for --via: %s", e)
+        return 1
+    inputs = log_inputs(args)
+    if not inputs:
+        log.error("no log to read: give files, or define `log =` / [site:NAME] in the configuration")
+        return 1
+    if feed_logs(args, inputs, top.feed):
+        return 1
+    print("\n".join(top_report(top, args.top)))
     return 0
 
 
@@ -1029,6 +1079,20 @@ def main(argv=None):
                          "integer = µs like Apache %%D)")
     an.add_argument("--top", type=int, default=10, help="rows of the rankings (default: 10)")
     an.set_defaults(fn=cmd_analyse)
+
+    tq = sub.add_parser("top", parents=[common],
+                        help="paths (GitLab projects, directories) that receive the most requests")
+    tq.add_argument("files", nargs="*", help="logs to read (- = stdin, .gz accepted); "
+                    "default: those of the configuration")
+    tq.add_argument("--ignore-path", metavar="REGEX",
+                    help="paths not counted (default: ignore_path of the configuration)")
+    tq.add_argument("--via", metavar="REGEX", default="^/api/",
+                    help="requests charged to the page in their Referer (default: ^/api/, the "
+                         "GraphQL and API calls of a GitLab page; '' to disable)")
+    tq.add_argument("--by-hour", nargs="?", const="", metavar="PATH",
+                    help="adds a table per hour, for PATH (e.g. group/project) or for every path")
+    tq.add_argument("--top", type=int, default=20, help="rows of the ranking (default: 20)")
+    tq.set_defaults(fn=cmd_top)
 
     pr = sub.add_parser("probe", parents=[common],
                         help="measures the response time of the probe URL(s) (to set load_tense/critical)")

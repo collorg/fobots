@@ -436,6 +436,30 @@ champ supplémentaire.
 Ce sont des **suggestions** : rien n'est modifié, et une suggestion tirée d'une journée
 calme se vérifie avant usage.
 
+## Qui coûte quoi : `fobots top`
+
+```
+fobots top                                   # les logs de fobots.conf
+fobots top gitlab_access.log*.gz --top 30    # logs archivés compris
+fobots top access.log --by-hour groupe/projet   # ajoute un tableau par heure pour un chemin
+```
+Classe les **chemins** par nombre de requêtes. Sur GitLab, le chemin est le **projet** (tout ce qui
+précède `/-/`, sous-groupes compris ; `projet.git/…` pour git en HTTP), sinon le répertoire, comme
+dans `analyse`. Les appels GraphQL et API d'une page GitLab (`--via`, `^/api/` par défaut) sont
+**imputés à cette page** grâce à leur Referer : une page de blob en déclenche une dizaine, sans
+quoi le coût réel d'un projet se cache dans une ligne `/api/` anonyme. Colonnes :
+
+- `via` : requêtes imputées grâce à leur Referer ;
+- `sha` : part des autres figées sur un commit (40 chiffres hexadécimaux dans le chemin) : ce
+  qu'énumère un scraper, une personne navigue surtout sur une branche ;
+- `499` : le client est parti avant la réponse (serveur lent, ou client à délai court) ;
+- `IPs`, `req/IP` : peu de requêtes par IP sur beaucoup d'IP, c'est un scraper réparti sur des
+  proxys, qu'aucun seuil par plage n'attrapera.
+
+`--by-hour` montre heure par heure l'effet d'une mesure (visibilité changée, limite nginx). Ton
+`ignore_path` s'applique (les lignes exclues sont comptées en tête) ; `--ignore-path` le
+remplace, par exemple pour écarter un labyrinthe de liens.
+
 ## Chemins pièges : ce que seuls les scanners demandent (`traps`)
 
 Un chemin qui reçoit un 404 ou un 403 et que demandent beaucoup d'IP distinctes de réseaux
@@ -649,6 +673,7 @@ fobots welcome list
 fobots watched [--active] [--cmd]  IP surveillées (watch_*) prises dans un ban
 fobots traps [LOG…]            chemins pièges (404/403 demandés par beaucoup d'IP), appris par le démon ou depuis des logs
 fobots analyse [LOG…]           lit des logs une fois et suggère des réglages (sans nft ni root)
+fobots top [LOG…]               chemins (projets GitLab, répertoires) classés par requêtes
 ```
 Options communes : `-f CONF`, `--dir`, `-c`, `-w`, `--ban-time`, `--nft-bin`,
 `--dry-run`, `-v`. `--dry-run` n'appelle pas nft : il affiche les commandes et
