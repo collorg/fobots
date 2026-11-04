@@ -85,6 +85,19 @@ quelques jours de `journalctl -u fobots`, supprime la ligne (ou mets `dry_run = 
 `systemctl restart fobots`. Le seuil est celui par défaut : `fobots analyse` lit les logs de la
 conf et propose `threshold` et `ignore_path`.
 
+`--application NOM` indique à `init` l'application web que sert le serveur : il lit la conf du
+serveur web de cette application et écrit ses réglages actifs. `init` la suggère quand il la
+trouve sur la machine. Pour l'instant :
+
+- `gitlab` (GitLab Omnibus) : lit `/var/opt/gitlab/nginx/conf/nginx.conf` (son propre nginx, pas
+  `/etc/nginx` ; `--nginx-conf` reste prioritaire) et écrit
+  `ignore_path = ^/(assets/|uploads/-/system/|favicon)`. Une page GitLab charge environ 25
+  fichiers statiques (webpack, CSS, polices, icônes, avatars) : comptés, deux pages de suite
+  font passer un visiteur au-dessus du seuil. Ils ne coûtent presque rien à servir ; les pages
+  que parcourent les scrapers (`blob`, `commit`, `tree`) et l'API restent comptées.
+
+Les autres applications sont des entrées de `fobots/applications.py`.
+
 `init` ajoute aussi à `welcome.txt` les adresses publiques de la machine (une tâche cron, ou une
 sonde qui demande le nom public, en vient) et l'adresse de ta session SSH, sauf si elles y sont
 déjà couvertes.

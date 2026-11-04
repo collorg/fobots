@@ -53,6 +53,7 @@ from .detector import OBSERVED_PREFIX6, OBSERVED_WIDE6, SCOPES, TRAP_SCOPES, Det
 from .events import read_events, trim_events
 from .follow import log_lines, run_sites, stdin_is_feed
 from .access import blocker_advice, sync_dropin
+from .applications import APPLICATIONS, detected
 from .install import Installer
 from .load import (LOAD_DEFAULTS, SIGNALS, LoadMonitor, Probe, parse_probe_urls, read_load,
                    summarize)
@@ -573,7 +574,13 @@ def read_nets(path):
 
 
 def cmd_init(args):
-    apache, nginx = tuple(args.apache_conf or APACHE_CONFS), tuple(args.nginx_conf or NGINX_CONFS)
+    app = APPLICATIONS[args.application] if args.application else {}
+    apache = tuple(args.apache_conf or APACHE_CONFS)
+    nginx = tuple(args.nginx_conf or app.get("nginx_confs") or NGINX_CONFS)
+    if not args.application:
+        for name in detected():
+            print(f"[..] {APPLICATIONS[name]['title']} found on this machine: "
+                  f"fobots init --application {name} uses its configuration and settings")
     found, read, warnings = discover(apache, nginx)
     if not read:
         print(f"no Apache or nginx configuration found (looked for {', '.join(apache + nginx)}): "
@@ -586,7 +593,7 @@ def cmd_init(args):
     for w in warnings:
         print(f"[..] {printable(w)}")
     kept = [f for f in found if not f.reason]
-    text = config_text(found, read, warnings)
+    text = config_text(found, read, warnings, application=args.application)
     out = os.path.abspath(args.output)
     wl_path = args.welcome or os.path.join(os.path.dirname(out), "welcome.txt")
     welcome = welcome_additions(read_nets(wl_path), own_addresses(), admin_address())
@@ -1052,7 +1059,12 @@ def main(argv=None):
     it.add_argument("--apache-conf", action="append", metavar="FILE",
                     help=f"Apache configuration (default: the first of {', '.join(APACHE_CONFS)})")
     it.add_argument("--nginx-conf", action="append", metavar="FILE",
-                    help=f"nginx configuration (default: {', '.join(NGINX_CONFS)})")
+                    help=f"nginx configuration (default: {', '.join(NGINX_CONFS)}, or the "
+                         "application's)")
+    it.add_argument("--application", choices=sorted(APPLICATIONS),
+                    help="the web application served: its web server configuration is read and "
+                         "its settings written (gitlab: the nginx of Omnibus, its static files "
+                         "not counted)")
     it.set_defaults(fn=cmd_init)
 
     an = sub.add_parser("analyse", parents=[common],

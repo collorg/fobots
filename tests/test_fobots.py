@@ -23,6 +23,7 @@ from unittest import mock
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 from fobots.analyse import Analysis, average_rate, dir_key, report, short_agent, sustained_rate  # noqa: E402
 from fobots.access import dropin_text, missing_groups, service_groups, sync_dropin  # noqa: E402
+from fobots.applications import APPLICATIONS  # noqa: E402
 from fobots.cli import main, welcome_cmd  # noqa: E402
 from fobots.config import CONF_KEYS, SITE_KEYS, find_config, load_config  # noqa: E402
 from fobots.detector import Detector  # noqa: E402
@@ -2893,6 +2894,38 @@ class InitCommand(DiscoveryTree):
         rc, out, _ = self.init("--force")
         self.assertNotIn("# mine", self.read("etc/fobots.conf"))
         self.assertIn("# mine", self.read("etc/fobots.conf.bak"))
+
+    def test_application_gitlab(self):
+        self.tree()
+        rc, out, err = self.init("--application", "gitlab")
+        self.assertEqual(rc, 0, out + err)
+        text = self.read("etc/fobots.conf")
+        self.assertIn("`fobots init --application gitlab`", text)
+        ignore = re.search(r"(?m)^ignore_path = (.*)$", text).group(1)
+        self.assertEqual(ignore, APPLICATIONS["gitlab"]["ignore_path"])
+        rx = re.compile(ignore)
+        for path in ("/assets/webpack/pages.projects.blob.show.6250285c.chunk.js",
+                     "/assets/gitlab-sans/GitLabSans-9892dc.woff2",
+                     "/uploads/-/system/user/avatar/3/avatar.png?v=1793784795", "/favicon.ico"):
+            self.assertTrue(rx.search(path), path)
+        for path in ("/csp/coconut-choco-solver/-/blob/c7947a76/CODE_OF_CONDUCT.md", "/api/graphql",
+                     "/api/v4/user_counts", "/group/project/uploads/abc/file.pdf"):
+            self.assertFalse(rx.search(path), path)
+        self.assertIsNotNone(load_config(self.path("etc/fobots.conf")).get("ignore_path"))
+
+    def test_application_reads_its_web_server_configuration(self):
+        nginx = self.write("omnibus/nginx.conf", "http { access_log /var/log/g.log; server { listen 443; } }\n")
+        app = dict(APPLICATIONS["gitlab"], nginx_confs=(nginx,), detect=(nginx,))
+        with mock.patch.dict("fobots.applications.APPLICATIONS", gitlab=app), \
+                mock.patch("fobots.cli.own_addresses", return_value=[]), \
+                mock.patch("fobots.cli.admin_address", return_value=None):
+            rc, out, _ = Commands.run_main(self, "init", "--dry-run", "--apache-conf", self.path("none"),
+                                           "--application", "gitlab", "-o", self.path("etc/f.conf"))
+            self.assertIn("log = /var/log/g.log", out)
+            self.assertNotIn("found on this machine", out)
+            rc, out, _ = Commands.run_main(self, "init", "--dry-run", "--apache-conf", self.path("none"),
+                                           "--nginx-conf", nginx, "-o", self.path("etc/f.conf"))
+            self.assertIn("fobots init --application gitlab", out)  # detected: suggested
 
     def test_dry_run_writes_nothing(self):
         self.tree()

@@ -11,6 +11,7 @@ import subprocess
 from datetime import datetime
 
 from .analyse import FULL_RE, duration_field
+from .applications import APPLICATIONS
 
 APACHE_CONFS = ("/etc/apache2/apache2.conf", "/etc/httpd/conf/httpd.conf")
 
@@ -383,9 +384,13 @@ def discover(apache_confs=APACHE_CONFS, nginx_confs=NGINX_CONFS):
     return found, read, warnings
 
 
-def config_text(found, read, warnings=(), today=None):
+def config_text(found, read, warnings=(), today=None, application=None):
+    """fobots.conf in observation mode; `application`: a name of APPLICATIONS, whose settings
+    are written active."""
     today = today or datetime.now().strftime("%Y-%m-%d")
-    out = [f"# Written by `fobots init` on {today}, from: {', '.join(read) or 'nothing'}.",
+    app = APPLICATIONS[application] if application else {}
+    option = f" --application {application}" if application else ""
+    out = [f"# Written by `fobots init{option}` on {today}, from: {', '.join(read) or 'nothing'}.",
            "# All the options: /usr/share/doc/fobots/fobots.conf.example (or the README)."]
     out += [f"# Not followed: {w}" for w in warnings]
     out += ["[fobots]",
@@ -398,7 +403,9 @@ def config_text(found, read, warnings=(), today=None):
            "sustain = 5          # consecutive seconds above the threshold",
            "window = 60",
            "ban_time = 1h",
-           "# ignore_path = ^/(assets/|favicon|robots\\.txt)   # cheap static pages, see `fobots analyse`",
+           *([f"# {application}: {app['ignore_comment']}", f"ignore_path = {app['ignore_path']}"]
+             if app.get("ignore_path") else
+             ["# ignore_path = ^/(assets/|favicon|robots\\.txt)   # cheap static pages, see `fobots analyse`"]),
            "# load_signal = probe   # check the URL first: fobots probe --url HOST@https://127.0.0.1/page",
            "# load_probe_url = HOST@https://127.0.0.1/some-dynamic-page"]
     for f, name in zip(found, section_names(found)):

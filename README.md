@@ -78,6 +78,19 @@ few days of `journalctl -u fobots`, remove the line (or set `dry_run = no`) and
 `systemctl restart fobots`. The threshold is the default one: `fobots analyse` reads the logs of
 the configuration and suggests `threshold` and `ignore_path`.
 
+`--application NAME` tells `init` which web application the server runs: it reads that
+application's web server configuration and writes its settings active. `init` suggests it when it
+finds the application on the machine. For now:
+
+- `gitlab` (GitLab Omnibus): reads `/var/opt/gitlab/nginx/conf/nginx.conf` (its own nginx, not
+  `/etc/nginx`; `--nginx-conf` still overrides it) and writes
+  `ignore_path = ^/(assets/|uploads/-/system/|favicon)`. A GitLab page loads about 25 static
+  files (webpack, CSS, fonts, icons, avatars): counted, two pages in a row put a visitor above
+  the threshold. They cost almost nothing to serve; the pages scrapers walk (`blob`, `commit`,
+  `tree`) and the API stay counted.
+
+Other applications are entries of `fobots/applications.py`.
+
 `init` also adds to `welcome.txt` the public addresses of the machine (a cron job, or a probe
 that requests the public name, comes from them) and the address of your SSH session, unless
 they are already covered.
