@@ -158,7 +158,8 @@ When a log needs another one (GitLab Omnibus: `/var/log/gitlab/nginx` in `root:g
 `/etc/systemd/system/fobots.service.d/log-access.conf`, computed from the directories crossed,
 then runs `systemctl daemon-reload`; `systemctl restart fobots` makes a running service take it.
 An upgrade only restarts a service that is already running; `purge` removes
-`/var/lib/fobots` and the `fobots` user.
+`/var/lib/fobots`, the `fobots` user and the drop-in `log-access.conf` (not your own drop-ins
+of `systemctl edit`).
 
 ### Tests
 

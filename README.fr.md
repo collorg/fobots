@@ -166,7 +166,8 @@ Quand un log en demande un autre (GitLab Omnibus : `/var/log/gitlab/nginx` en
 traversés, puis lance `systemctl daemon-reload` ; `systemctl restart fobots` le fait prendre à
 un service démarré.
 Une mise à jour relance seulement un service déjà démarré ; `purge` supprime
-`/var/lib/fobots` et l'utilisateur `fobots`.
+`/var/lib/fobots`, l'utilisateur `fobots` et le drop-in `log-access.conf` (pas vos propres
+drop-ins de `systemctl edit`).
 
 ### Tests
 

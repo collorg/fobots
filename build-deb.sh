@@ -150,6 +150,12 @@ SCRIPT
 cat > "$BUILD/DEBIAN/postrm" <<'SCRIPT'
 #!/bin/sh
 set -e
+if [ "$1" = purge ]; then
+    # the drop-in written by fobots init / install (groups of the logs), not the package's:
+    # the administrator's own drop-ins (systemctl edit) stay
+    rm -f /etc/systemd/system/fobots.service.d/log-access.conf
+    rmdir /etc/systemd/system/fobots.service.d 2>/dev/null || true
+fi
 if [ "$1" = remove ] || [ "$1" = purge ]; then
     [ -d /run/systemd/system ] && systemctl daemon-reload || true
 fi
