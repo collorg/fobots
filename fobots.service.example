@@ -28,7 +28,7 @@ ReloadPropagatedFrom=nftables.service
 Type=simple
 User=fobots
 # The log must be readable by this user: adapt the group (adm, root, www-data…)
-# or grant access with setfacl. Check: sudo -u fobots head -1 /var/log/nginx/access.log
+# or grant access with setfacl. Check (-g adm: sudo alone does not give this group): sudo -u fobots -g adm head -1 /var/log/nginx/access.log
 SupplementaryGroups=adm
 ConfigurationDirectory=fobots
 StateDirectory=fobots

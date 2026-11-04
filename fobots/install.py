@@ -11,6 +11,7 @@ from .discover import (APACHE_CONFS, NGINX_CONFS, admin_address, config_text, di
                        own_addresses, welcome_additions)
 from .constants import BIN_PATH, CONF_DIR, INSTALL_DIR, SERVICE_USER, SRC_DIR, STATE_DIR, UNIT_PATH
 from .nft import Nft
+from .util import log_access
 
 
 class Installer:
@@ -143,28 +144,23 @@ class Installer:
         return re.findall(r"(?m)^\s*log\s*=\s*(\S+)", text)
 
     @staticmethod
-    def group_for(log_file):
-        """Group giving access to this log if it is not public (and not root), otherwise adm."""
-        import grp
+    def groups_for(log_file):
+        """Groups opening this log to the service: those of the directories crossed and of the
+        file that only their group opens (see log_access). [] if public or not examinable."""
         try:
-            st = os.stat(log_file)
-            name = grp.getgrgid(st.st_gid).gr_name
-            if not st.st_mode & 0o004 and name != "root":
-                return name
-        except (OSError, KeyError, TypeError):
-            pass
-        return "adm"
+            return log_access(log_file)[0]
+        except OSError:
+            return []
 
     def log_groups(self):
-        """Access groups for all the logs (--log-group imposes its own)."""
+        """Access groups for all the logs: adm (the usual one, also for logs added later), then
+        those the paths require (--log-group imposes its own)."""
         if self.args.log_group:
             return [self.args.log_group]
-        groups = []
+        groups = ["adm"]
         for log_file in self.log_paths():
-            g = self.group_for(log_file)
-            if g not in groups:
-                groups.append(g)
-        return groups or ["adm"]
+            groups += [g for g in self.groups_for(log_file) if g not in groups]
+        return groups
 
     @staticmethod
     def program_files():
@@ -246,15 +242,22 @@ class Installer:
             if not os.path.exists(log_file):
                 self.say("!!", f"{log_file} does not exist yet (the daemon will wait for it): check the path")
                 continue
-            group = self.args.log_group or self.group_for(log_file)
-            r = self.run(["runuser", "-u", SERVICE_USER, "-g", group, "--",
-                          "test", "-r", log_file], check=False)
+            groups = self.log_groups()  # those of the unit
+            r = self.run(["runuser", "-u", SERVICE_USER, "-g", groups[0]]
+                         + [x for g in groups[1:] for x in ("-G", g)]
+                         + ["--", "test", "-r", log_file], check=False)
             if r.returncode == 0:
-                self.say("ok", f"{SERVICE_USER} can read {log_file}")
-            else:
-                self.say("!!", f"{SERVICE_USER} cannot read {log_file}: grant access, e.g. "
-                         f"`setfacl -m u:{SERVICE_USER}:r {log_file}` (and x on the parent directories), "
-                         "or --log-group")
+                self.say("ok", f"{SERVICE_USER} can read {log_file} (groups {' '.join(groups)})")
+                continue
+            try:
+                blocker = log_access(log_file)[1]
+            except OSError:
+                blocker = None
+            self.say("!!", f"{SERVICE_USER} cannot read {log_file}"
+                     + (f": {blocker} opens to no group" if blocker else "")
+                     + f". Grant access, e.g. `setfacl -m u:{SERVICE_USER}:x` on that directory "
+                     f"(r on a file), or AmbientCapabilities=CAP_DAC_READ_SEARCH (systemctl edit "
+                     "fobots), or --log-group")
 
     def run_all(self):
         if self.system and os.geteuid() != 0:

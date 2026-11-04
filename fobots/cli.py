@@ -37,6 +37,7 @@ import os
 import random
 import re
 import shutil
+import stat
 import signal
 import socket
 import sys
@@ -45,7 +46,7 @@ from datetime import datetime
 
 from .analyse import Analysis, report
 from .config import RUN_ONLY_KEYS, find_config, load_config
-from .constants import CONF_DIR, STATE_DIR
+from .constants import CONF_DIR, SERVICE_USER, STATE_DIR, UNIT_PATH
 from .discover import (APACHE_CONFS, NGINX_CONFS, admin_address, config_text, describe,
                        discover, own_addresses, welcome_additions)
 from .detector import OBSERVED_PREFIX6, OBSERVED_WIDE6, SCOPES, TRAP_SCOPES, Detector
@@ -64,7 +65,7 @@ from .sites import Site
 from .top import Top, norm_key
 from .top import report as top_report
 from .traps import MAX_VALUES, TrapLearner
-from .util import append_text, parse_duration, printable, write_atomic
+from .util import append_text, log_access, parse_duration, printable, write_atomic
 from .welcome import Banner, Welcome, welcome_add
 
 log = logging.getLogger("fobots")
@@ -570,17 +571,51 @@ def read_nets(path):
     return nets
 
 
-def unreadable_by_service(path):
-    """The group of the log, if the service (SupplementaryGroups=adm) may not read it."""
-    import grp
+def service_groups(unit=UNIT_PATH):
+    """SupplementaryGroups of the installed unit and of its drop-ins (systemctl edit), in the
+    order systemd reads them (an empty assignment resets the list); adm, the one of the
+    example unit, if none is installed."""
+    files = [unit]
     try:
-        st = os.stat(path)
-        group = grp.getgrgid(st.st_gid).gr_name
-    except (OSError, KeyError):
+        files += sorted(os.path.join(unit + ".d", n) for n in os.listdir(unit + ".d")
+                        if n.endswith(".conf"))
+    except OSError:
+        pass
+    groups, seen = [], False
+    for p in files:
+        try:
+            with open(p) as f:
+                text = f.read()
+        except OSError:
+            continue
+        for m in re.finditer(r"(?m)^\s*SupplementaryGroups\s*=(.*)$", text):
+            seen, values = True, m.group(1).split()
+            groups = groups + [g for g in values if g not in groups] if values else []
+    return groups if seen else ["adm"]
+
+
+def access_advice(path, have):
+    """None if the service (groups `have`) may read the log, otherwise what to do: the
+    group(s) to add, computed from the directories crossed, or, if no group opens the way,
+    an ACL or the capability."""
+    try:
+        need, blocker = log_access(path)
+    except OSError:
+        return None  # missing: the daemon waits for it, and says so
+    if blocker:
+        return (f"is behind {blocker}, which no group opens: setfacl -m u:{SERVICE_USER}:x on "
+                f"that directory (r on a file), or, in systemctl edit fobots: [Service] "
+                f"AmbientCapabilities=CAP_DAC_READ_SEARCH and "
+                f"CapabilityBoundingSet=CAP_DAC_READ_SEARCH (read everything, write nothing)")
+    missing = [g for g in need if g not in have]
+    if not missing:
         return None
-    if st.st_mode & 0o004 or (group == "adm" and st.st_mode & 0o040):
-        return None
-    return group
+    g = " ".join(missing)
+    return (f"is only readable through the group{'s' if len(missing) > 1 else ''} {g}, which "
+            f"the service lacks (it has: {' '.join(have) or 'none'}). Add it: systemctl edit "
+            f"fobots, then [Service] SupplementaryGroups={g} (added to the others), "
+            f"systemctl restart fobots. Check: runuser -u {SERVICE_USER} -g {missing[0]}"
+            + "".join(f" -G {x}" for x in missing[1:]) + f" -- head -1 {path}")
 
 
 def cmd_init(args):
@@ -601,6 +636,11 @@ def cmd_init(args):
     out = os.path.abspath(args.output)
     wl_path = args.welcome or os.path.join(os.path.dirname(out), "welcome.txt")
     welcome = welcome_additions(read_nets(wl_path), own_addresses(), admin_address())
+    have = service_groups()
+    for f in kept:
+        why = access_advice(f.path, have)
+        if why:
+            print(f"[!!] {printable(f.path)} {why}")
     if args.dry_run:
         print(f"\n--dry-run: nothing written. {out} would be:\n")
         print(text, end="")
@@ -631,11 +671,6 @@ def cmd_init(args):
         print(f"\nwritten: {out}" + (f" (previous one: {backup})" if backup else ""))
     for line in welcome:
         print(f"welcome list {wl_path}: + {line}")
-    for f in kept:
-        group = unreadable_by_service(f.path)
-        if group:
-            print(f"[!!] {f.path} belongs to group {group}, not readable by the service (group adm): "
-                  f"setfacl -m u:fobots:r {f.path}, or SupplementaryGroups={group} (systemctl edit fobots)")
     conf = "" if out == os.path.join(CONF_DIR, "fobots.conf") else f" -f {out}"
     print(f"""
 Next steps:

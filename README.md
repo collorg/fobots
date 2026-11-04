@@ -109,8 +109,11 @@ touches an existing configuration or welcome list. It:
    `fobots init` does, in observation mode; with `--log`, or when no log is found, from the
    example), the welcome list `/etc/fobots/welcome.txt` (with the addresses of the machine and of
    your SSH session), and the state directory `/var/lib/fobots` (0750, owned by `fobots`);
-5. installs the systemd unit, with the group that gives access to the log (detected,
-   otherwise `adm`; `--log-group` to force it), then runs `systemctl daemon-reload`;
+5. installs the systemd unit, with the groups that give access to the log: `adm`, plus those of
+   the directories crossed and of the file that only their group opens (e.g. `gitlab-www` for
+   `/var/log/gitlab/nginx` of GitLab Omnibus; `--log-group` to force one), then runs
+   `systemctl daemon-reload`. `fobots init` computes the same and says which group to add to a
+   unit already installed;
 6. checks that the `fobots` user can read the log, and says what to do if not.
 
 The service is **neither enabled nor started** by default: check the configuration, fill in

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 # Copyright (C) 2026 Joël Maizi
 """Reading the logs: tail -F like following, and one thread per log."""
+import logging
 import os
 import queue
 import stat
@@ -8,22 +9,39 @@ import sys
 import threading
 import time
 
+log = logging.getLogger("fobots")
+
 
 def follow(path, from_start=False, poll=0.5, grace=2.0):
     """Like `tail -F`: follows the file through rotation and truncation.
 
     After a rename (logrotate `create`), the server still writes to the old file until it
     reopens it: we read it `grace` more seconds before moving to the new one, so as not
-    to lose any line."""
-    f, inode, buf, first, rotated_at = None, None, b"", True, None
+    to lose any line.
+
+    A file that cannot be opened is waited for, but said in the journal (once per kind of
+    error): a log the service may not read (a parent directory in 0700, as /var/log/gitlab/*
+    of GitLab Omnibus) must not look like a quiet site."""
+    f, inode, buf, first, rotated_at, failed = None, None, b"", True, None, None
     while True:
         if f is None:
             try:
                 f = open(path, "rb")
-            except OSError:
+            except OSError as e:
+                if type(e) is not failed:
+                    failed = type(e)
+                    if isinstance(e, FileNotFoundError):
+                        log.warning("%s does not exist (yet): waiting for it", path)
+                    else:
+                        log.error("cannot read %s: %s; nothing is counted until it can be "
+                                  "(fobots init --dry-run says which group to give the service)",
+                                  path, e.strerror or e)
                 first = False  # the file will appear later: we will read it entirely
                 time.sleep(poll)
                 continue
+            if failed is not None:
+                log.info("%s is readable now: following it", path)
+                failed = None
             inode = os.fstat(f.fileno()).st_ino
             if first and not from_start:
                 f.seek(0, os.SEEK_END)

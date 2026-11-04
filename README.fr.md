@@ -117,8 +117,11 @@ l'unité) et ne touche jamais une conf ou une liste welcome existantes. Elle :
    `fobots init`, en observation ; avec `--log`, ou si aucun log n'est trouvé, d'après
    l'exemple), la liste welcome `/etc/fobots/welcome.txt` (avec les adresses de la machine et
    de ta session SSH), le dossier d'état `/var/lib/fobots` (0750, propriété de `fobots`) ;
-5. installe l'unité systemd, avec le groupe qui donne accès au log (détecté, sinon `adm` ;
-   `--log-group` pour l'imposer), puis `systemctl daemon-reload` ;
+5. installe l'unité systemd, avec les groupes qui donnent accès au log : `adm`, plus ceux des
+   répertoires traversés et du fichier que seul leur groupe ouvre (par ex. `gitlab-www` pour
+   `/var/log/gitlab/nginx` de GitLab Omnibus ; `--log-group` pour en imposer un), puis
+   `systemctl daemon-reload`. `fobots init` calcule la même chose et dit quel groupe ajouter à
+   une unité déjà installée ;
 6. vérifie que l'utilisateur `fobots` peut lire le log, et dit quoi faire sinon.
 
 Le service n'est **ni activé ni démarré** par défaut : vérifier la conf, remplir la liste

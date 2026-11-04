@@ -5,6 +5,7 @@ import argparse
 import ipaddress
 import os
 import re
+import stat
 import tempfile
 from datetime import datetime
 from functools import lru_cache
@@ -103,3 +104,41 @@ def printable(s):
         return s
     return "".join(c if c.isprintable() else f"\\x{ord(c):02x}" if ord(c) < 256
                    else f"\\u{ord(c):04x}" for c in s)
+
+
+
+def log_access(path):
+    """What the service needs to read `path`: (groups, blocker). `groups`: the groups of the
+    directories crossed and of the file that only their group opens (GitLab Omnibus:
+    /var/log/gitlab/nginx in root:gitlab-www 0750); `blocker`: the first component that no
+    group opens (owner only, or group root), described, else None. OSError if the path cannot
+    be examined (missing)."""
+    import grp
+    import pwd
+    path = os.path.realpath(path)
+    parts, d = [], path
+    while True:
+        parts.append(d)
+        if os.path.dirname(d) == d:
+            break
+        d = os.path.dirname(d)
+    groups = []
+    for p in reversed(parts):
+        st = os.stat(p)
+        bit = 0o4 if p == path else 0o1  # the file is read, the directories crossed
+        if st.st_mode & bit:
+            continue
+        try:
+            group = grp.getgrgid(st.st_gid).gr_name
+        except KeyError:
+            group = str(st.st_gid)
+        if group == "root" or not st.st_mode & (bit << 3):
+            try:
+                owner = pwd.getpwuid(st.st_uid).pw_name
+            except KeyError:
+                owner = str(st.st_uid)
+            return groups, f"{p} ({stat.filemode(st.st_mode)} {owner}:{group})"
+        if group not in groups:
+            groups.append(group)
+    return groups, None
+

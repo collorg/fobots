@@ -22,7 +22,7 @@ from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 from fobots.analyse import Analysis, average_rate, dir_key, report, short_agent, sustained_rate  # noqa: E402
-from fobots.cli import main, welcome_cmd  # noqa: E402
+from fobots.cli import access_advice, main, service_groups, welcome_cmd  # noqa: E402
 from fobots.config import CONF_KEYS, SITE_KEYS, find_config, load_config  # noqa: E402
 from fobots.detector import Detector  # noqa: E402
 from fobots.discover import admin_address, apache_logs, discover, nginx_logs, welcome_additions  # noqa: E402
@@ -38,7 +38,7 @@ from fobots.record import LogTail, Recorder, episodes, read_records, read_sys, r
 from fobots.record import report as record_report  # noqa: E402
 from fobots.sites import Site  # noqa: E402
 from fobots.traps import TrapLearner, shape  # noqa: E402
-from fobots.util import append_text, fmt_range, printable, parse_duration, parse_ts, prefix_of, range_nets, subtract, write_atomic  # noqa: E402
+from fobots.util import append_text, fmt_range, log_access, printable, parse_duration, parse_ts, prefix_of, range_nets, subtract, write_atomic  # noqa: E402
 from fobots.welcome import NO_WELCOME, Banner, Welcome, welcome_add  # noqa: E402
 
 # main() calls logging.basicConfig; with a handler already on the root logger it does nothing,
@@ -2279,6 +2279,61 @@ class Events(TmpDirCase):
         self.assertEqual(read_events(self.path("absent"), 0), [])
 
 
+class LogAccess(TmpDirCase):
+    """log_access walks from / to the log; the stats are simulated (the temporary directory
+    is itself in 0700)."""
+    GID = {0: "root", 4: "adm", 999: "gitlab-www"}
+
+    def check(self, tree, path="/var/log/gitlab/nginx/gitlab_access.log"):
+        def fake_stat(p):
+            mode, gid = tree.get(p, (0o40755, 0))
+            return os.stat_result((mode, 0, 0, 1, 0, gid, 0, 0, 0, 0))
+        with mock.patch("fobots.util.os.stat", fake_stat), \
+                mock.patch("fobots.util.os.path.realpath", lambda p: p), \
+                mock.patch("grp.getgrgid", lambda g: mock.Mock(gr_name=self.GID[g])):
+            return log_access(path)
+
+    def test_omnibus_directory_of_its_group(self):
+        groups, blocker = self.check({"/var/log/gitlab/nginx": (0o40750, 999),
+                                      "/var/log/gitlab/nginx/gitlab_access.log": (0o100644, 0)})
+        self.assertEqual((groups, blocker), (["gitlab-www"], None))
+
+    def test_debian_apache_log_of_adm(self):
+        self.assertEqual(self.check({"/var/log/apache2": (0o40750, 0),
+                                     "/var/log/apache2/a.log": (0o100640, 4)},
+                                    "/var/log/apache2/a.log")[1].split()[0], "/var/log/apache2")
+        self.assertEqual(self.check({"/var/log/apache2": (0o40755, 0),
+                                     "/var/log/apache2/a.log": (0o100640, 4)},
+                                    "/var/log/apache2/a.log"), (["adm"], None))
+
+    def test_owner_only_directory_is_a_blocker(self):
+        groups, blocker = self.check({"/var/log/gitlab/nginx": (0o40700, 999)})
+        self.assertEqual(groups, [])
+        self.assertTrue(blocker.startswith("/var/log/gitlab/nginx (drwx------"))
+
+    def test_advice_names_the_missing_group(self):
+        with mock.patch("fobots.cli.log_access", return_value=(["adm", "gitlab-www"], None)):
+            why = access_advice("/x.log", ["adm"])
+            self.assertIn("SupplementaryGroups=gitlab-www", why)
+            self.assertIn("runuser -u fobots -g gitlab-www -- head -1 /x.log", why)
+            self.assertIsNone(access_advice("/x.log", ["adm", "gitlab-www"]))
+        with mock.patch("fobots.cli.log_access", return_value=([], "/d (drwx------ root:root)")):
+            self.assertIn("CAP_DAC_READ_SEARCH", access_advice("/x.log", ["adm"]))
+
+    def test_service_groups_read_the_unit_and_its_drop_ins(self):
+        unit = self.path("fobots.service")
+        self.assertEqual(service_groups(unit), ["adm"])  # not installed: the example's
+        with open(unit, "w") as f:
+            f.write("[Service]\nSupplementaryGroups=adm\n")
+        os.mkdir(unit + ".d")
+        with open(os.path.join(unit + ".d", "override.conf"), "w") as f:
+            f.write("[Service]\nSupplementaryGroups=gitlab-www\n")
+        self.assertEqual(service_groups(unit), ["adm", "gitlab-www"])
+        with open(os.path.join(unit + ".d", "z.conf"), "w") as f:
+            f.write("[Service]\nSupplementaryGroups=\nSupplementaryGroups=www-data\n")
+        self.assertEqual(service_groups(unit), ["www-data"])
+
+
 class Follow(TmpDirCase):
     def setUp(self):
         super().setUp()
@@ -2310,6 +2365,19 @@ class Follow(TmpDirCase):
         with open(p, "a") as f:
             f.write("one\ntwo\n")
         self.assertEqual(self.wait(out, 2), ["one\n", "two\n"])
+
+    @unittest.skipIf(os.geteuid() == 0, "root reads everything")
+    def test_says_when_the_log_cannot_be_read(self):
+        p = self.write("a.log", "old\n")
+        os.chmod(p, 0)
+        with self.assertLogs("fobots", "ERROR") as cm:
+            out, t = self.collect(p, 1)
+            time.sleep(0.1)
+        self.assertIn("cannot read", cm.output[0])
+        os.chmod(p, 0o644)
+        with open(p, "a") as f:
+            f.write("new\n")
+        self.assertEqual(self.wait(out, 1), ["old\n"])  # opened late: read from the start
 
     def test_from_start(self):
         p = self.write("a.log", "old\n")
