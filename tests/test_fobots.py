@@ -2809,6 +2809,38 @@ class Discovery(DiscoveryTree):
         self.assertIn("conditional", found["/var/log/n/own.log"].notes[0])
         self.assertIn("$host", warnings[0])
 
+    def test_omnibus_internal_server_without_access_log_is_left_out(self):
+        log = self.write("gitlab_access.log", "")
+        conf = self.write("omnibus.conf",
+                          "http {\n"
+                          "  server { listen *:80; server_name gite.example.org;\n"
+                          f"    access_log {log} gitlab_access; }}\n"
+                          "  server { listen localhost:8060; server_name localhost;\n"
+                          "    location /nginx_status { stub_status; access_log off; } }\n"
+                          "  server { listen 8081; }\n"
+                          "}\n")
+        found = {f.path: f for f in nginx_logs(conf)}
+        self.assertEqual(sorted(found), sorted([log, "/var/log/nginx/access.log"]))
+        self.assertTrue(found["/var/log/nginx/access.log"].default)
+        self.assertFalse(found[log].default)
+        with mock.patch("fobots.discover.os.path.exists",
+                        lambda p: p != "/var/log/nginx/access.log" and os.path.lexists(p)):
+            reasons = {f.path: f.reason for f in discover((), (conf,))[0]}
+        self.assertIsNone(reasons[log])
+        self.assertIn("does not exist", reasons["/var/log/nginx/access.log"])
+
+    def test_loopback_listen(self):
+        from fobots.discover import loopback
+        for listen in ("127.0.0.1:8060", "localhost:8060", "localhost", "[::1]:80", "unix:/run/x.sock"):
+            self.assertTrue(loopback(listen), listen)
+        for listen in ("80", "*:80", "[::]:443", "0.0.0.0:80", "192.0.2.1:80", "gite.example.org:80"):
+            self.assertFalse(loopback(listen), listen)
+        conf = self.write("lo.conf", "http { access_log /var/log/lo.log;\n"
+                          "  server { listen 127.0.0.1:8060; } }\n")
+        with mock.patch("fobots.discover.sample", return_value={"lines": 0, "ok": 0, "public": 0,
+                                                                  "duration": 0, "error": None}):
+            self.assertIn("loopback", discover((), (conf,))[0][0].reason)
+
     def test_samples_decide_what_is_followed(self):
         self.tree()
         found, read, _ = discover((self.path("apache2/apache2.conf"),), (self.path("none.conf"),))

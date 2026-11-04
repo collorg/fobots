@@ -34,6 +34,8 @@ class Found:
     def __init__(self, server, path, where):
         self.server, self.path, self.where = server, path, where  # where: the directive (file:line)
         self.names, self.blocks, self.notes = [], [], []  # blocks: <VirtualHost *:443>…
+        self.default = False  # nginx: path of no access_log (compiled-in), not written in the conf
+        self.public = False   # nginx: one of its server blocks listens beyond the loopback
 
     def add_names(self, names):
         for n in names:
@@ -180,6 +182,23 @@ def nginx_tokens(path):
         yield word, text.count("\n", 0, m.start()) + 1
 
 
+def loopback(listen):
+    """Does this `listen` of nginx only accept the machine itself (127.0.0.1:8060, localhost,
+    [::1]:80, unix:…)? A port alone or *:80 listens on every address."""
+    if listen.startswith("unix:"):
+        return True
+    host = listen[1:listen.find("]")] if listen.startswith("[") else \
+        listen.rsplit(":", 1)[0] if ":" in listen else listen
+    if host.isdigit():
+        return False  # a port alone
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
 def nginx_logs(conf, warnings=None):
     """[Found] of an nginx configuration: the access_log of each server block, otherwise those of
     the http block, otherwise the compiled-in default. A log that cannot be followed (variable in
@@ -252,8 +271,14 @@ def nginx_logs(conf, warnings=None):
         for path, extra, where in logs:
             if not os.path.isabs(path):
                 path = os.path.join(root, path)
-            f = found.setdefault(path, Found("nginx", path, where))
+            f = found.get(path)
+            if f is None:
+                f = found[path] = Found("nginx", path, where)
+                f.default = path == NGINX_DEFAULT_LOG and not (s["own"] or http["own"])
+            elif s["own"] or http["own"]:
+                f.default = False  # also written explicitly by another block
             f.add_names(s["names"])
+            f.public = f.public or not s["listen"] or not all(map(loopback, s["listen"]))
             block = f"server {{listen {', '.join(s['listen']) or '80'}}}"
             if block not in f.blocks:
                 f.blocks.append(block)
@@ -350,6 +375,11 @@ def discover(apache_confs=APACHE_CONFS, nginx_confs=NGINX_CONFS):
     for f in found:
         f.info = sample(f.path)
         f.reason = verdict(f.info)
+        if f.reason is None and f.server == "nginx" and not f.public:
+            f.reason = "its server blocks only listen on the loopback (status page, internal service)"
+        if f.reason is None and f.default and not os.path.exists(f.path):
+            f.reason = (f"no access_log in these server blocks, and {f.path} (nginx's default "
+                        "path on Debian) does not exist: they probably log elsewhere or nothing")
     return found, read, warnings
 
 
