@@ -120,8 +120,8 @@ l'unité) et ne touche jamais une conf ou une liste welcome existantes. Elle :
 5. installe l'unité systemd, avec les groupes qui donnent accès au log : `adm`, plus ceux des
    répertoires traversés et du fichier que seul leur groupe ouvre (par ex. `gitlab-www` pour
    `/var/log/gitlab/nginx` de GitLab Omnibus ; `--log-group` pour en imposer un), puis
-   `systemctl daemon-reload`. `fobots init` calcule la même chose et dit quel groupe ajouter à
-   une unité déjà installée ;
+   `systemctl daemon-reload`. Un groupe que l'unité ne donne pas (celle du paquet, par ex.) va
+   dans le drop-in `fobots.service.d/log-access.conf`, que `fobots init` écrit aussi ;
 6. vérifie que l'utilisateur `fobots` peut lire le log, et dit quoi faire sinon.
 
 Le service n'est **ni activé ni démarré** par défaut : vérifier la conf, remplir la liste
@@ -159,6 +159,12 @@ Le paquet installe les mêmes fichiers que `install` (commande `/usr/sbin/fobots
 démarre pas le service. Il ne livre pas `/etc/fobots/fobots.conf` : `fobots init` l'écrit
 (l'exemple est dans `/usr/share/doc/fobots/fobots.conf.example`). Après la mise à jour d'un
 paquet plus ancien, la conf existante reste en place, intacte.
+L'unité du paquet (`/usr/lib/systemd/system/fobots.service`) ne donne que le groupe `adm`.
+Quand un log en demande un autre (GitLab Omnibus : `/var/log/gitlab/nginx` en
+`root:gitlab-www` 0750), `fobots init` (ou `fobots install`) l'ajoute dans le drop-in
+`/etc/systemd/system/fobots.service.d/log-access.conf`, calculé d'après les répertoires
+traversés, puis lance `systemctl daemon-reload` ; `systemctl restart fobots` le fait prendre à
+un service démarré.
 Une mise à jour relance seulement un service déjà démarré ; `purge` supprime
 `/var/lib/fobots` et l'utilisateur `fobots`.
 

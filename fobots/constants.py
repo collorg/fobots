@@ -18,4 +18,8 @@ BIN_PATH = "/usr/local/sbin/fobots"  # the command: the launcher, installed with
 
 UNIT_PATH = "/etc/systemd/system/fobots.service"
 
+PACKAGE_UNIT = "/usr/lib/systemd/system/fobots.service"  # the unit of the .deb package
+
+ACCESS_DROPIN = UNIT_PATH + ".d/log-access.conf"  # groups the logs need (init, install)
+
 SERVICE_USER = "fobots"

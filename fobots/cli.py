@@ -46,12 +46,13 @@ from datetime import datetime
 
 from .analyse import Analysis, report
 from .config import RUN_ONLY_KEYS, find_config, load_config
-from .constants import CONF_DIR, SERVICE_USER, STATE_DIR, UNIT_PATH
+from .constants import CONF_DIR, STATE_DIR
 from .discover import (APACHE_CONFS, NGINX_CONFS, admin_address, config_text, describe,
                        discover, own_addresses, welcome_additions)
 from .detector import OBSERVED_PREFIX6, OBSERVED_WIDE6, SCOPES, TRAP_SCOPES, Detector
 from .events import read_events, trim_events
 from .follow import log_lines, run_sites, stdin_is_feed
+from .access import blocker_advice, sync_dropin
 from .install import Installer
 from .load import (LOAD_DEFAULTS, SIGNALS, LoadMonitor, Probe, parse_probe_urls, read_load,
                    summarize)
@@ -65,7 +66,7 @@ from .sites import Site
 from .top import Top, norm_key
 from .top import report as top_report
 from .traps import MAX_VALUES, TrapLearner
-from .util import append_text, log_access, parse_duration, printable, write_atomic
+from .util import append_text, parse_duration, printable, write_atomic
 from .welcome import Banner, Welcome, welcome_add
 
 log = logging.getLogger("fobots")
@@ -571,53 +572,6 @@ def read_nets(path):
     return nets
 
 
-def service_groups(unit=UNIT_PATH):
-    """SupplementaryGroups of the installed unit and of its drop-ins (systemctl edit), in the
-    order systemd reads them (an empty assignment resets the list); adm, the one of the
-    example unit, if none is installed."""
-    files = [unit]
-    try:
-        files += sorted(os.path.join(unit + ".d", n) for n in os.listdir(unit + ".d")
-                        if n.endswith(".conf"))
-    except OSError:
-        pass
-    groups, seen = [], False
-    for p in files:
-        try:
-            with open(p) as f:
-                text = f.read()
-        except OSError:
-            continue
-        for m in re.finditer(r"(?m)^\s*SupplementaryGroups\s*=(.*)$", text):
-            seen, values = True, m.group(1).split()
-            groups = groups + [g for g in values if g not in groups] if values else []
-    return groups if seen else ["adm"]
-
-
-def access_advice(path, have):
-    """None if the service (groups `have`) may read the log, otherwise what to do: the
-    group(s) to add, computed from the directories crossed, or, if no group opens the way,
-    an ACL or the capability."""
-    try:
-        need, blocker = log_access(path)
-    except OSError:
-        return None  # missing: the daemon waits for it, and says so
-    if blocker:
-        return (f"is behind {blocker}, which no group opens: setfacl -m u:{SERVICE_USER}:x on "
-                f"that directory (r on a file), or, in systemctl edit fobots: [Service] "
-                f"AmbientCapabilities=CAP_DAC_READ_SEARCH and "
-                f"CapabilityBoundingSet=CAP_DAC_READ_SEARCH (read everything, write nothing)")
-    missing = [g for g in need if g not in have]
-    if not missing:
-        return None
-    g = " ".join(missing)
-    return (f"is only readable through the group{'s' if len(missing) > 1 else ''} {g}, which "
-            f"the service lacks (it has: {' '.join(have) or 'none'}). Add it: systemctl edit "
-            f"fobots, then [Service] SupplementaryGroups={g} (added to the others), "
-            f"systemctl restart fobots. Check: runuser -u {SERVICE_USER} -g {missing[0]}"
-            + "".join(f" -G {x}" for x in missing[1:]) + f" -- head -1 {path}")
-
-
 def cmd_init(args):
     apache, nginx = tuple(args.apache_conf or APACHE_CONFS), tuple(args.nginx_conf or NGINX_CONFS)
     found, read, warnings = discover(apache, nginx)
@@ -636,11 +590,17 @@ def cmd_init(args):
     out = os.path.abspath(args.output)
     wl_path = args.welcome or os.path.join(os.path.dirname(out), "welcome.txt")
     welcome = welcome_additions(read_nets(wl_path), own_addresses(), admin_address())
-    have = service_groups()
-    for f in kept:
-        why = access_advice(f.path, have)
-        if why:
-            print(f"[!!] {printable(f.path)} {why}")
+    # the groups the logs need, in a drop-in of the unit (only for the configuration the
+    # service reads: with -o elsewhere, init only says what it would do)
+    system = out == os.path.join(CONF_DIR, "fobots.conf")
+    try:
+        blocked = sync_dropin([f.path for f in kept], dry=args.dry_run or not system,
+                              say=lambda st, msg: print(f"[{st}] {msg}"))
+    except OSError as e:
+        print(f"[!!] cannot give the groups of the logs to the service: {e} (as root: sudo fobots init)")
+        blocked = []
+    for path, blocker in blocked:
+        print(f"[!!] {printable(path)} {blocker_advice(blocker)}")
     if args.dry_run:
         print(f"\n--dry-run: nothing written. {out} would be:\n")
         print(text, end="")
@@ -1221,6 +1181,8 @@ def main(argv=None):
         p.set_defaults(config=conf_path, **conf)  # command line > configuration > defaults
     args, extra = ap.parse_known_args(argv)
     fold_extra(ap, args, extra)
+    if args.cmd == "install" and args.log is not None and args.log == conf.get("log"):
+        args.log = None  # the configuration's, not an --log given: nothing to warn about
     if args.cmd == "run":  # not r.set_defaults: the subcommands share the actions of `common`
         args.dry_run = args.dry_run or run_only.get("dry_run", False)
         for name in ("tense_factor", "critical_factor"):

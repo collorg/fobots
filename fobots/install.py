@@ -9,7 +9,9 @@ import sys
 
 from .discover import (APACHE_CONFS, NGINX_CONFS, admin_address, config_text, discover,
                        own_addresses, welcome_additions)
-from .constants import BIN_PATH, CONF_DIR, INSTALL_DIR, SERVICE_USER, SRC_DIR, STATE_DIR, UNIT_PATH
+from .access import blocker_advice, service_groups, sync_dropin
+from .constants import (BIN_PATH, CONF_DIR, INSTALL_DIR, PACKAGE_UNIT, SERVICE_USER, SRC_DIR,
+                        STATE_DIR, UNIT_PATH)
 from .nft import Nft
 from .util import log_access
 
@@ -209,14 +211,23 @@ class Installer:
         self.ensure_dir(STATE_DIR, 0o750, (SERVICE_USER, SERVICE_USER))
         self.say("ok", f"state directory: {STATE_DIR}")
 
-        unit = re.sub(r"(?m)^SupplementaryGroups=.*$", f"SupplementaryGroups={' '.join(self.log_groups())}",
-                      self.template("fobots.service.example"))
-        if self.read(UNIT_PATH) == unit:
-            self.say("ok", f"systemd unit up to date: {UNIT_PATH}")
+        if not os.path.exists(os.path.join(SRC_DIR, "fobots.service.example")) \
+                and os.path.exists(self.path(PACKAGE_UNIT)):
+            # installed by the .deb: its unit stays, the groups the logs need go in a drop-in
+            self.say("ok", f"systemd unit of the package: {PACKAGE_UNIT}")
         else:
-            self.write(UNIT_PATH, unit, 0o644)
-            self.say("ok", f"systemd unit: {UNIT_PATH} (log access groups: {' '.join(self.log_groups())})")
-            self.run(["systemctl", "daemon-reload"])
+            unit = re.sub(r"(?m)^SupplementaryGroups=.*$",
+                          f"SupplementaryGroups={' '.join(self.log_groups())}",
+                          self.template("fobots.service.example"))
+            if self.read(UNIT_PATH) == unit:
+                self.say("ok", f"systemd unit up to date: {UNIT_PATH}")
+            else:
+                self.write(UNIT_PATH, unit, 0o644)
+                self.say("ok", f"systemd unit: {UNIT_PATH} (log access groups: {' '.join(self.log_groups())})")
+                self.run(["systemctl", "daemon-reload"])
+        if self.system or self.dry:  # not with --destdir: the drop-in concerns this system
+            for path, blocker in sync_dropin(self.log_paths(), dry=self.dry, say=self.say):
+                self.say("!!", f"{path} {blocker_advice(blocker)}")
 
     def discovered(self):
         """fobots.conf written from the Apache / nginx configuration (as `fobots init`), or None
@@ -242,7 +253,7 @@ class Installer:
             if not os.path.exists(log_file):
                 self.say("!!", f"{log_file} does not exist yet (the daemon will wait for it): check the path")
                 continue
-            groups = self.log_groups()  # those of the unit
+            groups = service_groups() or [SERVICE_USER]  # the unit and its drop-ins, written above
             r = self.run(["runuser", "-u", SERVICE_USER, "-g", groups[0]]
                          + [x for g in groups[1:] for x in ("-G", g)]
                          + ["--", "test", "-r", log_file], check=False)

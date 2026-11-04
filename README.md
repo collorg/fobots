@@ -112,8 +112,8 @@ touches an existing configuration or welcome list. It:
 5. installs the systemd unit, with the groups that give access to the log: `adm`, plus those of
    the directories crossed and of the file that only their group opens (e.g. `gitlab-www` for
    `/var/log/gitlab/nginx` of GitLab Omnibus; `--log-group` to force one), then runs
-   `systemctl daemon-reload`. `fobots init` computes the same and says which group to add to a
-   unit already installed;
+   `systemctl daemon-reload`. A group the unit lacks (e.g. that of the package) goes in the
+   drop-in `fobots.service.d/log-access.conf`, also written by `fobots init`;
 6. checks that the `fobots` user can read the log, and says what to do if not.
 
 The service is **neither enabled nor started** by default: check the configuration, fill in
@@ -152,6 +152,11 @@ The package installs the same files as `install` (command `/usr/sbin/fobots`, mo
 start the service. It does not ship `/etc/fobots/fobots.conf`: `fobots init` writes it (the
 example is in `/usr/share/doc/fobots/fobots.conf.example`). After an upgrade from an older
 package, the existing configuration stays in place, untouched.
+The unit of the package (`/usr/lib/systemd/system/fobots.service`) only gives the group `adm`.
+When a log needs another one (GitLab Omnibus: `/var/log/gitlab/nginx` in `root:gitlab-www`
+0750), `fobots init` (or `fobots install`) adds it in the drop-in
+`/etc/systemd/system/fobots.service.d/log-access.conf`, computed from the directories crossed,
+then runs `systemctl daemon-reload`; `systemctl restart fobots` makes a running service take it.
 An upgrade only restarts a service that is already running; `purge` removes
 `/var/lib/fobots` and the `fobots` user.
 

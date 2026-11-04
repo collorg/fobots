@@ -22,7 +22,8 @@ from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 from fobots.analyse import Analysis, average_rate, dir_key, report, short_agent, sustained_rate  # noqa: E402
-from fobots.cli import access_advice, main, service_groups, welcome_cmd  # noqa: E402
+from fobots.access import dropin_text, missing_groups, service_groups, sync_dropin  # noqa: E402
+from fobots.cli import main, welcome_cmd  # noqa: E402
 from fobots.config import CONF_KEYS, SITE_KEYS, find_config, load_config  # noqa: E402
 from fobots.detector import Detector  # noqa: E402
 from fobots.discover import admin_address, apache_logs, discover, nginx_logs, welcome_additions  # noqa: E402
@@ -2311,27 +2312,61 @@ class LogAccess(TmpDirCase):
         self.assertEqual(groups, [])
         self.assertTrue(blocker.startswith("/var/log/gitlab/nginx (drwx------"))
 
-    def test_advice_names_the_missing_group(self):
-        with mock.patch("fobots.cli.log_access", return_value=(["adm", "gitlab-www"], None)):
-            why = access_advice("/x.log", ["adm"])
-            self.assertIn("SupplementaryGroups=gitlab-www", why)
-            self.assertIn("runuser -u fobots -g gitlab-www -- head -1 /x.log", why)
-            self.assertIsNone(access_advice("/x.log", ["adm", "gitlab-www"]))
-        with mock.patch("fobots.cli.log_access", return_value=([], "/d (drwx------ root:root)")):
-            self.assertIn("CAP_DAC_READ_SEARCH", access_advice("/x.log", ["adm"]))
+    def test_missing_groups_and_blockers(self):
+        answers = {"/a.log": (["adm", "gitlab-www"], None), "/b.log": ([], "/d (drwx------ root:root)")}
+        with mock.patch("fobots.access.log_access", side_effect=lambda p: answers[p]):
+            self.assertEqual(missing_groups(["/a.log", "/b.log"], ["adm"]),
+                             (["gitlab-www"], [("/b.log", "/d (drwx------ root:root)")]))
+            self.assertEqual(missing_groups(["/a.log"], ["adm", "gitlab-www"])[0], [])
+
+    def units(self):
+        """(units, drop-in directory) of a fake system, with the package's unit."""
+        pkg = self.path("usr/fobots.service")
+        os.makedirs(os.path.dirname(pkg))
+        with open(pkg, "w") as f:
+            f.write("[Service]\nSupplementaryGroups=adm\n")
+        return (self.path("etc/fobots.service"), pkg), self.path("etc/fobots.service.d")
 
     def test_service_groups_read_the_unit_and_its_drop_ins(self):
-        unit = self.path("fobots.service")
-        self.assertEqual(service_groups(unit), ["adm"])  # not installed: the example's
-        with open(unit, "w") as f:
-            f.write("[Service]\nSupplementaryGroups=adm\n")
-        os.mkdir(unit + ".d")
-        with open(os.path.join(unit + ".d", "override.conf"), "w") as f:
+        self.assertEqual(service_groups((self.path("none"),), self.path("none.d")), ["adm"])
+        units, dropins = self.units()
+        self.assertEqual(service_groups(units, dropins), ["adm"])  # the package's unit
+        os.makedirs(dropins)
+        with open(os.path.join(dropins, "override.conf"), "w") as f:
             f.write("[Service]\nSupplementaryGroups=gitlab-www\n")
-        self.assertEqual(service_groups(unit), ["adm", "gitlab-www"])
-        with open(os.path.join(unit + ".d", "z.conf"), "w") as f:
+        self.assertEqual(service_groups(units, dropins), ["adm", "gitlab-www"])
+        self.assertEqual(service_groups(units, dropins, skip=os.path.join(dropins, "override.conf")),
+                         ["adm"])
+        with open(os.path.join(dropins, "z.conf"), "w") as f:
             f.write("[Service]\nSupplementaryGroups=\nSupplementaryGroups=www-data\n")
-        self.assertEqual(service_groups(unit), ["www-data"])
+        self.assertEqual(service_groups(units, dropins), ["www-data"])
+        with open(units[0], "w") as f:  # /etc wins over the package's
+            f.write("[Service]\nSupplementaryGroups=nginx\n")
+        os.remove(os.path.join(dropins, "z.conf"))
+        self.assertEqual(service_groups(units, dropins), ["nginx", "gitlab-www"])
+
+    def test_sync_dropin_writes_rewrites_and_deletes(self):
+        units, dropins = self.units()
+        ours = os.path.join(dropins, "log-access.conf")
+        need = {"/a.log": (["gitlab-www"], None)}
+        said = []
+
+        def sync(**kw):
+            with mock.patch("fobots.access.log_access", side_effect=lambda p: need[p]), \
+                    mock.patch("fobots.access.service_groups",
+                               lambda skip=None: service_groups(units, dropins, skip)):
+                return sync_dropin(["/a.log"], ours, say=lambda *m: said.append(m), reload=False, **kw)
+        sync(dry=True)
+        self.assertFalse(os.path.exists(ours))
+        self.assertIn("would write", said[-1][1])
+        sync()
+        with open(ours) as f:
+            self.assertEqual(f.read(), dropin_text(["gitlab-www"]))
+        sync()
+        self.assertIn("already given", said[-1][1])  # computed without our own drop-in
+        need["/a.log"] = (["adm"], None)  # the unit gives it: ours is no longer needed
+        sync()
+        self.assertFalse(os.path.exists(ours))
 
 
 class Follow(TmpDirCase):
@@ -2644,6 +2679,10 @@ class Commands(TmpDirCase):
             f.write("# mine\n")
         self.run_main("install", "--destdir", dest, "--yes")
         self.assertIn("# mine", self.read("root", "etc/fobots/fobots.conf"))
+        # the `log =` of the configuration read is not an --log given on the command line
+        rc, out, err = self.run_main("install", "--destdir", dest, "--yes",
+                                     "-f", os.path.join(dest, "etc/fobots/fobots.conf"))
+        self.assertNotIn("--log ignored", out)
 
     def test_traps_command_from_logs_and_snapshot(self):
         text = "".join(req(a, i, "/.env", 404) for i, a in enumerate(TrapLearning.IPS))
