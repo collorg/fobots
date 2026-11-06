@@ -302,6 +302,7 @@ class RdapFetch(unittest.TestCase):
 
     def test_answer(self):
         self.assertEqual(self.fetch("ok")[2], "ACME")
+        self.assertEqual(self.fetch("ok")[3:], (None, ""))  # no parent, no abuse contact
 
     def test_redirection_to_plain_http_is_refused(self):
         with self.assertRaisesRegex(RdapError, "non-HTTPS"):
@@ -612,11 +613,12 @@ class ParentRanges(DetectorBase):
     def test_ip_in_parent_gets_a_block_of_the_sub_assignment_size(self):
         s = RangeStore(None)
         child = rng("90.12.32.0", "90.12.39.255")  # /21
-        s.add(child, "IP2000-ADSL-BAS gestionip.ft@orange.com", self.ORANGE)
+        s.add(child, "IP2000-ADSL-BAS gestionip.ft@orange.com", self.ORANGE, "gestionip.ft@orange.com")
         self.assertEqual(s.find(ipaddress.ip_address("90.12.33.1")), child)
         r = s.find(ipaddress.ip_address("90.50.1.2"))
         self.assertEqual(r, rng("90.50.0.0", "90.50.7.255"))
-        self.assertEqual(s.name(r), "IP2000-ADSL-BAS gestionip.ft@orange.com")
+        self.assertEqual(s.name(r), "gestionip.ft@orange.com")  # the abuse contact, not the customer's name
+        self.assertEqual(s.name(child), "IP2000-ADSL-BAS gestionip.ft@orange.com")
         self.assertEqual(s.parent_of(r), self.ORANGE)
         self.assertIsNone(s.parent_of(child))
         self.assertIsNone(s.find(ipaddress.ip_address("90.72.0.1")))  # outside the parent
@@ -635,26 +637,26 @@ class ParentRanges(DetectorBase):
         child = rng("74.12.65.0", "74.12.65.255")
         s.add(child, "HSE-DYNAMIC")
         v = s.version
-        s.add(child, "HSE-DYNAMIC", self.BELL)  # parent learned later: the memos are stale
+        s.add(child, "HSE-DYNAMIC", self.BELL, "abuse@bellnexxia.net")  # parent learned later: the memos are stale
         self.assertEqual(s.version, v + 1)
-        s.add(child, "HSE-DYNAMIC", self.BELL)
+        s.add(child, "HSE-DYNAMIC", self.BELL, "abuse@bellnexxia.net")
         self.assertEqual(s.version, v + 1)
         back = RangeStore(p)
         self.assertEqual(back.ranges, (child,))
-        self.assertEqual(back.parents, {self.BELL: (24, "HSE-DYNAMIC")})
+        self.assertEqual(back.parents, {self.BELL: (24, "abuse@bellnexxia.net")})
         self.assertEqual(back.find(ipaddress.ip_address("74.15.213.195")),
                          rng("74.15.213.0", "74.15.213.255"))
 
     def test_resolver_records_the_parent(self):
         s = RangeStore(None)
         a = ipaddress.ip_address
-        fetch = mock.Mock(return_value=(a("74.12.65.0"), a("74.12.65.255"), "HSE-DYNAMIC",
-                                        (a("74.12.0.0"), a("74.15.255.255"))))
+        fetch = mock.Mock(return_value=(a("74.12.65.0"), a("74.12.65.255"), "HSE-DYNAMIC abuse@bellnexxia.net",
+                                        (a("74.12.0.0"), a("74.15.255.255")), "abuse@bellnexxia.net"))
         rd = Rdap(s, 0, 100, fetch=fetch)
         with self.assertLogs("fobots", "INFO") as cm:
             rd.resolve(a("74.12.65.41"), net("74.12.0.0/16"))
-        self.assertIn("-> 74.12.65.0/24 HSE-DYNAMIC (in 74.12.0.0/14)", cm.output[0])
-        self.assertEqual(s.parents, {self.BELL: (24, "HSE-DYNAMIC")})
+        self.assertIn("-> 74.12.65.0/24 HSE-DYNAMIC abuse@bellnexxia.net (in 74.12.0.0/14)", cm.output[0])
+        self.assertEqual(s.parents, {self.BELL: (24, "abuse@bellnexxia.net")})
         # a parent that fails the checks is left out, the range itself is kept
         fetch.return_value = (a("10.0.0.0"), a("10.0.0.255"), "X", (a("0.0.0.0"), a("255.255.255.255")))
         with self.assertLogs("fobots", "INFO"):
@@ -2622,7 +2624,7 @@ class Commands(TmpDirCase):
     def test_bans_shows_the_parent_of_a_deduced_block(self):
         cache = self.path("ranges.json")
         RangeStore(cache).add(rng("74.12.65.0", "74.12.65.255"), "HSE-DYNAMIC abuse@bellnexxia.net",
-                              rng("74.12.0.0", "74.15.255.255"))
+                              rng("74.12.0.0", "74.15.255.255"), "abuse@bellnexxia.net")
         rows = [(ipaddress.ip_network("74.15.213.0/26"), 3000), (ipaddress.ip_network("74.12.65.0/28"), 100)]
         with mock.patch("fobots.cli.Nft.elements",
                         lambda self, ver, scope="web": rows if ver == 4 and scope == "web" else []), \
@@ -2633,7 +2635,7 @@ class Commands(TmpDirCase):
         lines = out.splitlines()
         self.assertRegex(lines[0], r"^74\.12\.65\.0/28 +100 s left +web +HSE-DYNAMIC abuse@bellnexxia\.net$")
         self.assertRegex(lines[1], r"^74\.15\.213\.0/26 +3000 s left +web +"
-                                   r"\(in 74\.12\.0\.0/14\) HSE-DYNAMIC abuse@bellnexxia\.net$")
+                                   r"\(in 74\.12\.0\.0/14\) abuse@bellnexxia\.net$")
 
     def test_probe_report_command(self):
         path = self.write("rec.jsonl", json.dumps({"t": 1000.0, "kind": "base", "rt": 0.1, "level": 0,

@@ -43,7 +43,8 @@ Python 3.7+ standard (aucune dépendance), nftables, Linux.
    AFRINIC), celle-ci est gardée aussi : les autres IP de ce FAI ne demandent alors plus de
    requête RDAP, et sont comptées par blocs de la taille de la sous-attribution (jamais plus
    fins qu'un `/24`, `/48` en IPv6), donc aussi finement qu'avec une requête par bloc client.
-   `fobots bans` affiche un tel bloc avec `(in PARENT)`.
+   `fobots bans` affiche un tel bloc avec `(in PARENT)` et le seul contact abuse du FAI (le nom
+   de la sous-attribution est celui d'un client, pas du bloc).
 4. Le ban couvre les IP réellement vues dans l'allocation, regroupées, jamais l'allocation
    entière d'emblée : voir « Ban resserré » plus bas.
 5. Le ban est une transaction nft unique. Une plage déjà couverte par un ban plus

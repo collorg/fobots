@@ -114,8 +114,10 @@ class RangeStore:
         parent = self.parent_of(r)
         return self.parents[parent][1] if parent else ""
 
-    def add(self, r, name="", parent=None):
-        """Adds the range r given by RDAP, and its parent (the allocation of its ISP) if any."""
+    def add(self, r, name="", parent=None, parent_name=""):
+        """Adds the range r given by RDAP, and its parent (the allocation of its ISP) if any.
+        parent_name: what the blocks deduced in the parent are shown with, the abuse contact
+        only (the name of r is that of one customer of the ISP, not of the other blocks)."""
         with self._lock:
             new = r not in self.ranges
             new_parent = parent is not None and parent not in self.parents
@@ -124,7 +126,7 @@ class RangeStore:
             if new:
                 self.ranges = self.ranges + (r,)
             if new_parent:
-                self.parents[parent] = (unit_of(r[0], r), name)
+                self.parents[parent] = (unit_of(r[0], r), parent_name)
             if new or new_parent:
                 self.version += 1
             if name:
@@ -217,7 +219,8 @@ def fetch_rdap(ip):
             raise RdapError(f"answer larger than {MAX_ANSWER} bytes", retry=3600)
         data = json.loads(body)
         return (ipaddress.ip_address(data["startAddress"]),
-                ipaddress.ip_address(data["endAddress"]), label(data), parent_bounds(data))
+                ipaddress.ip_address(data["endAddress"]), label(data), parent_bounds(data),
+                printable(abuse_email(data))[:200])
     except urllib.error.HTTPError as e:
         e.close()  # it holds the response and its socket
         if e.code == 429:
@@ -283,7 +286,7 @@ class Rdap(threading.Thread):
                 raise RdapError(f"range too wide ({start}-{end})", retry=3600)
             r = (ver, int(start), int(end))
             parent = self.checked_parent(r, rest[1] if len(rest) > 1 else None)
-            self.store.add(r, name, parent)
+            self.store.add(r, name, parent, rest[2] if len(rest) > 2 else "")
             log.info("RDAP %s -> %s %s%s", addr, fmt_range(r), name,
                      f" (in {fmt_range(parent)})" if parent else "")
         except RdapError as e:

@@ -37,7 +37,8 @@ Plain Python 3.7+ (no dependencies), nftables, Linux.
    is kept too: the other IPs of that ISP then need no RDAP request, and are counted by
    blocks of the same size as the sub-assignment (never finer than a `/24`, `/48` in IPv6),
    so the counting stays as fine as with one request per customer block. `fobots bans`
-   shows such a block as `(in PARENT)`.
+   shows such a block as `(in PARENT)` with the abuse contact of the ISP only (the name of
+   the sub-assignment is that of one customer, not of the block).
 4. The ban covers the IPs actually seen inside the allocation, grouped, never the whole
    allocation at once: see "Tight bans" below.
 5. A ban is a single nft transaction. A range already covered by a wider ban is ignored; a
