@@ -757,6 +757,17 @@ class DetectorRate(DetectorBase):
         self.assertEqual(self.nft.banned(), [])
         self.assertEqual(self.rdap.requested[0][1], net("8.8.0.0/16"))
 
+    def test_rdap_only_for_a_sustained_excess(self):
+        self.detector([], threshold=5, sustain=5)
+        self.feed([f"8.8.1.{i}" for i in range(20)], 0)  # one visitor loading a page: a burst
+        self.feed(["8.8.1.1"] * 2, 1)
+        self.assertEqual(self.rdap.requested, [])
+        for sec in range(10, 14):  # 4 seconds above the threshold: not yet
+            self.feed([f"8.8.2.{i}" for i in range(6)], sec)
+        self.assertEqual(self.rdap.requested, [])
+        self.feed([f"8.8.2.{i}" for i in range(6)], 14)  # the 5th consecutive one
+        self.assertEqual([p for _, p in self.rdap.requested], [net("8.8.0.0/16")])
+
     def test_private_and_invalid_ips_are_ignored(self):
         self.detector([], threshold=1, prefix_threshold=1)
         self.feed(["10.0.0.1"] * 5 + ["192.168.1.1"] * 5, 0)

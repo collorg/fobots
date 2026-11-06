@@ -35,7 +35,8 @@ Python 3.7+ standard (aucune dépendance), nftables, Linux.
    `ban_time`.
 3. Les plages inconnues ne sont pas interrogées au hasard : RDAP n'est appelé
    (en tâche de fond) que pour un préfixe `/16` (`/32` en IPv6) qui dépasse déjà
-   `prefix_threshold` req/s, avec un budget horaire, un délai entre requêtes et
+   `prefix_threshold` req/s pendant `sustain` secondes consécutives (comme pour un ban : pas
+   pour un visiteur qui charge une page), avec un budget horaire, un délai entre requêtes et
    une pause sur HTTP 429. Les plages trouvées sont enregistrées sur disque
    (`ip_ranges.json`) et réutilisées.
    Quand la réponse est une sous-attribution d'un FAI (un `/24` client chez Bell, un `/21`
@@ -660,7 +661,7 @@ conf.** Voir `fobots.conf.example` pour toutes les clés :
 | `cache` | `<dir>/ip_ranges.json` | cache des plages RDAP |
 | `welcome` | `welcome.txt` à côté de la conf utilisée, sinon `/etc/fobots/` | plages à ne jamais bannir |
 | `threshold` | 5 | req/s d'une plage au-delà desquelles on bannit |
-| `prefix_threshold` | = `threshold` | req/s d'un `/16` non résolu qui autorisent RDAP |
+| `prefix_threshold` | = `threshold` | req/s d'un `/16` non résolu qui autorisent RDAP (pendant `sustain` s) |
 | `sustain`, `window` | 5, 60 | secondes consécutives au-dessus du seuil exigées ; fenêtre de suivi (s) |
 | `traps`, `trap_ban` | non, non | apprend les chemins pièges (404/403 demandés par beaucoup d'IP) et signale les IP qui en demandent `trap_hits` ; avec `trap_ban` elles sont bannies, sinon seulement journalisées ; voir `fobots traps` |
 | `trap_scope` | `web` | ports fermés à une IP bannie par les pièges : `web` (TCP 80/443, UDP 443) ou `all` (tous les ports, sauf pour les IP de `welcome.txt`) |

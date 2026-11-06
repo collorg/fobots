@@ -78,7 +78,7 @@ class Detector:
         self.track = max(window, slow_window if slow_threshold else 0)  # memory of the IPs seen
         self.store, self.banner, self.rdap = store, banner, rdap
         self.counts = defaultdict(dict)  # key -> {second: n}
-        self.over = defaultdict(set)     # range -> seconds above the threshold
+        self.over = defaultdict(set)     # range or /16 prefix -> seconds above the threshold
         self.hits = Counter()
         self.recent_ban = {}
         self.memo, self.memo_version = {}, store.version
@@ -347,16 +347,22 @@ class Detector:
             self.note_ip(ip, sec, key)
             if self.slow_threshold:
                 self.note_slow(key, sec, n, ip)
-            if n > self.threshold:
-                over = self.over[key]
-                over.add(sec)
-                over.intersection_update(range(sec - max(self.window, self.sustain) + 1, sec + 1))
-                # the excess must last `sustain` consecutive seconds (a legitimate burst,
-                # e.g. a page loading, is short)
-                if all(s in over for s in range(sec - self.sustain + 1, sec + 1)):
-                    self.trigger(key, sec, n, ip)
-        elif n > self.prefix_threshold:
+            # the excess must last `sustain` consecutive seconds (a legitimate burst, e.g. a
+            # page loading, is short)
+            if n > self.threshold and self.sustained(key, sec):
+                self.trigger(key, sec, n, ip)
+        elif n > self.prefix_threshold and self.sustained(key, sec):
+            # unknown range: RDAP only for an excess that would ban a known one, not for the
+            # burst of one visitor loading a page
             self.rdap.request(addr or ipaddress.ip_address(ip), key)
+
+    def sustained(self, key, sec):
+        """Notes that key is above its threshold at sec; True once it has been for `sustain`
+        consecutive seconds."""
+        over = self.over[key]
+        over.add(sec)
+        over.intersection_update(range(sec - max(self.window, self.sustain) + 1, sec + 1))
+        return all(s in over for s in range(sec - self.sustain + 1, sec + 1))
 
     def note_slow(self, key, sec, n, ip):
         """Counts the request in the range's window (buckets of SLOW_BUCKET s); bans if the

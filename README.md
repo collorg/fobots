@@ -29,7 +29,8 @@ Plain Python 3.7+ (no dependencies), nftables, Linux.
 2. Requests are counted per range and per second. When a range exceeds `threshold` req/s
    (for `sustain` consecutive seconds, 5 by default: a page load is a short burst), it is banned for `ban_time`.
 3. Unknown ranges are not looked up at random: RDAP is only called (in the background) for a
-   `/16` prefix (`/32` in IPv6) that already exceeds `prefix_threshold` req/s, with an hourly
+   `/16` prefix (`/32` in IPv6) that already exceeds `prefix_threshold` req/s for `sustain`
+   consecutive seconds (as a ban would: not for a visitor loading a page), with an hourly
    budget, a delay between requests and a pause on HTTP 429. The ranges found are saved on
    disk (`ip_ranges.json`) and reused.
    When the answer is a sub-assignment of an ISP (a customer `/24` of Bell, a `/21` of Orange…)
@@ -633,7 +634,7 @@ the configuration file. **The command line overrides the configuration.** See
 | `cache` | `<dir>/ip_ranges.json` | RDAP range cache |
 | `welcome` | `welcome.txt` next to the configuration used, otherwise `/etc/fobots/` | ranges never to ban |
 | `threshold` | 5 | req/s of a range above which it is banned |
-| `prefix_threshold` | = `threshold` | req/s of an unresolved `/16` that allow RDAP |
+| `prefix_threshold` | = `threshold` | req/s of an unresolved `/16` that allow RDAP (for `sustain` s) |
 | `sustain`, `window` | 5, 60 | consecutive seconds above the threshold required; tracking window (s) |
 | `traps`, `trap_ban` | no, no | learns trap paths (404/403 asked for by many IPs) and flags the IPs asking for `trap_hits`; with `trap_ban` they are banned, otherwise only logged; see `fobots traps` |
 | `trap_scope` | `web` | ports closed to an IP banned by the traps: `web` (TCP 80/443, UDP 443) or `all` (every port, except for the IPs of `welcome.txt`) |
