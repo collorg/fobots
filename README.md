@@ -605,7 +605,8 @@ from, and the daemon, `welcome`, `bans` and `watched` see the same files.
 | Modules | `/opt/fobots/fobots/` | the `fobots/` package, found by the command |
 
 **Permissions:** the daemon can run as a dedicated user with only the `CAP_NET_ADMIN`
-capability (see `fobots.service.example`). The administration commands (`setup`, `bans`,
+capability, and its memory is capped (`MemoryMax=512M`: killed and restarted rather than
+taking the machine down; see `fobots.service.example`). The administration commands (`setup`, `bans`,
 `watched`, `welcome add`) must be run **as root (`sudo`)**: they read or modify nft, and
 `welcome add` writes to `/etc/fobots/`.
 

@@ -632,7 +632,8 @@ lance une commande, et le démon, `welcome`, `bans` et `watched` voient les mêm
 | Modules | `/opt/fobots/fobots/` | le paquet `fobots/`, trouvé par la commande |
 
 **Droits :** le démon peut tourner sous un utilisateur dédié avec la seule capacité
-`CAP_NET_ADMIN` (voir `fobots.service.example`). Les commandes d'administration
+`CAP_NET_ADMIN`, et sa mémoire est plafonnée (`MemoryMax=512M` : tué puis relancé plutôt que
+d'entraîner la machine ; voir `fobots.service.example`). Les commandes d'administration
 (`setup`, `bans`, `watched`, `welcome add`) doivent s'exécuter **en root (`sudo`)** :
 elles lisent ou modifient nft, et `welcome add` écrit dans `/etc/fobots/`.
 

@@ -44,6 +44,13 @@ ExecReload=/usr/local/sbin/fobots setup -f /etc/fobots/fobots.conf
 Restart=on-failure
 RestartSec=5
 
+# Memory cap: the daemon (and the nft it runs) can never take the machine down with it. Beyond
+# MemoryMax the kernel kills it (journal: "oom-kill"), then Restart= starts it again; the bans
+# stay in nft. MemorySwapMax=0: killed at once rather than slowed down by swapping. Usage:
+# `systemctl status fobots` (Memory: line); raise the cap if it gets close.
+MemoryMax=512M
+MemorySwapMax=0
+
 # nft only needs CAP_NET_ADMIN; there is no need to be root.
 AmbientCapabilities=CAP_NET_ADMIN
 CapabilityBoundingSet=CAP_NET_ADMIN

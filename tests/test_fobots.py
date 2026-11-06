@@ -2663,6 +2663,7 @@ class Commands(TmpDirCase):
         self.assertIn("log = /var/log/x.log", conf)
         unit = self.read("root", "etc/systemd/system/fobots.service")
         self.assertIn("ExecStart=/usr/local/sbin/fobots run -f /etc/fobots/fobots.conf", unit)
+        self.assertIn("MemoryMax=", unit)  # a memory cap: the daemon never takes the machine down
         command = os.path.join(dest, "usr/local/sbin/fobots")  # the launcher, installed without .py
         self.assertTrue(os.access(command, os.X_OK))
         self.assertFalse(os.path.exists(os.path.join(dest, "opt/fobots/fobots.py")))
