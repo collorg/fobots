@@ -33,7 +33,7 @@ from fobots.follow import follow  # noqa: E402
 from fobots.grouping import cluster_ips, pick_groups, wide_blocks  # noqa: E402
 from fobots.load import LoadMonitor, Probe, parse_probe_urls, read_psi, summarize  # noqa: E402
 from fobots.nft import NFT_SETUP, Nft, NftError, parse_elems, val_nets  # noqa: E402
-from fobots.rdap import MAX_PAUSE, RdapError, fetch_rdap, label, RangeStore  # noqa: E402
+from fobots.rdap import MAX_PAUSE, Rdap, RdapError, fetch_rdap, label, parent_bounds, RangeStore  # noqa: E402
 from fobots.replay import Replay, make_fetcher, parse_rates, read_requests, schedule, select_requests  # noqa: E402
 from fobots.replay import report as replay_report  # noqa: E402
 from fobots.record import LogTail, Recorder, episodes, read_records, read_sys, recorded_span, scan_procs  # noqa: E402
@@ -560,6 +560,116 @@ class DetectorBase(TmpDirCase):
     def feed(self, ips, sec):
         for a in ips:
             self.det.feed_line(line(a, sec))
+
+
+class ParentRanges(DetectorBase):
+    """The allocation of an ISP, given with a sub-assignment: the other IPs of the ISP resolve
+    without an RDAP request each, counted by blocks of the sub-assignment's size."""
+    BELL = rng("74.12.0.0", "74.15.255.255")       # ARIN: parent of the /24 HSE-DYNAMIC
+    ORANGE = rng("90.0.0.0", "90.71.255.255")      # RIPE: parent of the /21 IP2000-ADSL-BAS
+
+    def bounds(self, data):
+        b = parent_bounds(data)
+        return b and (b[0].version, int(b[0]), int(b[1]))
+
+    def test_parent_of_arin_answer_from_up_link(self):
+        data = {"type": "ASSIGNMENT", "parentHandle": "NET-74-12-0-0-1", "links": [
+            {"rel": "self", "href": "https://rdap.arin.net/registry/ip/74.12.65.0"},
+            {"rel": "up", "href": "https://rdap.arin.net/registry/ip/74.12.0.0/14"}]}
+        self.assertEqual(self.bounds(data), self.BELL)
+        v6 = {"links": [{"rel": "up", "href": "https://rdap.arin.net/registry/ip/2601::/20"}]}
+        self.assertEqual(self.bounds(v6), rng("2601::", "2601:fff:ffff:ffff:ffff:ffff:ffff:ffff"))
+
+    def test_parent_of_ripe_answer_from_parent_handle(self):
+        self.assertEqual(self.bounds({"type": "ASSIGNED PA", "parentHandle": "90.0.0.0 - 90.71.255.255"}),
+                         self.ORANGE)
+        self.assertEqual(self.bounds({"type": "ALLOCATED-BY-LIR", "parentHandle": "2a01:c000::/20"}),
+                         rng("2a01:c000::", "2a01:cfff:ffff:ffff:ffff:ffff:ffff:ffff"))
+
+    def test_no_parent_for_registry_grants_or_unknown(self):
+        for data in ({"type": "ALLOCATED PA", "parentHandle": "0.0.0.0 - 255.255.255.255"},  # Free
+                     {"type": "ALLOCATED-BY-RIR", "parentHandle": "2a00::/11"},           # Orange v6
+                     {"type": "ASSIGNED PI", "parentHandle": "193.0.0.0 - 193.255.255.255"},
+                     {"type": "DIRECT ALLOCATION", "links": [
+                         {"rel": "up", "href": "https://rdap.arin.net/registry/ip/74.0.0.0/8"}]},
+                     {"type": "ASSIGNED PORTABLE"},                                        # APNIC
+                     {"type": "ASSIGNED", "parentHandle": "NET-1-2-3"},
+                     {"parentHandle": "1.2.3.0 - 2001:db8::"},
+                     {"links": [{"rel": "up", "href": "https://x.example/ip/not-an-ip"}], "parentHandle": 7}):
+            self.assertIsNone(parent_bounds(data), data)
+
+    def test_parent_is_checked_against_the_range(self):
+        child = rng("74.12.65.0", "74.12.65.255")
+        a = ipaddress.ip_address
+        self.assertEqual(Rdap.checked_parent(child, (a("74.12.0.0"), a("74.15.255.255"))), self.BELL)
+        for bounds in ((a("0.0.0.0"), a("255.255.255.255")),       # registry block, wider than /8
+                       (a("74.12.65.0"), a("74.12.65.255")),       # not wider than the range
+                       (a("74.13.0.0"), a("74.15.255.255")),       # does not contain it
+                       (a("2001:db8::"), a("2001:db8::ffff")),     # other family
+                       None):
+            self.assertIsNone(Rdap.checked_parent(child, bounds), bounds)
+
+    def test_ip_in_parent_gets_a_block_of_the_sub_assignment_size(self):
+        s = RangeStore(None)
+        child = rng("90.12.32.0", "90.12.39.255")  # /21
+        s.add(child, "IP2000-ADSL-BAS gestionip.ft@orange.com", self.ORANGE)
+        self.assertEqual(s.find(ipaddress.ip_address("90.12.33.1")), child)
+        r = s.find(ipaddress.ip_address("90.50.1.2"))
+        self.assertEqual(r, rng("90.50.0.0", "90.50.7.255"))
+        self.assertEqual(s.name(r), "IP2000-ADSL-BAS gestionip.ft@orange.com")
+        self.assertEqual(s.parent_of(r), self.ORANGE)
+        self.assertIsNone(s.parent_of(child))
+        self.assertIsNone(s.find(ipaddress.ip_address("90.72.0.1")))  # outside the parent
+
+    def test_blocks_are_never_finer_than_a_24_and_avoid_known_ranges(self):
+        s = RangeStore(None)
+        s.add(rng("81.2.69.160", "81.2.69.167"), "TINY", rng("81.2.64.0", "81.2.127.255"))  # a /29
+        self.assertEqual(s.find(ipaddress.ip_address("81.2.70.9")), rng("81.2.70.0", "81.2.70.255"))
+        # in the /24 of the known /29: the largest aligned block that leaves it out
+        self.assertEqual(s.find(ipaddress.ip_address("81.2.69.200")), rng("81.2.69.192", "81.2.69.255"))
+        self.assertEqual(s.find(ipaddress.ip_address("81.2.69.1")), rng("81.2.69.0", "81.2.69.127"))
+
+    def test_parent_persists_and_changes_the_version(self):
+        p = self.path("ranges.json")
+        s = RangeStore(p)
+        child = rng("74.12.65.0", "74.12.65.255")
+        s.add(child, "HSE-DYNAMIC")
+        v = s.version
+        s.add(child, "HSE-DYNAMIC", self.BELL)  # parent learned later: the memos are stale
+        self.assertEqual(s.version, v + 1)
+        s.add(child, "HSE-DYNAMIC", self.BELL)
+        self.assertEqual(s.version, v + 1)
+        back = RangeStore(p)
+        self.assertEqual(back.ranges, (child,))
+        self.assertEqual(back.parents, {self.BELL: (24, "HSE-DYNAMIC")})
+        self.assertEqual(back.find(ipaddress.ip_address("74.15.213.195")),
+                         rng("74.15.213.0", "74.15.213.255"))
+
+    def test_resolver_records_the_parent(self):
+        s = RangeStore(None)
+        a = ipaddress.ip_address
+        fetch = mock.Mock(return_value=(a("74.12.65.0"), a("74.12.65.255"), "HSE-DYNAMIC",
+                                        (a("74.12.0.0"), a("74.15.255.255"))))
+        rd = Rdap(s, 0, 100, fetch=fetch)
+        with self.assertLogs("fobots", "INFO") as cm:
+            rd.resolve(a("74.12.65.41"), net("74.12.0.0/16"))
+        self.assertIn("-> 74.12.65.0/24 HSE-DYNAMIC (in 74.12.0.0/14)", cm.output[0])
+        self.assertEqual(s.parents, {self.BELL: (24, "HSE-DYNAMIC")})
+        # a parent that fails the checks is left out, the range itself is kept
+        fetch.return_value = (a("10.0.0.0"), a("10.0.0.255"), "X", (a("0.0.0.0"), a("255.255.255.255")))
+        with self.assertLogs("fobots", "INFO"):
+            rd.resolve(a("10.0.0.1"), net("10.0.0.0/16"))
+        self.assertIn(rng("10.0.0.0", "10.0.0.255"), s.ranges)
+        self.assertEqual(len(s.parents), 1)
+
+    def test_other_ips_of_the_isp_need_no_rdap_request(self):
+        det = self.detector(threshold=5)
+        self.store.add(rng("74.12.65.0", "74.12.65.255"), "HSE-DYNAMIC", self.BELL)
+        for sec in range(3):
+            for i in range(10):
+                det.feed_line(line(f"74.15.213.{i}", sec))
+        self.assertEqual(self.rdap.requested, [])
+        self.assertIn(rng("74.15.213.0", "74.15.213.255"), det.counts)
 
 
 class DetectorRate(DetectorBase):
@@ -2508,6 +2618,22 @@ class Commands(TmpDirCase):
         lines = out.splitlines()
         self.assertRegex(lines[0], r"^10\.1\.0\.0/16 +3000 s left +web +ACME-NET$")
         self.assertRegex(lines[1], r"^10\.2\.3\.4/32 +500 s left +all ports +ACME-NET$")
+
+    def test_bans_shows_the_parent_of_a_deduced_block(self):
+        cache = self.path("ranges.json")
+        RangeStore(cache).add(rng("74.12.65.0", "74.12.65.255"), "HSE-DYNAMIC abuse@bellnexxia.net",
+                              rng("74.12.0.0", "74.15.255.255"))
+        rows = [(ipaddress.ip_network("74.15.213.0/26"), 3000), (ipaddress.ip_network("74.12.65.0/28"), 100)]
+        with mock.patch("fobots.cli.Nft.elements",
+                        lambda self, ver, scope="web": rows if ver == 4 and scope == "web" else []), \
+                mock.patch("fobots.cli.fetch_rdap") as fetch:
+            rc, out, _ = self.run_main("bans", "-c", cache)
+        self.assertEqual(rc, 0)
+        fetch.assert_not_called()  # the deduced block has the name of its parent
+        lines = out.splitlines()
+        self.assertRegex(lines[0], r"^74\.12\.65\.0/28 +100 s left +web +HSE-DYNAMIC abuse@bellnexxia\.net$")
+        self.assertRegex(lines[1], r"^74\.15\.213\.0/26 +3000 s left +web +"
+                                   r"\(in 74\.12\.0\.0/14\) HSE-DYNAMIC abuse@bellnexxia\.net$")
 
     def test_probe_report_command(self):
         path = self.write("rec.jsonl", json.dumps({"t": 1000.0, "kind": "base", "rt": 0.1, "level": 0,

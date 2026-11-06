@@ -67,7 +67,7 @@ from .sites import Site
 from .top import Top, norm_key
 from .top import report as top_report
 from .traps import MAX_VALUES, TrapLearner
-from .util import append_text, parse_duration, printable, write_atomic
+from .util import append_text, fmt_range, parse_duration, printable, write_atomic
 from .welcome import Banner, Welcome, welcome_add
 
 log = logging.getLogger("fobots")
@@ -312,14 +312,16 @@ def cmd_bans(args):
     names = []
     for n, _, _ in rows:
         r = store.find(n.network_address)
-        if r and args.lookup and not store.name(r):
+        parent = store.parent_of(r) if r else None
+        if r and args.lookup and not parent and not store.name(r):
             try:
-                _, _, name = fetch_rdap(str(n.network_address))
-                store.add(r, name)
+                store.add(r, fetch_rdap(str(n.network_address))[2])
                 time.sleep(1)  # RDAP politeness
             except (RdapError, ValueError) as e:
                 print(f"RDAP {n}: {e}", file=sys.stderr)
-        names.append(store.name(r) if r else "")
+        name = store.name(r) if r else ""
+        # a block deduced inside the allocation of its ISP (not given as such by RDAP)
+        names.append(f"(in {fmt_range(parent)}) {name}" if parent else name)
     for (n, exp, scope), name in zip(rows, names):
         left = "" if exp is None else f"{exp} s left"
         ports = "all ports" if scope == "all" else "web"

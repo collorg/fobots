@@ -32,6 +32,12 @@ Plain Python 3.7+ (no dependencies), nftables, Linux.
    `/16` prefix (`/32` in IPv6) that already exceeds `prefix_threshold` req/s, with an hourly
    budget, a delay between requests and a pause on HTTP 429. The ranges found are saved on
    disk (`ip_ranges.json`) and reused.
+   When the answer is a sub-assignment of an ISP (a customer `/24` of Bell, a `/21` of Orange…)
+   and the registry gives its parent (the ISP's allocation: ARIN, RIPE, AFRINIC), the parent
+   is kept too: the other IPs of that ISP then need no RDAP request, and are counted by
+   blocks of the same size as the sub-assignment (never finer than a `/24`, `/48` in IPv6),
+   so the counting stays as fine as with one request per customer block. `fobots bans`
+   shows such a block as `(in PARENT)`.
 4. The ban covers the IPs actually seen inside the allocation, grouped, never the whole
    allocation at once: see "Tight bans" below.
 5. A ban is a single nft transaction. A range already covered by a wider ban is ignored; a

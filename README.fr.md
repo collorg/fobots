@@ -38,6 +38,12 @@ Python 3.7+ standard (aucune dépendance), nftables, Linux.
    `prefix_threshold` req/s, avec un budget horaire, un délai entre requêtes et
    une pause sur HTTP 429. Les plages trouvées sont enregistrées sur disque
    (`ip_ranges.json`) et réutilisées.
+   Quand la réponse est une sous-attribution d'un FAI (un `/24` client chez Bell, un `/21`
+   chez Orange…) et que le registre donne sa plage parente (l'allocation du FAI : ARIN, RIPE,
+   AFRINIC), celle-ci est gardée aussi : les autres IP de ce FAI ne demandent alors plus de
+   requête RDAP, et sont comptées par blocs de la taille de la sous-attribution (jamais plus
+   fins qu'un `/24`, `/48` en IPv6), donc aussi finement qu'avec une requête par bloc client.
+   `fobots bans` affiche un tel bloc avec `(in PARENT)`.
 4. Le ban couvre les IP réellement vues dans l'allocation, regroupées, jamais l'allocation
    entière d'emblée : voir « Ban resserré » plus bas.
 5. Le ban est une transaction nft unique. Une plage déjà couverte par un ban plus
